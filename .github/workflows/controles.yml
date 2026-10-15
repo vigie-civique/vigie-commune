@@ -138,7 +138,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           # La version vient du champ `packageManager` du paquet.
           package_json_file: public/package.json
@@ -332,7 +332,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           # La version vient du champ `packageManager` du paquet.
           package_json_file: dashboard/package.json
@@ -397,7 +397,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           # La version vient du champ `packageManager` du paquet.
           package_json_file: public/package.json
