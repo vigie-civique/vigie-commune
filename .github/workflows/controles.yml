@@ -142,7 +142,7 @@ jobs:
         with:
           # La version vient du champ `packageManager` du paquet.
           package_json_file: public/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           # 22 et non 20 : le contrôle du dossier hors-ligne pilote Chrome par
           # CDP, et `WebSocket` n'est global qu'à partir de Node 22.
@@ -336,7 +336,7 @@ jobs:
         with:
           # La version vient du champ `packageManager` du paquet.
           package_json_file: dashboard/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: pnpm
@@ -401,7 +401,7 @@ jobs:
         with:
           # La version vient du champ `packageManager` du paquet.
           package_json_file: public/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - name: Python
