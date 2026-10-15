@@ -27,7 +27,7 @@ jobs:
         # proche de la machine de développement. Entre les deux, c'est vérifié.
         python: ["3.11", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -49,7 +49,7 @@ jobs:
     # client de test de FastAPI appelle l'application dans le même processus.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -82,7 +82,7 @@ jobs:
       matrix:
         python: ["3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -106,7 +106,7 @@ jobs:
     # moteur, sans avoir à lire un rapport de suite.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -121,7 +121,7 @@ jobs:
     # construira pas chez celui qui la reprend.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -137,7 +137,7 @@ jobs:
     # parcours qu'un dépôt fraîchement cloné doit pouvoir suivre.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
         with:
           # La version vient du champ `packageManager` du paquet.
@@ -331,7 +331,7 @@ jobs:
     # qu'au déploiement sur le serveur — là où le script revient en arrière.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
         with:
           # La version vient du champ `packageManager` du paquet.
@@ -364,7 +364,7 @@ jobs:
     # de Debian 12, où `listen … http2` n'est pas encore déprécié.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: nginx -t
         run: |
           mkdir -p /tmp/tls
@@ -393,7 +393,7 @@ jobs:
     # statiques, les outils de build ne sont pas servis.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
