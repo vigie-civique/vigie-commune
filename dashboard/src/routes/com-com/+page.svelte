@@ -1,0 +1,243 @@
+<script>
+  import { lienSur } from '#lib/liens.js'
+  import { COMMUNE, COMMUNE_DE, EPCI, EPCI_COURT, EPCI_NB_COMMUNES, L_EPCI, SITE_NOM } from '#lib/instance.js'
+  import { onMount } from 'svelte'
+  import { api } from '#lib/api.js'
+
+  // L'identifiant de l'intercommunalité était écrit en dur (`1645`) : un numéro
+  // de ligne de la base d'origine, qui désigne une entité quelconque ailleurs.
+  // Il est résolu par son nom au chargement, comme côté collecteurs.
+  let epciId = null
+
+  let entity   = null
+  let events   = []
+  let marches  = []
+  let loading  = true
+  let error    = ''
+  let activeTab = 'presentation'
+  let yearFilter = ''
+
+  onMount(async () => {
+    loading = true
+    try {
+      const pivots = await api.pivots()
+      epciId = pivots.epci
+      const [e, m] = await Promise.all([
+        api.entity(epciId),
+        api.marches({ acheteur: EPCI, limit: 200 }).catch(() => []),
+      ])
+      entity  = e
+      events  = Array.isArray(e.events) ? e.events : []
+      marches = Array.isArray(m) ? m : []
+    } catch(e) { error = e.message }
+    finally { loading = false }
+  })
+
+  $: delegues = entity?.relations?.filter(r =>
+    r.relation_type === 'élu_cc' || r.relation_type === 'délégué_cc'
+  ) ?? []
+
+  $: delibs = events.filter(ev =>
+    ev.type === 'deliberation' || ev.type === 'délibération' || ev.title?.toLowerCase().includes('délibér')
+  )
+
+  $: years = [...new Set(delibs.map(d => d.date?.slice(0,4)).filter(Boolean))].sort().reverse()
+
+  $: delibs_filtered = yearFilter ? delibs.filter(d => d.date?.startsWith(yearFilter)) : delibs
+
+  function fmtDate(d) { return d ? d.slice(0, 10) : '—' }
+  function fmtMontant(v) { return v != null ? Math.round(v).toLocaleString('fr-FR') + ' €' : '—' }
+
+  const TABS = [
+    { id: 'presentation', label: 'Présentation' },
+    { id: 'delegues',     label: `Délégués ${COMMUNE}` },
+    { id: 'deliberations',label: 'Délibérations' },
+    { id: 'marches',      label: 'Marchés' },
+  ]
+</script>
+
+<svelte:head><title>{EPCI} — {SITE_NOM}</title></svelte:head>
+
+<div class="comcom-page">
+  <div class="page-header">
+    <h1>Communauté de Communes</h1>
+    <span class="subtitle">{EPCI} ({EPCI_COURT})</span>
+  </div>
+
+  {#if error}<p class="err">{error}</p>{/if}
+
+  <nav class="tabs">
+    {#each TABS as t}
+      <button class:active={activeTab === t.id} on:click={() => activeTab = t.id}>
+        {t.label}
+        {#if t.id === 'delegues'}<span class="tc">{delegues.length}</span>{/if}
+        {#if t.id === 'deliberations'}<span class="tc">{delibs.length}</span>{/if}
+        {#if t.id === 'marches'}<span class="tc">{marches.length}</span>{/if}
+      </button>
+    {/each}
+  </nav>
+
+  {#if loading}
+    <p class="muted-center">Chargement…</p>
+  {:else}
+
+    {#if activeTab === 'presentation'}
+      <div class="cards-row">
+        <div class="info-card">
+          <div class="card-title">Présentation</div>
+          <p class="card-body">
+            {EPCI} ({EPCI_COURT}) est l'intercommunalité {COMMUNE_DE}.
+            Elle regroupe {entity?.membres?.length ?? EPCI_NB_COMMUNES} communes.
+          </p>
+          <dl>
+            <dt>SIREN</dt><dd>{entity?.siren ?? '—'}</dd>
+            <dt>Délégués {COMMUNE}</dt><dd>{delegues.length} élu(s)</dd>
+            <dt>Délibérations</dt><dd>{delibs.length} documentées</dd>
+            <dt>Marchés</dt><dd>{marches.length} référencés</dd>
+          </dl>
+          <a href="/entite/{epciId}" class="card-link">Voir la fiche entité →</a>
+        </div>
+        <div class="info-card">
+          <div class="card-title">{COMMUNE} dans {L_EPCI}</div>
+          <p class="card-body muted">
+            {COMMUNE} dispose de {delegues.length} délégué(s) au conseil communautaire.
+            Les délibérations documentées couvrent les marchés publics, budgets, projets
+            intercommunaux et subventions reçues.
+          </p>
+        </div>
+      </div>
+
+    {:else if activeTab === 'delegues'}
+      {#if !delegues.length}
+        <p class="muted-center">Aucun délégué documenté.</p>
+      {:else}
+        <table class="data-table">
+          <thead><tr><th>Nom</th><th>Rôle</th><th>Depuis</th><th>Jusqu'au</th></tr></thead>
+          <tbody>
+            {#each delegues as r}
+              <tr>
+                <td>
+                  {#if r.from_id !== epciId}{' '}
+                    <a href="/entite/{r.from_id}" class="ent-link">{r.from_name}</a>
+                  {' '}{:else}{' '}
+                    <a href="/entite/{r.to_id}"   class="ent-link">{r.to_name}</a>
+                  {' '}{/if}
+                </td>
+                <td><span class="rel-badge">{r.relation_type}</span></td>
+                <td class="muted">{fmtDate(r.since)}</td>
+                <td class="muted">{r.until ? fmtDate(r.until) : 'en cours'}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
+    {:else if activeTab === 'deliberations'}
+      <div class="filter-bar">
+        <label>Année :
+          <select bind:value={yearFilter}>
+            <option value="">Toutes ({delibs.length})</option>
+            {#each years as y}
+              <option value={y}>{y} ({delibs.filter(d => d.date?.startsWith(y)).length})</option>
+            {/each}
+          </select>
+        </label>
+      </div>
+      {#if !delibs_filtered.length}
+        <p class="muted-center">Aucune délibération.</p>
+      {:else}
+        <div class="timeline">
+          {#each delibs_filtered as d}
+            <div class="tl-item">
+              <div class="tl-date">{fmtDate(d.date)}</div>
+              <div class="tl-body">
+                <span class="tl-title">{d.title}</span>
+                {#if d.source_url}{' '}
+                  <a href={lienSur(d.source_url)} target="_blank" rel="noopener" class="tl-src">↗</a>
+                {' '}{/if}
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+    {:else if activeTab === 'marches'}
+      {#if !marches.length}
+        <p class="muted-center">Aucun marché référencé pour {L_EPCI}.</p>
+      {:else}
+        <table class="data-table">
+          <thead><tr><th>Objet</th><th>Titulaire</th><th>Montant</th><th>Date</th><th>Nature</th></tr></thead>
+          <tbody>
+            {#each marches as m}
+              <tr>
+                <td class="objet-cell">{m.objet ?? '—'}</td>
+                <td>
+                  {#if m.titulaire_id}{' '}
+                    <a href="/entite/{m.titulaire_id}" class="ent-link">{m.titulaire_nom}</a>
+                  {' '}{:else}{' '}
+                    <span class="muted">{m.titulaire_nom ?? '—'}</span>
+                  {' '}{/if}
+                </td>
+                <td class="montant">{fmtMontant(m.montant)}</td>
+                <td class="muted">{fmtDate(m.date_notif)}</td>
+                <td class="muted">{m.nature ?? '—'}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    {/if}
+
+  {/if}
+</div>
+
+<style>
+  .comcom-page { padding: 1.2rem; max-width: 1000px; overflow-y: auto; }
+  .page-header { margin-bottom: .8rem; }
+  h1 { font-size: 1.1rem; font-weight: 700; color: var(--texte); margin: 0; }
+  .subtitle { font-size: .8rem; color: var(--texte-doux); }
+
+  .tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--bordure); margin-bottom: 1rem; flex-wrap: wrap; }
+  .tabs button { padding: .35rem .7rem; font-size: .78rem; color: var(--texte-doux); border-bottom: 2px solid transparent;
+    background: none; border-radius: 4px 4px 0 0; display: flex; align-items: center; gap: .3rem; }
+  .tabs button.active { color: var(--lien); border-bottom-color: var(--lien); }
+  .tabs button:hover:not(.active) { color: var(--texte); }
+  .tc { font-size: .65rem; background: var(--surface-2); color: var(--texte-doux); border-radius: 999px; padding: 1px 4px; }
+
+  .cards-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px,1fr)); gap: .75rem; }
+  .info-card { background: var(--surface); border: 1px solid var(--bordure); border-radius: 6px; padding: .75rem 1rem; }
+  .card-title { font-size: .7rem; font-weight: 700; color: var(--texte-doux); text-transform: uppercase;
+    letter-spacing: .05em; margin-bottom: .5rem; }
+  .card-body { font-size: .78rem; color: var(--texte-doux); line-height: 1.5; margin-bottom: .5rem; }
+  .card-link { font-size: .77rem; color: var(--lien); }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: .2rem .75rem; font-size: .77rem; margin-bottom: .5rem; }
+  dt { color: var(--texte-doux); }
+  dd { color: var(--texte); }
+
+  .filter-bar { margin-bottom: .6rem; font-size: .77rem; color: var(--texte-doux); }
+  .filter-bar select { background: var(--surface); border: 1px solid var(--bordure); color: var(--texte);
+    border-radius: 4px; padding: .2rem .4rem; margin-left: .3rem; }
+
+  .timeline { display: flex; flex-direction: column; gap: 0; }
+  .tl-item { display: grid; grid-template-columns: 100px 1fr; gap: .5rem;
+    padding: .3rem 0; border-bottom: 1px solid var(--bordure-douce); font-size: .77rem; }
+  .tl-date { color: var(--texte-doux); white-space: nowrap; }
+  .tl-body { display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; }
+  .tl-title { color: var(--texte-2); flex: 1; }
+  .tl-src { font-size: .8rem; color: var(--lien); }
+
+  .data-table { width: 100%; border-collapse: collapse; font-size: .77rem; }
+  .data-table th { background: var(--surface); color: var(--texte-doux); font-size: .65rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .04em; padding: .4rem .6rem;
+    border-bottom: 1px solid var(--bordure); text-align: left; }
+  .data-table td { padding: .35rem .6rem; border-bottom: 1px solid var(--bordure-douce); color: var(--texte-2); }
+  .data-table tr:hover td { background: var(--surface); }
+  .ent-link { color: var(--info); }
+  .ent-link:hover { text-decoration: underline; }
+  .rel-badge { font-size: .67rem; background: var(--surface-2); padding: 1px 5px; border-radius: 3px; color: var(--texte-doux); }
+  .montant { font-weight: 700; color: var(--alerte); }
+  .muted { color: var(--texte-doux); }
+  .objet-cell { max-width: 280px; }
+  .err { color: var(--danger); font-size: .83rem; }
+  .muted-center { color: var(--texte-doux); text-align: center; margin-top: 2rem; }
+</style>

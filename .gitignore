@@ -1,0 +1,135 @@
+# ─── Données ─────────────────────────────────────────────────────────────────
+# Aucune donnée n'est versionnée ici : ni la base, ni le snapshot publié, ni les
+# fichiers nominatifs propres à une commune.
+db/*.db
+db/*.db-*
+# Les règles que la CI dérive de l'exemple, à côté de sa base (tests/amorcer_base_ci.py).
+db/*.regles.json
+public/static/data/
+# Le fond de carte est un artefact d'instance, produit par scripts/carte_fond.py
+# et borné à l'emprise de la commune : il n'appartient pas au moteur, pas plus
+# que le snapshot. Il arrive dans le site par le build, comme les données.
+public/static/carte/
+# Le snapshot publié, dans les deux emplacements où il atterrit : le site public
+# le lit dans public/static/data, l'atelier le sert depuis dashboard/static.
+# Seul le premier était ignoré — le second se serait retrouvé versionné au
+# premier `git add -A` d'une instance.
+dashboard/static/public_api/
+# La version PRÉCÉDENTE du snapshot, et la version NEUVE en cours d'écriture.
+# La publication en deux temps ne copie pas par-dessus le répertoire servi :
+# elle écrit à côté, contrôle, puis échange par deux renommages
+# (scripts/publication.py). Ces répertoires-là sont donc le mécanisme lui-même
+# — le retour arrière de `revenir_a_la_version_precedente` — et non des rebuts :
+# ne pas les supprimer, seulement les tenir hors du dépôt.
+#
+# `dashboard/static/public_api/` et `public/static/data/` étaient ignorés ; pas
+# leurs voisins `.public_api.precedent/` et `.data.precedent/`, 1 441 fichiers
+# et 18 Mo chacun, que le premier `git add -A` d'une instance aurait versionnés.
+# C'est le même défaut que celui noté juste au-dessus, d'un cran plus bas : une
+# règle écrite pour un chemin ne couvre pas ce que le code écrit À CÔTÉ.
+.*.precedent/
+.*.neuf/
+# Le transit de la publication : la version neuve y est amenée dans le montage
+# de sa destination le temps d'un renommage, puis le répertoire disparaît
+# (scripts/publication.py::_logement). Vide au repos ; ignoré au cas où un
+# plantage en laisserait des traces avant l'opération suivante.
+public/.bascule/
+dashboard/static/.bascule/
+public/static/docs/
+config/profils_locaux.json
+config/seed_local.json
+# Les dossiers sont le seul endroit du site où un humain écrit, et ils nomment
+# des personnes physiques. Ils n'étaient couverts par aucune règle : une
+# instance qui en rédigeait un le versionnait sans que rien ne l'en avertisse.
+config/dossiers_locaux.json
+# Les dossiers d'une instance, un markdown chacun (public/src/lib/dossiers.server.js) :
+# même règle, même raison. Barre de tête : `dossiers/` seul viserait aussi
+# public/src/routes/dossiers/, la page qui les affiche.
+/dossiers/
+# Les saisies de l'atelier : du travail humain, qui peut nommer des personnes
+# physiques (un acquéreur, un locataire de la commune). Elles se partagent par
+# l'export de décisions vers un dépôt PRIVÉ, jamais par le dépôt du moteur.
+config/saisies.json
+# Arbitrages d'entités : les fiches qu'un humain a décidé de garder
+# distinctes. Propre à une instance, comme seed_local.json.
+config/arbitrages_entites.json
+# Journal des corrections du site : propre à une instance (ses erreurs, ses
+# dates). Le moteur n'en versionne que l'exemple.
+config/journal_corrections.json
+# Temporaires d'écriture (nom unique) et verrou du fichier de saisies.
+config/saisies.json.*
+# Idem pour l'export lui-même, produit dans l'arborescence de l'instance.
+decisions/
+audits/
+.env
+
+# ─── Build ───────────────────────────────────────────────────────────────────
+node_modules/
+public/build/
+# Le même site construit en dossier remis (VIGIE_HORS_LIGNE=1), que la CI
+# éprouve dans un navigateur puis jette.
+public/build-hors-ligne/
+public/.svelte-kit/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Instance : le périmètre d'une commune n'a rien à faire dans le moteur.
+config/instance.json
+db/*.db
+db/*.db-wal
+db/*.db-shm
+data/
+# Ancré : sans la barre de tête, `territoire/` désignait N'IMPORTE QUEL
+# répertoire de ce nom, à n'importe quelle profondeur — dont
+# `public/src/routes/territoire/`, la page « Le territoire en chiffres ». Ses
+# deux fichiers étaient déjà suivis, donc rien n'a été perdu ; mais un fichier
+# NEUF y aurait été ignoré en silence. Ce qu'on veut ignorer, c'est le
+# répertoire d'instance à la racine (les GeoJSON du périmètre communal).
+/territoire/
+venv/
+public/static/data/
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.svelte-kit/
+# Écrits par l'amorçage et le générateur de libellés : ils décrivent une
+# commune. Le dépôt en livre les exemples.
+config/publication_rules.json
+# Et ses sauvegardes : chaque geste qui touche aux règles en dépose une copie
+# `…json.avant-<date>`, que la règle ci-dessus ne couvre pas.
+config/publication_rules.json.*
+public/src/lib/instance.js
+dashboard/src/lib/instance.js
+
+# L'archive du kit : reconstruite à la demande par scripts/build_kit.py, jamais
+# versionnée. Elle l'a été jusqu'au 15/08/2026, quand le dépôt était le seul
+# canal de distribution — une copie du dépôt à l'intérieur du dépôt, qui
+# dérivait de HEAD à chaque commit sans que personne ne la refasse.
+public/static/kit/
+
+# Sauvegardes de collecte (vigie_collecte.sh) et journaux d'exécution.
+db/*.db.*
+logs/
+
+# Le cache local de wrangler, écrit à chaque mise en ligne. Il porte l'identifiant
+# du compte Cloudflare et la liste des projets Pages : rien de secret, mais rien
+# qui appartienne au moteur non plus.
+.wrangler/
+
+# Le portail national est un dépôt à part (vigie-civique/portail). Un clone posé
+# ici n'appartient pas au moteur : sans cette règle, un `git add -A` y inscrirait
+# un gitlink sans .gitmodules — une référence que personne ne peut résoudre — et,
+# si son .git venait à disparaître, ses caches et son .env.local partiraient dans
+# ce dépôt public (la règle .env ci-dessus ne couvre pas .env.local).
+/portail-local/
+
+# ─── Installation sans ligne de commande ─────────────────────────────────────
+# Ce que l'installateur télécharge (Node, et un Python quand la machine n'en a
+# pas), et les fichiers à double-cliquer qu'il pose à la fin. Ce sont des
+# artefacts de MACHINE : ils diffèrent d'un système à l'autre, `.outils/` pèse
+# une centaine de mégaoctets, et le lanceur porte le chemin absolu du dossier.
+installateur/.outils/
+/Vigie Civique.command
+/Vigie Civique.sh
+/Vigie Civique.bat
+/Vigie Civique.desktop

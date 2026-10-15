@@ -1,0 +1,567 @@
+#!/usr/bin/env python3
+"""
+run_all.py — Orchestrateur principal des collecteurs.
+
+La commune sur laquelle il tourne vient de config/instance.json, lu par
+collectors.config. Rien ici ne doit la nommer, commentaires compris : un
+exemple écrit avec le nom d'une commune se lit vite comme une règle.
+
+Usage : python3 -m collectors.run_all [--step STEP] [--stats]
+
+Les steps DÉRIVÉS lisent ce que les autres ont écrit : `subventions` et
+`cm_flux` relisent le texte des séances, `perimetre` relit les rattachements.
+Une exécution complète les place après leurs sources, mais un rattrapage step
+par step ne le garantit pas : le 14/08/2026, `cm_flux` a tourné à 15 h 39 sur
+309 procès-verbaux, et la seconde passe de `cm` en a ajouté 636 à 16 h 06. Les
+subventions de 2020 à 2024 n'ont jamais été extraites, et le site publié en
+comptait 44 au lieu de 123. Après avoir rejoué un collecteur de documents,
+rejouer aussi les steps qui en dérivent.
+
+Ce que run_all ne fait PAS, et qui reste à lancer à la main :
+
+  url_finder      cherche les sites des entités et les dépose en `candidate`
+                  dans entity_websites. Une URL n'est utilisée qu'une fois
+                  validée dans l'atelier (/atelier/queue/websites) — d'où un
+                  step `web` qui ne trouve rien tant que personne n'a validé.
+  dgf_notifications  ingère un fichier exporté à la main du portail DGCL.
+  pappers         API payante : ne doit pas se déclencher toute seule.
+
+Les collecteurs RÉGIONAUX, eux, sont lancés par le step `region` : ils sont
+propres à une région, donc nommés par l'instance dans `config/instance.json`,
+clé `collecteurs_regionaux`. Sans déclaration, le step ne fait rien et le dit.
+"""
+import sys
+import time
+import argparse
+from pathlib import Path
+
+# Ajouter le parent au path pour les imports relatifs
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from collectors.config        import (COMMUNE_NAME, COMMUNES, COMMUNES_INSEE,
+                                      COMMUNES_CP, COMMUNES_ADRESSE,
+                                      COMMUNES_INSEE_ADRESSE, DB_PATH, STEP_META,
+                                      communes_du_step, cp_du_step,
+                                      registre_du_step)
+from collectors.db            import (init_db, get_conn, stats,
+                                      log_run_start, log_run_end)
+from collectors.osm           import import_osm
+from collectors.profiles      import import_profiles
+from collectors.cm_events     import import_cm_events
+from collectors.conseils      import (import_conseil_communautaire,
+                                      import_conseil_municipal,
+                                      import_pv_archives)
+from collectors.sirene        import import_sirene
+from collectors.rna           import import_rna
+from collectors.bodacc        import run as run_bodacc
+from collectors.dvf           import import_dvf
+from collectors.insee_social  import run as run_insee_social
+from collectors.georisques    import run as run_georisques
+from collectors.education     import run as run_education
+from collectors.raa_prefecture import run as run_raa
+from collectors.crc import run_crc
+from collectors.pop_culture   import run as run_pop_culture
+from collectors.rne          import run as run_rne
+from collectors.fiscalite    import run as run_fiscalite
+from collectors.urbanisme_sitadel import run as run_sitadel
+from collectors.plu           import run as run_plu
+from collectors.equipements   import run as run_equipements
+from collectors.dpe           import run as run_dpe
+from collectors.mobilite      import run as run_mobilite
+from collectors.sante         import run as run_sante
+from collectors.cadastre      import run as run_cadastre
+from collectors.hatvp         import run as run_hatvp
+from collectors.justice       import run as run_justice
+from collectors.elections    import run as run_elections
+from collectors.dirigeants_deports import run as run_dir_deports
+from collectors.dirigeants_web     import run as run_dir_web
+from collectors.events_scraper  import main as run_events_scraper
+from collectors.web_scraper    import main as run_web_scraper
+from collectors.marches_publics import main as run_marches_publics
+from collectors.banatic        import run as run_banatic
+from collectors.ofgl           import run as run_ofgl
+from collectors.budget         import run as run_budget
+from collectors.budgets_annexes import run as run_budgets_annexes
+from collectors.syndicats_comptes import run as run_syndicats
+from collectors.subventions_etat import run as run_subventions
+from collectors.dotations_investissement import run as run_dotations
+from collectors.subventions_ouvertes import run as run_subv_ouvertes
+from collectors.jaune_associations import run as run_jaune
+# main() de cm_finances lit sys.argv : appelé depuis ici, il tenterait de parser
+# les options de run_all. On prend la fonction qu'il enveloppe.
+from collectors.cm_finances    import run_subventions as _run_subv_cm
+from collectors.cm_finances    import run_baux as _run_baux
+
+
+def run_collecteurs_regionaux():
+    """Les collecteurs que l'instance déclare pour SA région.
+
+    Une région publie ses subventions sur son propre portail, avec son propre
+    schéma et sa propre adresse : il n'existe pas de collecteur régional
+    générique, et `occitanie_region` n'a de sens qu'en Occitanie. Il était donc
+    resté hors de `run_all` — et donc jamais lancé, jamais surveillé, jamais
+    dans le journal des collectes. Une instance nomme les siens dans
+    `config/instance.json`, clé `collecteurs_regionaux` ; le moteur ne connaît
+    que l'interface, comme pour les connecteurs de site.
+    """
+    import importlib
+
+    from collectors.config import COLLECTEURS_REGIONAUX
+
+    if not COLLECTEURS_REGIONAUX:
+        print("  Aucun collecteur régional déclaré "
+              "(config/instance.json, clé `collecteurs_regionaux`).")
+        return
+    for nom in COLLECTEURS_REGIONAUX:
+        # Le nom vient de la configuration : il désigne un module du paquet
+        # `collectors` et rien d'autre. Un chemin pointé importerait n'importe
+        # quoi depuis le disque.
+        if not nom.isidentifier():
+            raise ValueError(
+                f"collecteurs_regionaux : « {nom} » n'est pas un nom de module "
+                "du paquet collectors")
+        module = importlib.import_module(f"collectors.{nom}")
+        print(f"\n  → {nom}")
+        module.run()
+
+
+def run_cm_flux(commit: bool = True):
+    """Les deux flux que le texte des séances porte : subventions et loyers.
+
+    Les baux ne sont dans aucun registre — ils sont votés en conseil et
+    présentés en tableau dans le procès-verbal. Ils avaient été saisis à la
+    main sur l'instance d'origine, la délibération citée en source : la matière
+    était donc déjà collectée, seule l'extraction manquait.
+    """
+    _run_subv_cm(commit=commit)
+    _run_baux(commit=commit)
+from collectors.approbations   import run as run_approbations
+from collectors.budgets_votes  import run as run_budgets_votes
+from collectors.commissions    import run as run_commissions
+from collectors.qualite_eau    import run as run_qualite_eau
+from collectors.sispea         import run_sispea
+from collectors.eau_potable    import run as run_eau_potable
+from collectors.telecoms       import run as run_telecoms
+from collectors.dechets        import run as run_dechets
+from collectors.enfance        import run as run_enfance
+from collectors.incendie       import run as run_incendie
+from collectors.urbanisme      import run as run_urbanisme
+from collectors.saisies        import import_saisies
+from collectors.detect_links   import run as run_detect_links
+
+
+def run_origine():
+    """Classe les faits en institutionnel / verbatim / atelier.
+
+    Chargé par chemin, pour la même raison que `run_perimetre` ci-dessous.
+    Dérivé lui aussi : il ne collecte rien, il relit la `source` que les
+    collecteurs viennent d'écrire.
+    """
+    import importlib.util
+    chemin = Path(__file__).parent.parent / "scripts" / "classer_origine.py"
+    spec = importlib.util.spec_from_file_location("classer_origine", chemin)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.run()
+
+
+def run_perimetre():
+    """Classe les entités en C1/C2/C3/lien/hors — `scripts/classer_perimetre.py`.
+
+    Chargé par chemin et non par import : `scripts/` est un répertoire d'outils,
+    pas un paquet, et en faire un paquet pour cette seule ligne créerait un
+    cycle (le script importe collectors.config et collectors.db).
+
+    Ce step ferme la collecte. Il ne va chercher aucune donnée : il dérive de
+    ce que les collecteurs viennent d'écrire. Le laisser en dehors de run_all a
+    produit, le 14/08/2026, deux instances entièrement NULL dont le snapshot
+    publiait l'intercommunalité au lieu de la commune.
+    """
+    import importlib.util
+    chemin = Path(__file__).parent.parent / "scripts" / "classer_perimetre.py"
+    spec = importlib.util.spec_from_file_location("classer_perimetre", chemin)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.run()
+
+
+STEPS = {
+    "init":     ("Initialisation schéma",                lambda: init_db()),
+    "osm":      ("POIs OpenStreetMap",                   import_osm),
+    "profiles": ("Élus, candidats, entourage",            import_profiles),
+    # Deux entrées distinctes : `cm` lit les PV publiés par la mairie (source
+    # primaire, automatique), `seed` importe ce qui a été saisi à la main dans
+    # config/seed_local.json (subventions, baux). Les confondre revenait à
+    # faire dépendre la collecte des PV d'un fichier local à remplir.
+    "cm":       ("Procès-verbaux du conseil municipal (PDF)", import_conseil_municipal),
+    # Ce que le site NE SERT PLUS. Une refonte de site municipal efface les
+    # anciens comptes rendus ; l'archive du web les garde. Passe après `cm` :
+    # une date déjà tenue par une séance collectée sur le site n'est pas
+    # reprise, la pièce servie par la commune faisant foi sur une capture.
+    "cm_archive": ("Procès-verbaux disparus du site (web.archive.org)",
+                   import_pv_archives),
+    "seed":     ("Saisies locales : subventions, baux, transactions", import_cm_events),
+    # Ces quatre-là décrivent le TISSU d'une commune — ses entreprises, ses
+    # associations, ses ventes, ses annonces légales. Ils tournent donc à la
+    # profondeur `fond` (cf. config.PROFONDEUR_STEP) et non sur tout le
+    # périmètre : les étendre aux communes membres de l'intercommunalité
+    # produisait un annuaire où la commune de collecte était minoritaire.
+    #
+    # sirene et dvf sont ADRESSÉS : leur registre ajoute les communes déléguées
+    # — celles qu'une fusion a absorbées mais que les répertoires indexent
+    # toujours sous leur ancien code INSEE. Les oublier fait disparaître des
+    # établissements et des mutations d'un territoire.
+    "sirene":   ("Entreprises SIRENE ({})".format(
+                     ", ".join(communes_du_step("sirene", adresse=True))),
+                 lambda: [import_sirene(i, c["nom"]) for i, c
+                          in registre_du_step("sirene", adresse=True).items()]),
+    # RNA et BODACC interrogent par CODE POSTAL, qui ne délimite pas une
+    # commune : la collecte sur-remonte puis filtre sur le registre du step. Ne
+    # pas s'étonner du nombre d'enregistrements « hors périmètre ignorés » — sur
+    # le 81100 (aire de Castres), ils sont la règle plutôt que l'exception.
+    "rna":      ("Associations RNA/JO (CP {})".format(", ".join(cp_du_step("rna"))),
+                 lambda: [import_rna(cp) for cp in cp_du_step("rna")]),
+    "bodacc":   ("Annonces BODACC (CP {})".format(", ".join(cp_du_step("bodacc"))),
+                 lambda: [run_bodacc(cp=cp) for cp in cp_du_step("bodacc")]),
+    "dvf":      ("Transactions DVF ({})".format(
+                     ", ".join(communes_du_step("dvf", adresse=True))),
+                 lambda: [import_dvf(i)
+                          for i in communes_du_step("dvf", adresse=True)]),
+    "insee":    ("Indicateurs INSEE Melodi (périmètre)", run_insee_social),
+    # La base permanente des équipements, avec ses libellés — et la seule
+    # trajectoire que l'INSEE publie sous le département : celle de l'EPCI.
+    "equipements": ("Équipements et services (BPE)",   run_equipements),
+    # Agrégats seulement : le collecteur ne rapatrie aucune ligne de diagnostic,
+    # donc aucune adresse de logement.
+    "dpe":      ("État énergétique du parc (DPE, ADEME)", run_dpe),
+    "mobilite": ("Transport déclaré et dispositifs de l'État", run_mobilite),
+    # Les murs du soin — pharmacies, EHPAD, laboratoires. Les professionnels,
+    # eux, se comptent dans `equipements` (BPE, domaine D).
+    "sante":    ("Établissements de santé (FINESS)",  run_sante),
+    # Après `dvf` : il complète la position des mutations qui n'en avaient pas.
+    "cadastre": ("Parcellaire cadastral (Etalab)",     run_cadastre),
+    # L'obligation de déclarer, et son état. Ne rien trouver est le cas
+    # ordinaire sous 20 000 habitants, et c'est en soi une information.
+    "hatvp":    ("Déclarations d'intérêts (HATVP)",    run_hatvp),
+    # Les incréments récents seulement : le corpus entier (1,19 Go) se reprend
+    # à la main, `python3 -m collectors.justice --amorcer`.
+    "justice":  ("Décisions de justice administrative (JADE)", run_justice),
+    "georisques": ("Risques, ICPE, CATNAT (périmètre)", run_georisques),
+    # Écoles, collèges, lycées. Avec la mairie, le premier équipement public
+    # d'une commune rurale — et il manquait au répertoire, si bien qu'une
+    # délibération portant sur le groupe scolaire ne pouvait se rattacher à
+    # rien. Passe AVANT `origine` et `perimetre`, qui classent ce qui existe.
+    "education": ("Établissements scolaires (Éducation nationale)", run_education),
+    # Ce que l'annuaire ne dit pas : combien d'élèves, rentrée après rentrée,
+    # et où garder un enfant avant l'école. Lit les écoles que `education`
+    # vient de recenser — il passe donc après lui.
+    "enfance":  ("Élèves par école et accueil des moins de 3 ans (ministère, CAF)",
+                 run_enfance),
+    "raa":      ("RAA de la préfecture (année courante, incrémental)",
+                 lambda: run_raa(__import__("datetime").date.today().year)),
+    # L'audit officiel d'une collectivité, quand il existe : contradictoire,
+    # public, et la pièce la plus lourde qu'un dossier puisse contenir.
+    #
+    # Placé après `raa` — même famille, des documents publics sur l'institution
+    # plutôt que sur son tissu. Ne boucle sur aucune commune membre : il
+    # interroge LA commune et SON intercommunalité, et n'a donc pas de
+    # profondeur à régler dans PROFONDEUR_STEP.
+    #
+    # ⚠️ Ne rien trouver est le cas ORDINAIRE : sous 3 500 habitants une commune
+    # n'est presque jamais contrôlée, et c'est l'intercommunalité qui porte le
+    # rapport quand il y en a un.
+    "crc":      ("Rapports des chambres régionales des comptes", run_crc),
+    "patrimoine": ("Monuments historiques MH", run_pop_culture),
+    # Source AUTORITAIRE des mandats (DGCL). Sert de contrôle des affirmations
+    # tirées des sites municipaux, qui peuvent être périmés.
+    "rne":      ("Élus — Répertoire National des Élus (périmètre + délégués CC)", run_rne),
+    "fiscalite": ("Taux d'imposition locaux votés (périmètre)", run_fiscalite),
+    "sitadel":  ("Autorisations d'urbanisme Sitadel (périmètre)", run_sitadel),
+    "elections": ("Résultats électoraux (Ministère de l'intérieur)", run_elections),
+    # Dirigeants d'associations : absents de l'open data (RNA et JO ne les
+    # publient pas). Ces deux steps produisent des CANDIDATS à valider, jamais
+    # des relations directes.
+    "dir_deports": ("Dirigeants d'assos — déports du conseil", run_dir_deports),
+    "dir_web":     ("Dirigeants d'assos — sites web", run_dir_web),
+    "marches":  ("Marchés publics DECP + avis des sites", run_marches_publics),
+    "cc_epci":  ("Procès-verbaux du conseil communautaire",
+                 import_conseil_communautaire),
+    # Périmètre C2 : ce que l'EPCI exerce à la place de la commune.
+    # Source faisant foi sur le rattachement des délégués (le RNE se trompe).
+    "banatic":  ("Compétences, délégués et adhésions de l'EPCI (BANATIC)",
+                 run_banatic),
+    "events":   ("Vie locale (sites officiels)",          run_events_scraper),
+    "web":      ("Sites web entités locales",             run_web_scraper),
+    # ── Finances et environnement ────────────────────────────────────────────
+    # Ces six collecteurs existaient depuis longtemps et n'étaient appelés par
+    # personne : sur la v1 ils se lançaient à la main. Une commune amorcée à
+    # froid produisait donc une base sans budget, sans dotations et sans
+    # qualité de l'eau — un manque invisible tant qu'on n'a pas comparé à une
+    # base dont on connaissait le contenu (Lasalle, 14/08/2026).
+    #
+    # L'ordre compte : `subventions` lit ofgl_agregats et les délibérations,
+    # `cm_flux` lit le texte des séances. Tous deux passent donc après `ofgl`,
+    # `cm` et `events`.
+    "ofgl":     ("Agrégats financiers OFGL",              run_ofgl),
+    "budget":   ("Balances comptables DGFiP",             run_budget),
+    # Le détail de chaque budget annexe (dette, produits, charges) : l'OFGL n'en
+    # donne que la somme. Après `budget`, mêmes balances.
+    "budgets_annexes": ("Budgets annexes, un par un (balances DGFiP)",
+                        run_budgets_annexes),
+    # Les budgets des syndicats auxquels l'EPCI adhère — eau, déchets, rivières,
+    # énergie. Après `banatic`, qui les pose et donne leur SIREN.
+    "syndicats": ("Comptes des syndicats adhérents (balances DGFiP)",
+                  run_syndicats),
+    "subventions": ("Dotations et subventions de l'État", run_subventions),
+    # Ce que l'État a ACCORDÉ, opération par opération (DETR, DSIL, DSID, DPV,
+    # Fonds vert). À ne pas confondre avec `subventions` juste au-dessus, qui
+    # reconnaît dans les délibérations les demandes que la commune DÉPOSE : une
+    # demande n'est pas une attribution.
+    "dotations": ("Dotations d'investissement accordées (DGCL, Fonds vert)",
+                  run_dotations),
+    # Ce que les collectivités publient elles-mêmes, au schéma national des
+    # données essentielles de subvention. Zéro est une RÉPONSE : il dit que
+    # personne ne publie ici, ou que tout le monde en est exempté.
+    "subv_ouvertes": ("Conventions de subvention publiées (schéma SCDL)",
+                      run_subv_ouvertes),
+    # Ce que la RÉGION verse aux entités du territoire. Le collecteur est propre
+    # à la région, il est nommé dans l'instance — cf. run_collecteurs_regionaux.
+    "region":   ("Subventions régionales (collecteurs déclarés)",
+                 run_collecteurs_regionaux),
+    # Ce que l'ÉTAT verse aux associations du territoire, ligne à ligne : le
+    # jaune budgétaire « Effort financier de l'État en faveur des
+    # associations ». Après `rna` et `sirene`, dont il lit les identifiants.
+    "jaune":    ("Subventions de l'État aux associations (jaune budgétaire)",
+                 run_jaune),
+    "cm_flux":  ("Flux financiers extraits des séances",  lambda: run_cm_flux(commit=True)),
+    # `since=None` : reprise incrémentale depuis la dernière analyse connue.
+    "eau":      ("Qualité des cours d'eau (Hub'Eau)",     lambda: run_qualite_eau(None)),
+    # L'eau du ROBINET, à ne pas confondre avec la précédente : prix du mètre
+    # cube, rendement du réseau, conformité sanitaire. Deux sujets, deux steps,
+    # et deux titres qui le disent — c'est le constat JOU-5 de la contre-visite
+    # du 30/08, à l'échelle d'une instance.
+    "sispea":   ("Prix et performance de l'eau potable",  run_sispea),
+    # Le robinet encore, mais ce qui en SORT : les réseaux (UDI) qui desservent
+    # la commune et le contrôle sanitaire de l'ARS sur chacun. `sispea` donne un
+    # taux de conformité par an ; celui-ci donne chaque prélèvement, son
+    # maître d'ouvrage et son exploitant.
+    "eau_potable": ("Qualité de l'eau du robinet (Hub'Eau, contrôle ARS)",
+                    lambda: run_eau_potable(None)),
+    # Internet et téléphone : éligibilité par technologie, opérateur du réseau
+    # fibre et sa qualité, sites mobiles alentour et leurs pannes déclarées.
+    "telecoms": ("Fibre, mobile et pannes déclarées (ARCEP)", run_telecoms),
+    # Les déchets ménagers, à la maille de la collectivité qui les collecte :
+    # kilos par habitant, destinations, déchèteries, et de quoi les situer.
+    "dechets":  ("Déchets ménagers : collecte et destinations (SINOE, ADEME)", run_dechets),
+    # La forêt, ce qui y a brûlé, et les adresses tenues de débroussailler.
+    "incendie": ("Forêt, feux recensés et débroussaillement (IGN, BDIFF)", run_incendie),
+    # Le document d'urbanisme tel que le GPU le connaît — le registre où il se
+    # dépose, et où ce dépôt le rend opposable. À ne pas confondre avec
+    # `urbanisme` juste dessous, qui relit les séances : celui-ci constate,
+    # celui-là cite.
+    "plu":      ("Document d'urbanisme au Géoportail (GPU)", run_plu),
+    "urbanisme": ("Statut urbanistique et mentions PLU",  run_urbanisme),
+    # Dérivé, comme cm_flux : relit le texte des séances déjà collectées. Les
+    # compositions ne sortent d'aucun registre — elles ne sont publiées qu'après
+    # arbitrage dans l'atelier.
+    "commissions": ("Composition des commissions communales (PV)",
+                    run_commissions),
+    # Dérivé lui aussi : relit le texte des séances pour y trouver les plans de
+    # financement votés — de l'argent engagé qui n'est pas un marché attribué.
+    # Doit passer APRÈS `cm` et `cc_epci`, qui fournissent ce texte.
+    "approbations": ("Plans de financement votés (PV)",
+                     lambda: run_approbations(commit=True)),
+    # Même matière, autre lecture : les tableaux du budget primitif voté, que
+    # l'OFGL ne publiera que dix-huit mois plus tard. Sans ce step, la page du
+    # budget s'arrête à l'avant-dernier exercice — le lecteur ne voit pas le
+    # budget sur lequel le conseil vient de se prononcer.
+    "budgets_votes": ("Budgets primitifs votés (PV)",
+                      lambda: run_budgets_votes(commit=True)),
+    # Rejoue `config/saisies.json` — ce qu'un humain a écrit dans l'atelier.
+    # APRÈS les collecteurs, y compris celui des budgets votés : une saisie
+    # rectifie ce qu'une lecture automatique a mal lu, et rattache un flux à une
+    # entité que la collecte vient peut-être de créer. AVANT `origine` et
+    # `perimetre`, qui doivent classer ces lignes comme les autres.
+    "saisies":   ("Saisies de l'atelier (config/saisies.json)", import_saisies),
+    # Dérivé : rapproche ce que les autres ont écrit, et n'affirme RIEN — il
+    # pose des candidats dans `relation_candidates`, que l'atelier tranche
+    # (file « Liens présumés »). Après `saisies`, pour voir aussi ce qu'un
+    # humain vient d'ajouter.
+    #
+    # ⚠️ Ce module existait depuis des mois sans être appelé par quoi que ce
+    # soit. Câblé ici le 23/09/2026, mais sur ses seuls `SIGNAUX_PAR_DEFAUT` :
+    # joué entier, il posait 59 799 candidats sur les trois instances, dont
+    # 52 637 liens de famille présumés entre particuliers — cf. son en-tête.
+    "liens":     ("Rapprochements à trancher (doublons, élus-dirigeants)",
+                  lambda: run_detect_links()),
+    # Classe les faits par origine — institutionnel, verbatim, atelier. C'est
+    # cette colonne que l'API interroge avant d'autoriser une rectification :
+    # sans ce step, une base entière reste non classée, donc entièrement
+    # protégée contre la saisie, et l'atelier ne peut plus rien corriger.
+    "origine":   ("Classement des faits par origine", run_origine),
+    # DERNIER, et il doit le rester : il classe ce que tous les autres ont
+    # écrit. Sans lui, `entities.perimetre` reste NULL et aucune fiche n'est
+    # publiable — le snapshot refuse de se construire plutôt que de publier
+    # l'intercommunalité entière.
+    "perimetre": ("Classement C1/C2/C3/lien des entités collectées",
+                  run_perimetre),
+}
+
+
+def count_items(conn, name: str):
+    """Nombre d'items produits par ce collecteur, ou None si non mesurable."""
+    meta = STEP_META.get(name)
+    if not meta:
+        return None
+    _, _, table, where = meta
+    sql = f"SELECT COUNT(*) FROM {table}" + (f" WHERE {where}" if where else "")
+    try:
+        return conn.execute(sql).fetchone()[0]
+    except Exception:
+        return None
+
+
+# Ce que `run_step` ne journalise pas, et POURQUOI.
+SANS_JOURNAL = {
+    "init":  "pas un collecteur : crée le schéma dont le journal a besoin",
+    "liens": "se journalise lui-même — il compte ses candidats et se tait à blanc",
+}
+
+
+def run_step(name: str):
+    label, fn = STEPS[name]
+    print(f"\n{'='*60}")
+    print(f"  {name.upper()} — {label}")
+    print(f"{'='*60}")
+
+    # Journal collector_runs — c'est le seul moyen de détecter une source morte.
+    # Ouvert AVANT l'appel pour qu'un plantage laisse une trace 'error'.
+    # TOUS les steps, pas seulement ceux qui ont un rythme : `origine`,
+    # `saisies`, `approbations` et `budgets_votes` n'ont pas de TTL (ce sont des
+    # dérivés, cf. tests/test_collect_loop.py), et n'étaient donc jamais
+    # journalisés — leur échec ne laissait aucune trace datée. Sans entrée dans
+    # `STEP_META`, le décompte vaut None et la passe se clôt `ok` ou `error`.
+    conn = run_id = before = None
+    if name not in SANS_JOURNAL:
+        try:
+            conn = get_conn()
+            before = count_items(conn, name)
+            run_id = log_run_start(conn, name, before)
+        except Exception as e:      # le journal ne doit jamais bloquer la collecte
+            print(f"  ⚠ journal collector_runs indisponible : {e}")
+            conn = run_id = None
+
+    t0 = time.time()
+    status, err = "ok", None
+    try:
+        fn()
+    except KeyboardInterrupt:
+        # Le seul arrêt qui doit remonter : il est noté, puis il part.
+        status, err = "error", "KeyboardInterrupt: interrompu au clavier"
+        raise
+    except SystemExit as e:
+        # `SystemExit` n'est pas une `Exception` : un collecteur qui sortait
+        # ainsi était journalisé `ok` (donc `empty`), et emportait tous les
+        # steps suivants avec lui. Un code nul reste une fin normale.
+        if e.code not in (None, 0):
+            status, err = "error", f"SystemExit: {e.code}"
+    except BaseException as e:
+        status, err = "error", f"{type(e).__name__}: {e}"
+    finally:
+        elapsed = time.time() - t0
+        if conn is not None and run_id is not None:
+            try:
+                log_run_end(conn, run_id, status, count_items(conn, name), before, err)
+            except Exception as e:
+                print(f"  ⚠ clôture du journal échouée : {e}")
+            finally:
+                conn.close()
+        flag = "✓" if status == "ok" else "✗"
+        print(f"  {flag} {name} terminé en {elapsed:.1f}s"
+              + (f" — {err}" if err else ""))
+    return status, err
+
+
+def print_stats():
+    conn = get_conn()
+    s = stats(conn)
+    conn.close()
+    if not s:
+        print("Base vide.")
+        return
+    print(f"\n{'='*60}")
+    print(f"  STATISTIQUES — {DB_PATH.name}")
+    print(f"{'='*60}")
+    print(f"  Personnes        : {s.get('persons', 0):>6}")
+    print(f"  Entreprises      : {s.get('businesses', 0):>6}")
+    print(f"  Associations     : {s.get('associations', 0):>6}")
+    print(f"  Services publics : {s.get('services', 0):>6}")
+    print(f"  Lieux / POIs     : {s.get('places', 0):>6}")
+    print(f"  Relations        : {s.get('relations', 0):>6}")
+    print(f"  Événements       : {s.get('events', 0):>6}")
+    print(f"  Transactions DVF : {s.get('dvf_transactions', 0):>6}")
+    print(f"  Flux financiers  : {s.get('financial_flows', 0):>6}")
+    print(f"  Géolocalisés     : {s.get('geolocated', 0):>6}")
+    print(f"{'='*60}\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=f"{COMMUNE_NAME} OSINT — collecteurs")
+    parser.add_argument("--step", choices=list(STEPS.keys()),
+                        help="Exécuter un seul step")
+    parser.add_argument("--stats", action="store_true",
+                        help="Afficher les statistiques de la base")
+    parser.add_argument("--from-step", choices=list(STEPS.keys()),
+                        help="Reprendre depuis ce step")
+    args = parser.parse_args()
+
+    # Avant le premier appel réseau : les collecteurs ne parlent qu'à
+    # l'internet public (cf. collectors/reseau.py).
+    from collectors import reseau
+    reseau.garder()
+
+    if args.stats:
+        print_stats()
+        return
+
+    if args.step:
+        if args.step != "init":
+            init_db()
+        status, _ = run_step(args.step)
+        print_stats()
+        return 0 if status == "ok" else 1
+
+    # Run complet
+    steps = list(STEPS.keys())
+    if args.from_step:
+        idx = steps.index(args.from_step)
+        steps = steps[idx:]
+
+    print(f"\n  {COMMUNE_NAME.upper()} OSINT — collecte complète")
+    print(f"  {len(steps)} steps : {', '.join(steps)}")
+    t_total = time.time()
+
+    # Une source morte ne doit pas emporter les steps suivants : `marches` est le
+    # 20e sur 23, et un fichier DECP qui expire faisait perdre cc_epci, banatic,
+    # events et web. L'échec est retenu, affiché en fin de course, et rendu au
+    # shell par le code de sortie — collector_runs en garde la trace datée.
+    echecs: list[tuple[str, str]] = []
+    for step in steps:
+        status, err = run_step(step)
+        if status != "ok":
+            echecs.append((step, err or "?"))
+
+    print(f"\n  Collecte complète en {time.time()-t_total:.0f}s")
+    if echecs:
+        print(f"\n  {len(echecs)} step(s) en échec — la collecte est partielle :")
+        for step, err in echecs:
+            print(f"    ✗ {step:12} {err}")
+        print(f"\n  Rejouer les steps en échec :")
+        for step, _ in echecs:
+            print(f"    python3 -m collectors.run_all --step {step}")
+    print_stats()
+    return 1 if echecs else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

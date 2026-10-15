@@ -1,0 +1,1500 @@
+"""Le flux de publication en deux temps : aperçu, contrôle, publication.
+
+Ce que ces tests protègent tient en une phrase : **générer ne publie pas**.
+Avant le 22/08/2026, un seul bouton construisait par-dessus le répertoire servi
+puis synchronisait ; le contrôle d'étanchéité arrivait après l'écrasement, si
+bien qu'un refus laissait en place non pas « l'ancien », comme l'annonçait le
+message, mais le nouveau, non contrôlé.
+
+Le builder et le contrôleur ont chacun leur suite (`test_publication.py`,
+`test_verify_snapshot.py`) et leur épreuve de bout en bout (le job `site` de la
+CI, qui construit un vrai snapshot depuis une vraie base). Ici on éprouve
+l'ORCHESTRATION : quel répertoire est touché, à quel moment, et qui a le droit.
+Le builder et le contrôleur y sont donc des fonctions passées en argument — ce
+sont les points de contrôle du flux, pas son objet.
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(scope="module")
+def publication():
+    sys.path.insert(0, str(ROOT))
+    spec = importlib.util.spec_from_file_location(
+        "publication_sous_test", ROOT / "scripts" / "publication.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def emplacements(publication, tmp_path, monkeypatch):
+    """Les trois emplacements du flux, jetables.
+
+    Aucun test ne doit pouvoir écrire dans le vrai `dashboard/static/public_api` :
+    une suite qui publie pour de bon est une suite qu'on finit par ne plus lancer.
+    """
+    brouillon = tmp_path / "brouillon"
+    publie = tmp_path / "publie"
+    site = tmp_path / "site" / "public" / "static" / "data"
+    for d in (brouillon, publie, site):
+        d.mkdir(parents=True)
+    monkeypatch.setattr(publication, "BROUILLON", brouillon)
+    monkeypatch.setattr(publication, "PUBLIE", publie)
+    monkeypatch.setattr(publication, "SITE", site)
+    monkeypatch.setattr(publication, "ETAT", tmp_path / "etat.json")
+    monkeypatch.setattr(publication, "VERSIONS", tmp_path / "versions")
+    return {"brouillon": brouillon, "publie": publie, "site": site}
+
+
+def snapshot(dossier: Path, entites: list[int], marque: str = "neuf") -> dict:
+    """Un snapshot minimal mais réaliste : un index, des fiches, des stats."""
+    dossier.mkdir(parents=True, exist_ok=True)
+    (dossier / "entite").mkdir(exist_ok=True)
+    (dossier / "entities.json").write_text(json.dumps(
+        {"entities": [{"id": i, "name": f"Acteur {i}", "confidence": "verified"}
+                      for i in entites]}), encoding="utf-8")
+    stats = {"entities_public": len(entites), "marque": marque, "exclusions": {}}
+    (dossier / "stats.json").write_text(json.dumps(stats), encoding="utf-8")
+    for i in entites:
+        (dossier / "entite" / f"{i}.json").write_text(
+            json.dumps({"entity": {"id": i}}), encoding="utf-8")
+    return stats
+
+
+def builder(entites: list[int], marque: str = "neuf"):
+    return lambda out: snapshot(out, entites, marque)
+
+
+def controle(ok: bool, violations: int = 0) -> dict:
+    return {"ok": ok, "compte_erreurs": 0 if ok else violations,
+            "compte_avertissements": 0, "erreurs": [], "avertissements": [],
+            "fichiers": 3, "rapport": "OK" if ok else "ÉCHEC — ne pas publier."}
+
+
+def empreinte(dossier: Path) -> dict[str, str]:
+    return {str(f.relative_to(dossier)): f.read_text(encoding="utf-8")
+            for f in sorted(dossier.rglob("*")) if f.is_file()}
+
+
+# ── Générer un aperçu ne publie rien ─────────────────────────────────────────
+
+def test_apercu_n_ecrit_que_dans_le_brouillon(publication, emplacements):
+    """Le cœur du dispositif : après une génération, ce qui est servi est
+    exactement ce qui l'était avant — au fichier près, au contenu près."""
+    snapshot(emplacements["publie"], [1, 2], marque="en ligne")
+    snapshot(emplacements["site"], [1, 2], marque="en ligne")
+    avant_publie = empreinte(emplacements["publie"])
+    avant_site = empreinte(emplacements["site"])
+
+    publication.generer_apercu(auteur="essai",
+                               builder=builder([1, 2, 3], marque="brouillon"),
+                               controleur=lambda cible: controle(True))
+
+    assert empreinte(emplacements["publie"]) == avant_publie
+    assert empreinte(emplacements["site"]) == avant_site
+    brouillon = json.loads((emplacements["brouillon"] / "stats.json").read_text())
+    assert brouillon["marque"] == "brouillon" and brouillon["entities_public"] == 3
+
+
+def test_apercu_n_ecrit_rien_dans_le_depot(publication, emplacements):
+    """« Générer un aperçu » ne touche pas non plus au CODE du site.
+
+    Une première version régénérait au passage `public/src/lib/instance.js`,
+    les libellés de l'instance — hors du brouillon, dans le dépôt. La suite de
+    tests s'est mise à réécrire les fichiers du dépôt en tournant, ce qui a
+    signalé le vrai problème : une propriété assortie d'une exception n'est plus
+    une propriété, et « l'aperçu ne touche à rien » doit se vérifier partout.
+    """
+    surveilles = [ROOT / "public" / "src" / "lib", ROOT / "dashboard" / "src" / "lib"]
+    avant = {f: f.read_bytes() for d in surveilles for f in d.rglob("*.js")}
+
+    publication.generer_apercu(builder=builder([1, 2]),
+                               controleur=lambda cible: controle(True))
+
+    assert {f: f.read_bytes() for d in surveilles for f in d.rglob("*.js")} == avant
+
+
+def test_apercu_refuse_de_construire_dans_un_repertoire_servi(publication, emplacements):
+    """La garantie ne repose pas sur la bonne volonté de l'appelant."""
+    for servi in (emplacements["publie"], emplacements["site"]):
+        with pytest.raises(publication.PublicationRefusee):
+            publication.generer_apercu(cible=servi, builder=builder([1]),
+                                       controleur=lambda cible: controle(True))
+
+
+def test_apercu_rouge_reste_un_apercu(publication, emplacements):
+    """Un contrôle en échec ne fait pas échouer la génération : l'aperçu existe,
+    c'est son verdict qui est rouge — et c'est précisément ce qu'on voulait
+    pouvoir regarder avant de publier."""
+    resume = publication.generer_apercu(builder=builder([1]),
+                                        controleur=lambda cible: controle(False, 12))
+    assert resume["controle"]["ok"] is False
+    assert publication.etape(publication.lire_etat()) == "controles_en_echec"
+
+
+# ── Le contrôle commande la publication ──────────────────────────────────────
+
+def test_controle_rouge_bloque_la_publication(publication, emplacements):
+    snapshot(emplacements["publie"], [1], marque="en ligne")
+    avant = empreinte(emplacements["publie"])
+    publication.generer_apercu(builder=builder([1, 2], marque="brouillon"),
+                               controleur=lambda cible: controle(False, 3))
+
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.publier(auteur="admin@exemple", role="admin",
+                            controleur=lambda cible: controle(False, 3))
+
+    assert "rien n'a été publié" in str(refus.value).lower()
+    assert refus.value.detail["controle"]["compte_erreurs"] == 3
+    assert empreinte(emplacements["publie"]) == avant
+
+
+def test_controle_vert_autorise_la_publication_admin(publication, emplacements):
+    snapshot(emplacements["publie"], [1], marque="en ligne")
+    publication.generer_apercu(auteur="admin@exemple",
+                               builder=builder([1, 2, 3], marque="brouillon"),
+                               controleur=lambda cible: controle(True))
+
+    publie = publication.publier(auteur="admin@exemple", role="admin",
+                                 controleur=lambda cible: controle(True))
+
+    assert publie["publie_par"] == "admin@exemple"
+    assert publie["stats"]["marque"] == "brouillon"
+    assert publie["differences"] == {}          # une copie ne change rien
+    # Les deux emplacements servis portent le brouillon, à l'identique.
+    for servi in ("publie", "site"):
+        stats = json.loads((emplacements[servi] / "stats.json").read_text())
+        assert stats["entities_public"] == 3
+    # « Promu localement », pas « publié » : le build et la mise en ligne
+    # restent à faire, et l'atelier ne les fait pas.
+    assert publication.etape(publication.lire_etat()) == "promu_localement"
+
+
+def test_publier_retire_ce_qui_ne_doit_plus_sortir(publication, emplacements):
+    """Publier est un MIROIR. Une fiche retirée de la publication disparaît des
+    répertoires servis — c'est la fuite du 19/08/2026, où deux sites en ligne
+    servaient encore les fiches d'entités écartées par le filtre."""
+    snapshot(emplacements["publie"], [1, 2, 3], marque="en ligne")
+    snapshot(emplacements["site"], [1, 2, 3], marque="en ligne")
+    publication.generer_apercu(builder=builder([1], marque="brouillon"),
+                               controleur=lambda cible: controle(True))
+
+    publication.publier(auteur="admin@exemple", role="admin",
+                        controleur=lambda cible: controle(True))
+
+    for servi in ("publie", "site"):
+        restantes = sorted(f.name for f in (emplacements[servi] / "entite").glob("*.json"))
+        assert restantes == ["1.json"]
+
+
+def test_un_rebut_seme_par_le_finder_pendant_la_publication_ne_suit_pas_la_copie(
+        publication, emplacements):
+    """16/09/2026 : deux promotions de Lasalle refusées de suite. Le Finder
+    écrivait un `.DS_Store` dans le brouillon, puis dans `public_api` tout juste
+    promu, APRÈS leur contrôle — la copie l'emportait dans la version neuve, et
+    le contrôle de celle-ci la refusait. Le contrôle a raison de refuser ; c'est
+    la copie qui n'a pas à les emporter."""
+    rebuts = (".DS_Store", "._stats.json", "Thumbs.db")
+    snapshot(emplacements["publie"], [1], marque="en ligne")
+    publication.generer_apercu(builder=builder([1, 2], marque="brouillon"),
+                               controleur=lambda cible: controle(True))
+
+    def controleur_strict_puis_finder(cible):
+        cible = Path(cible)
+        propre = not any(f.name in rebuts for f in cible.rglob("*"))
+        # Le Finder passe juste après le contrôle, dans ce qui sera recopié.
+        for dossier in (cible, cible / "entite"):
+            for nom in rebuts:
+                (dossier / nom).write_bytes(b"\0")
+        return controle(propre)
+
+    publie = publication.publier(auteur="admin@exemple", role="admin",
+                                 controleur=controleur_strict_puis_finder)
+
+    assert publie["stats"]["marque"] == "brouillon"
+    for servi in ("publie", "site"):
+        stats = json.loads((emplacements[servi] / "stats.json").read_text())
+        assert stats["entities_public"] == 2
+
+
+def test_un_rebut_seme_dans_le_brouillon_avant_son_controle_ne_le_refuse_pas(
+        publication, emplacements):
+    """17/09/2026, Saillans : aperçu refusé pour un `.DS_Store` écrit dans le
+    brouillon entre sa construction et son contrôle — puis, au moment de
+    publier, rien n'empêchait qu'il y en ait un de nouveau."""
+    def controleur_strict(cible):
+        return controle(not any(f.name == ".DS_Store" for f in Path(cible).rglob("*")))
+
+    def builder_et_finder(out):
+        stats = snapshot(out, [1, 2], marque="brouillon")
+        (out / ".DS_Store").write_bytes(b"\0")
+        return stats
+
+    resume = publication.generer_apercu(builder=builder_et_finder,
+                                        controleur=controleur_strict)
+    assert resume["controle"]["ok"] is True
+
+    (emplacements["brouillon"] / "entite" / ".DS_Store").write_bytes(b"\0")
+    publication.publier(auteur="admin@exemple", role="admin",
+                        controleur=controleur_strict)
+
+
+def test_un_rebut_seme_apres_le_controle_ne_change_pas_lempreinte_servie(
+        publication, emplacements):
+    """17/09/2026, Saillans : le Finder a écrit dans la version neuve du SITE
+    seulement, entre son contrôle et le calcul de son empreinte. Le site en
+    ligne déclarait `5445a602…`, l'état attendait `35590bc5…`, et le constat
+    concluait à un déploiement manqué qui avait bien eu lieu."""
+    publication.generer_apercu(builder=builder([1, 2], marque="brouillon"),
+                               controleur=lambda cible: controle(True))
+
+    def controleur_puis_finder_cote_site(cible):
+        if Path(cible).name.startswith("data-"):
+            (Path(cible) / ".DS_Store").write_bytes(b"\0")
+        return controle(True)
+
+    publie = publication.publier(auteur="admin@exemple", role="admin",
+                                 controleur=controleur_puis_finder_cote_site)
+
+    declaree = {servi: json.loads(
+        (emplacements[servi] / publication.VERSION_SERVIE).read_text())["empreinte"]
+        for servi in ("publie", "site")}
+    assert declaree["site"] == declaree["publie"] == publie["empreinte"]
+
+
+def test_rsync_n_envoie_jamais_les_rebuts_et_retire_ceux_du_serveur(tmp_path):
+    """17/09/2026 : `/.DS_Store` servi en 200 à Saillans et à Brassac. Le
+    contrôle des fichiers cachés passait avant l'envoi, le Finder écrivait entre
+    les deux. Les options sont relues dans `publier-site.sh` et jouées pour de
+    bon : une option mal orthographiée passerait un test de texte."""
+    import shlex
+    import shutil
+    import subprocess
+
+    script = (ROOT / "deploy" / "publier-site.sh").read_text(encoding="utf-8")
+    appel = re.search(r"^\s*rsync (-az.*?)\"\$ROOT/public/build/\"", script, re.S | re.M)
+    assert appel, "appel rsync introuvable dans publier-site.sh"
+    options = [o for o in shlex.split(appel.group(1).replace("\\\n", " "))
+               if not o.startswith("${")]
+    assert "--delete-excluded" in options
+
+    if not shutil.which("rsync"):
+        pytest.skip("rsync absent")
+    src, dest = tmp_path / "build", tmp_path / "servi"
+    (src / "data").mkdir(parents=True)
+    (src / "index.html").write_text("ok")
+    for rebut in (".DS_Store", "data/.DS_Store", "data/._a.json", "Thumbs.db"):
+        (src / rebut).write_bytes(b"\0")
+    (dest / "data").mkdir(parents=True)
+    (dest / ".DS_Store").write_bytes(b"vieux")
+    (dest / "data" / ".DS_Store").write_bytes(b"vieux")
+
+    subprocess.run(["rsync", *options, f"{src}/", f"{dest}/"], check=True)
+
+    assert sorted(str(f.relative_to(dest)) for f in dest.rglob("*") if f.is_file()) \
+        == ["index.html"]
+
+
+def test_la_mise_en_ligne_ne_remplace_rien_avant_d_avoir_tout_recu(tmp_path):
+    """Les deux rsync écrivaient droit dans le répertoire servi : une liaison
+    coupée à mi-course laissait en ligne un mélange de deux versions. Avec
+    `--delay-updates --delete-delay`, rien ne change de place avant la fin du
+    transfert. Les options sont relues dans le script et jouées avec le rsync
+    de la machine — openrsync sur un Mac, rsync 3 en CI."""
+    import shlex
+    import shutil
+    import subprocess
+
+    script = (ROOT / "deploy" / "publier-site.sh").read_text(encoding="utf-8")
+    appels = re.findall(r"^\s*rsync (-(?:az|rlpt).*?)\"\$ROOT/public/build/\"", script, re.S | re.M)
+    assert len(appels) == 2, "les deux mises en ligne par rsync (ssh, locale) sont attendues"
+    for appel in appels:
+        options = [o for o in shlex.split(appel.replace("\\\n", " ")) if not o.startswith("${")]
+        assert {"--delay-updates", "--delete-delay"} <= set(options), options
+
+        if not shutil.which("rsync"):
+            continue
+        src, dest = tmp_path / options[0] / "build", tmp_path / options[0] / "servi"
+        (src / "data").mkdir(parents=True)
+        (src / "index.html").write_text("neuf")
+        (src / "data" / "stats.json").write_text('{"v": 2}')
+        (dest / "data").mkdir(parents=True)
+        (dest / "index.html").write_text("ancien")
+        (dest / "retiree.html").write_text("page retirée de la collecte")
+
+        subprocess.run(["rsync", *options, f"{src}/", f"{dest}/"], check=True)
+
+        assert sorted(str(f.relative_to(dest)) for f in dest.rglob("*")) \
+            == ["data", "data/stats.json", "index.html"], "ni reste d'attente, ni page retirée"
+        assert (dest / "index.html").read_text() == "neuf"
+
+
+def test_la_copie_locale_rend_le_site_lisible_par_un_autre_compte(tmp_path):
+    """Cible `local` : l'atelier sur serveur écrit avec un masque restrictif, et
+    le serveur web lit sous un autre compte. Sans `--chmod`, la copie réussit et
+    le site répond 403 partout. Les droits et les options sont relus dans le
+    script et joués, avec le rsync de la machine (celui de macOS n'est pas celui
+    du serveur)."""
+    import os
+    import shlex
+    import shutil
+    import subprocess
+
+    script = (ROOT / "deploy" / "publier-site.sh").read_text(encoding="utf-8")
+    appel = re.search(r"^\s*rsync (-rlpt.*?)\"\$ROOT/public/build/\"", script, re.S | re.M)
+    assert appel, "appel rsync de la cible locale introuvable dans publier-site.sh"
+    options = shlex.split(appel.group(1).replace("\\\n", " "))
+    assert "--delete-excluded" in options
+    droits = re.search(r"^\s*chmod -R (\S+) \"\$ROOT/public/build\"$", script, re.M)
+    assert droits, "les droits du build ne sont pas posés avant la copie locale"
+
+    if not shutil.which("rsync"):
+        pytest.skip("rsync absent")
+    src, dest = tmp_path / "build", tmp_path / "servi"
+    ancien = os.umask(0o027)
+    try:
+        (src / "data").mkdir(parents=True)
+        (src / "index.html").write_text("ok")
+        (src / "data" / "stats.json").write_text("{}")
+        (src / ".DS_Store").write_bytes(b"\0")
+    finally:
+        os.umask(ancien)
+    dest.mkdir()
+    (dest / "page-retiree.html").write_text("vieux")
+
+    assert (src / "index.html").stat().st_mode & 0o777 == 0o640     # le masque du service
+    subprocess.run(["chmod", "-R", droits.group(1), str(src)], check=True)
+    subprocess.run(["rsync", *options, f"{src}/", f"{dest}/"], check=True)
+
+    assert sorted(str(f.relative_to(dest)) for f in dest.rglob("*") if f.is_file()) \
+        == ["data/stats.json", "index.html"]
+    assert (dest / "index.html").stat().st_mode & 0o777 == 0o644
+    assert (dest / "data").stat().st_mode & 0o777 == 0o755
+
+
+def test_publier_sans_apercu_refuse(publication, emplacements):
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.publier(auteur="admin@exemple", role="admin")
+    assert "aucun aperçu" in str(refus.value).lower()
+
+
+# ── Qui publie ───────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("role", ["validator", "contributor", None, "", "Admin"])
+def test_non_admin_ne_publie_pas(publication, emplacements, role):
+    snapshot(emplacements["publie"], [1], marque="en ligne")
+    avant = empreinte(emplacements["publie"])
+    publication.generer_apercu(builder=builder([1, 2], marque="brouillon"),
+                               controleur=lambda cible: controle(True))
+
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.publier(auteur="quelquun", role=role,
+                            controleur=lambda cible: controle(True))
+
+    assert "admin" in str(refus.value).lower()
+    assert empreinte(emplacements["publie"]) == avant
+
+
+def test_le_role_est_declare_une_fois(publication):
+    """L'API lit cette liste, elle ne la redéfinit pas : un droit écrit à deux
+    endroits finit par diverger."""
+    assert publication.ROLES_QUI_PUBLIENT == frozenset({"admin"})
+    assert publication.peut_publier("admin") and not publication.peut_publier("validator")
+
+
+# ── L'aperçu montre bien le brouillon ────────────────────────────────────────
+
+@pytest.fixture
+def port_libre(publication, monkeypatch):
+    """Un numéro de port que personne n'occupe encore.
+
+    Réservé puis relâché : le flux refuse de démarrer sur un port qui répond
+    déjà, et un test qui garderait la socket ouverte éprouverait ce refus au
+    lieu du démarrage.
+    """
+    import socket
+    with socket.socket() as sonde:
+        sonde.bind(("127.0.0.1", 0))
+        port = sonde.getsockname()[1]
+    monkeypatch.setattr(publication, "APERCU_PORT", port)
+    return port
+
+
+class FauxVite:
+    """Un Vite qui écoute vraiment sur le port — ou qui vient de mourir.
+
+    Le flux n'annonce un aperçu qu'une fois le port joignable ; un faux
+    processus sans socket éprouverait l'inverse de ce qui est écrit.
+    """
+
+    def __init__(self, port=None, vivant=True):
+        import socket
+        self.vivant = vivant
+        self.socket = None
+        if vivant and port:
+            self.socket = socket.socket()
+            self.socket.bind(("127.0.0.1", port))
+            self.socket.listen(1)
+
+    def poll(self):
+        return None if self.vivant else 1
+
+    def terminate(self):
+        self.vivant = False
+        if self.socket:
+            self.socket.close()
+            self.socket = None
+
+    def wait(self, timeout=None):
+        return 0
+
+
+@pytest.fixture
+def build_dapercu(publication, tmp_path, monkeypatch):
+    """Un build déjà là, pour les tests qui portent sur le SERVEUR.
+
+    Construire pour de vrai demanderait `pnpm` et une minute par test ; ce qui
+    s'éprouve ici, c'est ce que l'atelier lance et sur quoi il le lance.
+    """
+    build = tmp_path / "apercu_build"
+    build.mkdir()
+    (build / "index.html").write_text("<h1>aperçu</h1>", encoding="utf-8")
+    monkeypatch.setattr(publication, "APERCU_BUILD", build)
+    faux_vite = tmp_path / "vite"
+    faux_vite.write_text("", encoding="utf-8")
+    monkeypatch.setattr(publication, "_vite", lambda: faux_vite)
+    return build
+
+
+def test_le_serveur_d_apercu_sert_le_build_du_brouillon(
+        publication, emplacements, port_libre, build_dapercu, monkeypatch):
+    """Ce qui est servi est l'ARTEFACT, pas le serveur de développement.
+
+    Avant le 23/08/2026, l'aperçu lançait `vite dev` : rendu à la volée,
+    modules non groupés, aucun prérendu. Ce qui part en ligne est un build
+    statique de 1 449 pages, et c'est là que se logent les défauts qui restent.
+    On prévisualisait la seule version du site qui ne sera jamais publiée.
+    """
+    snapshot(emplacements["brouillon"], [1])
+    snapshot(emplacements["publie"], [1, 2])
+    lance = {}
+    construit = {}
+
+    def faux_popen(cmd, cwd=None, env=None, **kw):
+        lance.update(cmd=cmd, cwd=cwd, env=env)
+        return FauxVite(port=port_libre)
+
+    monkeypatch.setattr(publication.subprocess, "Popen", faux_popen)
+    monkeypatch.setattr(publication, "construire_apercu",
+                        lambda cible=None: construit.update(cible=cible))
+
+    etat = publication.demarrer_serveur_apercu()
+    try:
+        # Construit sur le brouillon, jamais sur ce qui est déjà servi.
+        assert construit["cible"] == emplacements["brouillon"]
+        # Servi par le serveur statique du dépôt, pas par Vite.
+        assert lance["cmd"][1].endswith("servir_apercu.py")
+        assert lance["cmd"][2] == str(build_dapercu)
+        assert etat["actif"] and etat["url"]
+        assert etat["build"]["existe"] is True
+    finally:
+        assert publication.arreter_serveur_apercu()["actif"] is False
+
+
+def test_un_build_dapercu_qui_echoue_ne_se_montre_pas(publication, emplacements,
+                                                      build_dapercu, monkeypatch):
+    """Un build rouge est un défaut de l'artefact publiable, pas de l'atelier :
+    il n'y a rien à montrer tant qu'il n'est pas corrigé. Servir le build
+    PRÉCÉDENT serait pire — on croirait regarder ses corrections."""
+    snapshot(emplacements["brouillon"], [1])
+
+    def build_rouge(cible=None):
+        raise publication.PublicationRefusee("Le build de l'aperçu a échoué")
+
+    # Le port de la machine qui fait tourner les tests n'a rien à voir avec ce
+    # qu'on éprouve ici : l'atelier du développeur occupe souvent 5180.
+    monkeypatch.setattr(publication, "_port_repond", lambda: False)
+    monkeypatch.setattr(publication, "construire_apercu", build_rouge)
+    monkeypatch.setattr(publication.subprocess, "Popen",
+                        lambda *a, **kw: pytest.fail("rien ne devait être servi"))
+
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.demarrer_serveur_apercu()
+    assert "build" in str(refus.value).lower()
+
+
+def _vieillir_le_build(build):
+    import os
+    ancien = (build / "index.html").stat().st_mtime - 60
+    os.utime(build / "index.html", (ancien, ancien))
+
+
+def test_un_apercu_en_marche_montre_le_brouillon_regenere(
+        publication, emplacements, build_dapercu, monkeypatch):
+    """17/09/2026 : « Générer un aperçu » rendait ses chiffres, mais le serveur
+    déjà en marche servait le build d'avant — et la page n'offrait
+    qu'« Arrêter ». Le brouillon régénéré ne se voyait nulle part."""
+    snapshot(emplacements["brouillon"], [1])
+    _vieillir_le_build(build_dapercu)
+    monkeypatch.setattr(publication, "_serveur", FauxVite())
+    monkeypatch.setattr(publication.subprocess, "Popen",
+                        lambda *a, **kw: pytest.fail("le serveur en marche suffit"))
+    construit = []
+    monkeypatch.setattr(publication, "construire_apercu",
+                        lambda cible=None: construit.append(cible))
+
+    assert publication.etat_serveur_apercu()["build"]["perime"] is True
+    etat = publication.demarrer_serveur_apercu()
+    assert construit == [emplacements["brouillon"]]
+    assert etat["actif"] is True
+
+    # À jour : rien à reconstruire, on ne fait pas attendre une minute pour rien.
+    (build_dapercu / "index.html").touch()
+    publication.demarrer_serveur_apercu()
+    assert len(construit) == 1
+
+
+def test_un_apercu_en_marche_dont_la_reconstruction_echoue_s_arrete(
+        publication, emplacements, build_dapercu, monkeypatch):
+    """Servir le build précédent après un build rouge ferait croire qu'on
+    regarde ses corrections."""
+    snapshot(emplacements["brouillon"], [1])
+    _vieillir_le_build(build_dapercu)
+    monkeypatch.setattr(publication, "_serveur", FauxVite())
+
+    def build_rouge(cible=None):
+        raise publication.PublicationRefusee("Le build de l'aperçu a échoué")
+
+    monkeypatch.setattr(publication, "construire_apercu", build_rouge)
+
+    with pytest.raises(publication.PublicationRefusee):
+        publication.demarrer_serveur_apercu()
+    assert publication.etat_serveur_apercu()["actif"] is False
+
+
+def test_un_apercu_qui_ne_demarre_pas_se_dit(publication, emplacements, port_libre,
+                                             build_dapercu, monkeypatch):
+    """Le serveur peut sortir en une seconde. Rendre la main sur « c'est parti »
+    afficherait une prévisualisation en marche devant un cadre vide."""
+    snapshot(emplacements["brouillon"], [1])
+    monkeypatch.setattr(publication, "construire_apercu", lambda cible=None: None)
+    monkeypatch.setattr(publication.subprocess, "Popen",
+                        lambda *a, **kw: FauxVite(vivant=False))
+
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.demarrer_serveur_apercu()
+    assert "n'a pas démarré" in str(refus.value)
+    assert publication.etat_serveur_apercu()["actif"] is False
+
+
+def test_un_port_deja_occupe_se_dit_avant_de_lancer_quoi_que_ce_soit(
+        publication, emplacements, tmp_path, monkeypatch):
+    """Une machine de collecte porte plusieurs instances, et leurs serveurs Vite
+    s'empilent à partir de 5173. Lancer quand même afficherait dans l'atelier un
+    aperçu qui montre le site d'à côté."""
+    import socket
+    snapshot(emplacements["brouillon"], [1])
+    faux_vite = tmp_path / "vite"
+    faux_vite.write_text("", encoding="utf-8")
+    monkeypatch.setattr(publication, "_vite", lambda: faux_vite)
+    monkeypatch.setattr(publication.subprocess, "Popen",
+                        lambda *a, **kw: pytest.fail("rien ne devait être lancé"))
+    # Le build non plus : construire 1 449 pages pour découvrir ensuite que le
+    # port est pris ferait attendre une minute pour rien.
+    monkeypatch.setattr(publication, "construire_apercu",
+                        lambda cible=None: pytest.fail("rien ne devait être construit"))
+    with socket.socket() as occupant:
+        occupant.bind(("127.0.0.1", 0))
+        occupant.listen(1)
+        monkeypatch.setattr(publication, "APERCU_PORT", occupant.getsockname()[1])
+        with pytest.raises(publication.PublicationRefusee) as refus:
+            publication.demarrer_serveur_apercu()
+    assert "déjà occupé" in str(refus.value)
+
+
+def test_le_serveur_d_apercu_refuse_de_montrer_un_repertoire_servi(
+        publication, emplacements, tmp_path, monkeypatch):
+    faux_vite = tmp_path / "vite"
+    faux_vite.write_text("", encoding="utf-8")
+    monkeypatch.setattr(publication, "_vite", lambda: faux_vite)
+    snapshot(emplacements["publie"], [1])
+    with pytest.raises(publication.PublicationRefusee):
+        publication.demarrer_serveur_apercu(cible=emplacements["publie"])
+
+
+def test_le_site_public_ne_code_plus_son_repertoire_de_donnees_en_dur(publication):
+    """Chaque page prérendue lisait `join(process.cwd(), 'static', 'data')`, écrit
+    trente fois. Une seule qui y revient, et l'aperçu montre un mélange de deux
+    snapshots sans le dire — ce qui est pire que pas d'aperçu : on croirait
+    avoir vérifié."""
+    fautifs = [str(f.relative_to(ROOT))
+               for f in (ROOT / "public" / "src" / "routes").rglob("*.js")
+               if re.search(r"process\.cwd\(\)\s*,\s*'static'\s*,\s*'data'",
+                            f.read_text(encoding="utf-8"))]
+    assert fautifs == []
+
+
+# ── Les cinq états, nommés ───────────────────────────────────────────────────
+#
+# `publie` s'appelle désormais `promu_localement`, et un cinquième état
+# s'ajoute derrière : `en_ligne`. Le mot « publié » recouvrait les deux — la
+# page annonçait « Ce qui est publié », puis précisait plus bas que le build et
+# la mise en ligne restaient à faire. Un exploitant qui lit « publié » et ferme
+# l'onglet croit son site à jour.
+#
+# Le dernier état ne se déduit pas : l'atelier ne fait ni le build ni le
+# déploiement. Il demande une CONSTATATION — le site public interrogé sert bien
+# l'empreinte promue.
+
+@pytest.mark.parametrize("etat,attendu", [
+    ({}, "aucun_apercu"),
+    ({"brouillon": {"genere_le": "t", "controle": {"ok": False}}}, "controles_en_echec"),
+    ({"brouillon": {"genere_le": "t", "controle": {"ok": True}}}, "pret_a_publier"),
+    # Promu localement : les répertoires servis portent l'aperçu, et personne
+    # n'a encore constaté quoi que ce soit en ligne.
+    ({"brouillon": {"genere_le": "t", "controle": {"ok": True}},
+      "publie": {"apercu_genere_le": "t"}}, "promu_localement"),
+    ({"brouillon": {"genere_le": "t2", "controle": {"ok": True}},
+      "publie": {"apercu_genere_le": "t1"}}, "pret_a_publier"),
+    # En ligne : une vérification HTTP a trouvé l'empreinte promue.
+    ({"brouillon": {"genere_le": "t", "controle": {"ok": True}},
+      "publie": {"apercu_genere_le": "t", "empreinte": "abc"},
+      "en_ligne": {"ok": True, "empreinte": "abc"}}, "en_ligne"),
+    # Une vérification verte sur une AUTRE empreinte ne vaut rien : c'est le
+    # déploiement d'avant qu'elle a constaté.
+    ({"brouillon": {"genere_le": "t", "controle": {"ok": True}},
+      "publie": {"apercu_genere_le": "t", "empreinte": "neuve"},
+      "en_ligne": {"ok": True, "empreinte": "ancienne"}}, "promu_localement"),
+    # Site injoignable : promu, pas en ligne.
+    ({"brouillon": {"genere_le": "t", "controle": {"ok": True}},
+      "publie": {"apercu_genere_le": "t", "empreinte": "abc"},
+      "en_ligne": {"ok": False, "motif": "Site injoignable"}}, "promu_localement"),
+])
+def test_etapes(publication, etat, attendu):
+    assert publication.etape(etat) == attendu
+
+
+def test_chaque_etape_porte_un_libelle(publication):
+    """Un état sans phrase est un état que l'interface devra traduire seule,
+    et deux traductions divergentes valent deux vérités."""
+    assert set(publication.LIBELLES_ETAPES) == set(publication.ETAPES)
+    assert all(publication.LIBELLES_ETAPES[e].strip() for e in publication.ETAPES)
+
+
+def test_le_repertoire_servi_declare_la_version_quil_sert(publication, emplacements):
+    """`version.json` est la seule pièce qui permette de constater, de
+    l'extérieur, ce que le site déployé sert réellement."""
+    publication.generer_apercu(builder=builder([1, 2]),
+                               controleur=lambda cible: controle(True))
+    publie = publication.publier(auteur="admin@exemple", role="admin",
+                                 controleur=lambda cible: controle(True))
+
+    for servi in ("publie", "site"):
+        declare = json.loads(
+            (emplacements[servi] / "version.json").read_text(encoding="utf-8"))
+        assert declare["empreinte"] == publie["empreinte"]
+
+
+def test_lempreinte_ne_depend_pas_du_fichier_qui_la_declare(publication, tmp_path):
+    """Sinon elle serait circulaire : écrire l'empreinte changerait l'empreinte."""
+    a = tmp_path / "a"
+    snapshot(a, [1])
+    avant = publication.empreinte(a)
+    (a / "version.json").write_text('{"empreinte": "peu importe"}', encoding="utf-8")
+    assert publication.empreinte(a) == avant
+
+
+def test_verification_en_ligne_sans_adresse_declaree(publication, emplacements,
+                                                     monkeypatch):
+    """Une instance de test n'a pas de site public : l'atelier doit le dire,
+    pas inventer une URL ni afficher un état vert."""
+    monkeypatch.setattr(publication, "site_url", lambda: None)
+    verdict = publication.verifier_en_ligne()
+    assert verdict["ok"] is False
+    assert "aucune adresse publique" in verdict["motif"].lower()
+
+
+def test_une_verification_perimee_ne_passe_pas_pour_verte(publication, emplacements,
+                                                          monkeypatch):
+    """Publier de nouveau invalide la constatation précédente : elle portait sur
+    la version d'avant."""
+    monkeypatch.setattr(publication, "site_url", lambda: None)
+    publication.generer_apercu(builder=builder([1]),
+                               controleur=lambda cible: controle(True))
+    publication.publier(auteur="admin@exemple", role="admin",
+                        controleur=lambda cible: controle(True))
+    etat = publication.lire_etat()
+    etat["en_ligne"] = {"ok": True, "empreinte": "dune-autre-fois",
+                        "empreinte_attendue": "dune-autre-fois"}
+    publication.ecrire_etat(etat)
+
+    vu = publication.etat_publication()
+
+    assert vu["etape"] == "promu_localement"
+    assert vu["en_ligne"]["perimee"] is True
+    assert vu["en_ligne"]["ok"] is False
+
+
+# ── La mise en service est atomique ──────────────────────────────────────────
+#
+# Jusqu'au 23/08/2026, `publier()` recopiait les fichiers un par un DANS le
+# répertoire servi, puis contrôlait le résultat. Trois conséquences, toutes
+# vérifiables ci-dessous :
+#
+#   — un contrôle rouge trouvait l'ancien snapshot déjà à moitié écrasé, sans
+#     rien pour revenir en arrière, et le message « le site public est
+#     inchangé » était faux au moment où il s'affichait ;
+#   — un visiteur tombant pendant la copie voyait un site mi-ancien mi-neuf ;
+#   — deux publications simultanées se recouvraient sans que rien ne le dise.
+
+
+def test_un_controle_rouge_a_la_copie_laisse_la_version_precedente_entiere(
+        publication, emplacements):
+    """Le cas qui n'avait pas de filet : l'aperçu passe, la copie échoue.
+
+    C'est le seul moment où le contrôleur peut dire non alors que tout allait
+    bien une seconde plus tôt — et c'est précisément là que l'ancien snapshot
+    se retrouvait à moitié remplacé.
+    """
+    snapshot(emplacements["publie"], [1, 2, 3], marque="en ligne")
+    avant = empreinte(emplacements["publie"])
+    publication.generer_apercu(builder=builder([9], marque="brouillon"),
+                               controleur=lambda cible: controle(True))
+
+    # Vert sur le brouillon, rouge sur la copie.
+    def controleur(cible):
+        return controle(Path(cible).resolve() == emplacements["brouillon"].resolve())
+
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.publier(auteur="admin@exemple", role="admin",
+                            controleur=controleur)
+
+    assert "précédente reste servie" in str(refus.value)
+    assert empreinte(emplacements["publie"]) == avant, \
+        "le répertoire servi a été touché alors que le contrôle a refusé"
+
+
+def test_rien_ne_traine_a_cote_du_repertoire_servi(publication, emplacements):
+    """Le répertoire de travail ne doit pas survivre à un refus : il porte des
+    données non contrôlées, à côté de données servies."""
+    snapshot(emplacements["publie"], [1], marque="en ligne")
+    publication.generer_apercu(builder=builder([9], marque="brouillon"),
+                               controleur=lambda cible: controle(True))
+
+    with pytest.raises(publication.PublicationRefusee):
+        publication.publier(
+            auteur="admin@exemple", role="admin",
+            controleur=lambda cible: controle(
+                Path(cible).resolve() == emplacements["brouillon"].resolve()))
+
+    neuf, _ = publication._voisins(emplacements["publie"])
+    assert not neuf.exists()
+
+
+def test_aucune_version_de_travail_ne_vit_la_ou_le_build_recopie(
+        publication, emplacements):
+    """Le retour arrière du site vivait à côté du répertoire servi, donc dans
+    `public/static/` — que SvelteKit recopie en entier dans `build/`. Le
+    16/09/2026, lasalle.vigie-civique.fr servait `/.data.precedent/` : la
+    version du 23/08, contrôlée selon les règles du 23/08.
+
+    Une instance publiée avant la correction garde l'ancien emplacement : la
+    publication suivante doit le retirer, sans quoi chaque build le remet en
+    ligne."""
+    site = emplacements["site"]
+    snapshot(site, [1], marque="en ligne")
+    heritage = site.parent / f".{site.name}.precedent"
+    snapshot(heritage, [1], marque="23/08")
+
+    publication.generer_apercu(builder=builder([2], marque="brouillon"),
+                               controleur=lambda cible: controle(True))
+    publication.publier(auteur="admin@exemple", role="admin",
+                        controleur=lambda cible: controle(True))
+
+    caches = [p.name for p in site.parent.iterdir() if p.name.startswith(".")]
+    assert caches == [], f"à côté du répertoire servi, un build recopierait {caches}"
+    _, precedent = publication._voisins(site)
+    assert json.loads((precedent / "stats.json").read_text())["marque"] == "en ligne", \
+        "le retour arrière doit toujours exister — ailleurs"
+
+
+def test_une_premiere_publication_cree_ce_qui_manque(publication, emplacements,
+                                                   tmp_path, monkeypatch):
+    """Une instance neuve n'a ni `dashboard/static/` ni `public/static/` : la
+    version neuve, construite à côté, créait le parent par accident. Construite
+    ailleurs, elle ne le crée plus — trouvé au premier essai réel, le 16/09."""
+    for nom in ("PUBLIE", "SITE"):
+        vierge = tmp_path / "instance-neuve" / nom.lower() / "servi"
+        monkeypatch.setattr(publication, nom, vierge)
+    publication.generer_apercu(builder=builder([1]),
+                               controleur=lambda cible: controle(True))
+    publication.publier(auteur="admin@exemple", role="admin",
+                        controleur=lambda cible: controle(True))
+    assert (publication.SITE / "version.json").is_file()
+
+
+def test_la_version_precedente_est_conservee_et_peut_reprendre_du_service(
+        publication, emplacements):
+    """Un contrôle vert ne dit pas qu'une version est BONNE : il dit qu'elle est
+    étanche. Un chiffre faux, un découpage raté, une page vide passent le
+    contrôle. Quelqu'un doit pouvoir revenir sans reconstruire."""
+    snapshot(emplacements["publie"], [1, 2, 3], marque="en ligne")
+    snapshot(emplacements["site"], [1, 2, 3], marque="en ligne")
+    publication.generer_apercu(builder=builder([7], marque="brouillon"),
+                               controleur=lambda cible: controle(True))
+    publication.publier(auteur="admin@exemple", role="admin",
+                        controleur=lambda cible: controle(True))
+    assert json.loads((emplacements["publie"] / "stats.json").read_text())["marque"] == "brouillon"
+
+    publication.revenir_a_la_version_precedente(emplacements["publie"])
+
+    stats = json.loads((emplacements["publie"] / "stats.json").read_text())
+    assert stats["marque"] == "en ligne"
+    assert sorted(f.name for f in (emplacements["publie"] / "entite").glob("*.json")) \
+        == ["1.json", "2.json", "3.json"]
+
+
+def test_revenir_deux_fois_ramene_la_ou_lon_etait(publication, emplacements):
+    """Sinon on creuse : le deuxième retour irait chercher une version encore
+    plus ancienne, que personne n'a demandée."""
+    snapshot(emplacements["publie"], [1], marque="en ligne")
+    publication.generer_apercu(builder=builder([2], marque="brouillon"),
+                               controleur=lambda cible: controle(True))
+    publication.publier(auteur="admin@exemple", role="admin",
+                        controleur=lambda cible: controle(True))
+
+    publication.revenir_a_la_version_precedente(emplacements["publie"])
+    publication.revenir_a_la_version_precedente(emplacements["publie"])
+
+    assert json.loads(
+        (emplacements["publie"] / "stats.json").read_text())["marque"] == "brouillon"
+
+
+def test_revenir_sans_version_precedente_se_dit(publication, emplacements):
+    snapshot(emplacements["publie"], [1])
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.revenir_a_la_version_precedente(emplacements["publie"])
+    assert "aucune version précédente" in str(refus.value).lower()
+
+
+def test_letat_publie_porte_lempreinte_de_ce_qui_est_servi(publication, emplacements):
+    """« Publié » et « en ligne » sont deux états distincts. L'empreinte est ce
+    qui permettra, plus tard, de vérifier que le site déployé sert bien cette
+    version-là — et pas celle d'avant-hier."""
+    publication.generer_apercu(builder=builder([1, 2], marque="brouillon"),
+                               controleur=lambda cible: controle(True))
+    publie = publication.publier(auteur="admin@exemple", role="admin",
+                                 controleur=lambda cible: controle(True))
+
+    assert publie["empreinte"] == publication.empreinte(emplacements["publie"])
+
+
+def test_deux_snapshots_qui_different_dun_fichier_retire_ont_deux_empreintes(
+        publication, tmp_path):
+    """L'empreinte porte les CHEMINS autant que les contenus : c'est ce qui
+    permet de voir qu'une fiche a disparu, et la disparition d'une fiche est
+    exactement ce que la publication doit propager."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    snapshot(a, [1, 2])
+    snapshot(b, [1, 2])
+    assert publication.empreinte(a) == publication.empreinte(b)
+    (b / "entite" / "2.json").unlink()
+    assert publication.empreinte(a) != publication.empreinte(b)
+
+
+def test_une_publication_concurrente_est_refusee_et_ne_touche_a_rien(
+        publication, emplacements, monkeypatch):
+    """Deux clics valent deux requêtes. Rien n'empêchait deux publications de
+    se recouvrir dans le même répertoire."""
+    import fcntl
+
+    snapshot(emplacements["publie"], [1], marque="en ligne")
+    avant = empreinte(emplacements["publie"])
+    publication.generer_apercu(builder=builder([2], marque="brouillon"),
+                               controleur=lambda cible: controle(True))
+
+    verrou = publication.VERROU
+    verrou.parent.mkdir(parents=True, exist_ok=True)
+    with open(verrou, "w") as tenu:
+        fcntl.flock(tenu, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Sans raccourcir l'attente, le test durerait la trentaine de secondes
+        # que l'atelier accorde à un opérateur pressé.
+        vrai_verrou = publication.verrou_de_publication
+        monkeypatch.setattr(publication, "verrou_de_publication",
+                            lambda delai=0.3: vrai_verrou(delai))
+
+        with pytest.raises(publication.PublicationRefusee) as refus:
+            publication.publier(auteur="admin@exemple", role="admin",
+                                controleur=lambda cible: controle(True))
+
+    assert "en cours" in str(refus.value).lower()
+    assert empreinte(emplacements["publie"]) == avant
+
+
+def test_le_verrou_est_relache_apres_usage(publication):
+    """Un verrou qui survivrait à son opération immobiliserait l'instance."""
+    with publication.verrou_de_publication(delai=1):
+        pass
+    with publication.verrou_de_publication(delai=1):
+        pass    # doit être immédiat, pas une seconde d'attente
+
+
+# ── La ligne de commande aussi : générer n'est pas publier ───────────────────
+
+def test_le_cli_ne_sert_pas_un_brouillon(publication):
+    """`build_public_snapshot.py --out <brouillon>` recopiait quand même le
+    résultat dans `public/static/data`.
+
+    La publication en deux temps a corrigé ça côté atelier — l'aperçu n'écrit
+    que dans son brouillon — mais le défaut restait entier côté ligne de
+    commande, là où l'exploitant travaille : construire un aperçu le mettait en
+    ligne, sans contrôle et sans qu'une ligne le dise.
+
+    Le test lit le code plutôt que de lancer un build : construire un vrai
+    snapshot demande une base, et ce qui est en jeu ici est une DÉCISION, pas
+    un résultat.
+    """
+    source = (ROOT / "scripts" / "build_public_snapshot.py").read_text(encoding="utf-8")
+    bloc = source[source.index("def main()"):]
+    assert "vers_le_repertoire_publie" in bloc, \
+        "la synchro vers le site ne vérifie plus où pointe --out"
+    # La recopie est sous condition, jamais dans la branche par défaut.
+    avant_sync = bloc[:bloc.index("synchroniser_site_public(args.out")]
+    assert "DEFAULT_OUT.resolve()" in avant_sync
+
+# ── Mettre en ligne ──────────────────────────────────────────────────────────
+#
+# Le seul geste de l'atelier qui sorte de la machine. Promouvoir écrit dans deux
+# répertoires locaux ; mettre en ligne change ce que le public voit.
+#
+# Il passe par `deploy/publier-site.sh --deja-promu` : le build et le
+# téléversement ne sont écrits qu'une fois. Et il saute l'aperçu et la
+# promotion — ce qui a été promu a été CONTRÔLÉ ; le reconstruire depuis la base
+# déploierait une version que personne n'a validée, différente dès qu'un
+# collecteur a tourné entre-temps.
+
+
+@pytest.fixture
+def pret_a_deployer(publication, emplacements, monkeypatch):
+    """Un snapshot promu, et une destination déclarée."""
+    monkeypatch.setattr(publication, "destination", lambda: {
+        "cible": "rsync", "hote": "essai", "chemin": "/srv/essai",
+        "source": "essai", "libelle": "essai:/srv/essai"})
+    monkeypatch.setattr(publication, "DEPLOIEMENT_LOG",
+                        emplacements["brouillon"].parent / "mise-en-ligne.log")
+    monkeypatch.setattr(publication, "DEPLOIEMENT_ETAT",
+                        emplacements["brouillon"].parent / "mise-en-ligne.json")
+    monkeypatch.setattr(publication, "_deploiement", None)
+    publication.generer_apercu(builder=builder([1, 2]),
+                               controleur=lambda cible: controle(True))
+    return publication.publier(auteur="admin@exemple", role="admin",
+                               controleur=lambda cible: controle(True))
+
+
+def test_seul_un_admin_met_en_ligne(publication, pret_a_deployer):
+    for role in (None, "contributor", "validator"):
+        with pytest.raises(publication.PublicationRefusee) as refus:
+            publication.mettre_en_ligne(auteur="x", role=role)
+        assert "admin" in str(refus.value).lower()
+
+
+def test_sans_rien_de_promu_la_mise_en_ligne_refuse(publication, emplacements,
+                                                    monkeypatch):
+    """Mettre en ligne ne construit pas de snapshot : il déploie celui qui a été
+    contrôlé. S'il n'y en a pas, il n'y a rien à déployer."""
+    monkeypatch.setattr(publication, "destination", lambda: {
+        "cible": "rsync", "hote": "essai", "chemin": "/srv/essai",
+        "source": "essai", "libelle": "essai:/srv/essai"})
+    monkeypatch.setattr(publication, "_deploiement", None)
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.mettre_en_ligne(auteur="admin@exemple", role="admin")
+    assert "promu" in str(refus.value).lower()
+
+
+def test_sans_destination_declaree_la_mise_en_ligne_refuse(
+        publication, pret_a_deployer, monkeypatch):
+    """Un déploiement sans destination irait au hasard — ou, pire, chez le
+    voisin : une machine porte souvent plusieurs instances."""
+    monkeypatch.setattr(publication, "destination", lambda: None)
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.mettre_en_ligne(auteur="admin@exemple", role="admin")
+    assert "destination" in str(refus.value).lower()
+
+
+def test_la_mise_en_ligne_part_de_ce_qui_est_servi(publication, pret_a_deployer,
+                                                   emplacements, monkeypatch):
+    """Le script de publication, en sautant l'aperçu et la promotion : ce qui
+    part est ce qui a été contrôlé, pas une reconstruction depuis la base."""
+    lance = {}
+
+    class FauxDeploiement:
+        returncode = None
+        def poll(self): return None
+
+    def faux_popen(cmd, cwd=None, env=None, **kw):
+        lance.update(cmd=cmd, cwd=cwd, env=env or {})
+        return FauxDeploiement()
+
+    monkeypatch.setattr(publication.subprocess, "Popen", faux_popen)
+    monkeypatch.setattr(publication, "_deploiement", None)
+    # `node_modules` est exigé avant de lancer quoi que ce soit.
+    (publication.ROOT / "public" / "node_modules").mkdir(parents=True, exist_ok=True)
+
+    etat = publication.mettre_en_ligne(auteur="admin@exemple", role="admin")
+
+    commande = " ".join(lance["cmd"])
+    assert commande.endswith("deploy/publier-site.sh --deployer --deja-promu")
+    # Aucun téléversement écrit à part : c'était `wrangler` en dur, qui visait
+    # encore Cloudflare Pages quinze jours après que le site en était parti.
+    assert "wrangler" not in commande
+    assert "build_public_snapshot" not in commande
+    # L'interpréteur de l'atelier, qui a les dépendances du moteur.
+    assert lance["env"]["PY"] == publication.sys.executable
+    assert etat["actif"] is True
+    assert etat["empreinte_visee"] == pret_a_deployer["empreinte"]
+    assert etat["destination_visee"] == "essai:/srv/essai"
+
+
+def test_letat_dit_quand_un_deploiement_a_echoue(publication, pret_a_deployer,
+                                                 monkeypatch):
+    """Un déploiement rouge doit se voir : le site n'a pas changé, et celui qui
+    a cliqué doit le savoir sans aller lire un journal."""
+    class Echoue:
+        returncode = 1
+        def poll(self): return 1
+
+    monkeypatch.setattr(publication, "_deploiement", Echoue())
+    etat = publication.etat_mise_en_ligne()
+    assert etat["actif"] is False
+    assert etat["ok"] is False
+    assert etat["code_retour"] == 1
+
+
+# ── Où part le site : déclaré une fois ───────────────────────────────────────
+#
+# La destination vivait à trois endroits — `cf_project` pour le bouton de
+# l'atelier, un `case` recopié dans deux scripts pour la ligne de commande — et
+# les trois avaient divergé : le 16/09/2026, le bouton visait encore Cloudflare
+# Pages, quitté le 01/09.
+
+VARIABLES_DE_DESTINATION = ("VIGIE_CIBLE", "VIGIE_CIBLE_HOTE", "VIGIE_CIBLE_CHEMIN",
+                            "VIGIE_CIBLE_RSYNC_PATH", "CF_PROJECT")
+
+
+@pytest.fixture
+def instance(tmp_path, monkeypatch):
+    """Écrit une `config/instance.json` jetable, sans variable de destination."""
+    for variable in VARIABLES_DE_DESTINATION:
+        monkeypatch.delenv(variable, raising=False)
+    chemin = tmp_path / "instance.json"
+    monkeypatch.setenv("VIGIE_INSTANCE", str(chemin))
+
+    def ecrire(**cles):
+        chemin.write_text(json.dumps({"commune_insee": "00000", **cles}),
+                          encoding="utf-8")
+    return ecrire
+
+
+def test_la_destination_se_lit_dans_linstance(publication, instance):
+    instance(publication={"_doc": "où part le site", "cible": "rsync",
+                          "hote": "vps", "chemin": "/srv/sites/essai",
+                          "rsync_path": "sudo -u web rsync"})
+    declaree = publication.destination()
+    assert declaree["cible"] == "rsync"
+    assert declaree["libelle"] == "vps:/srv/sites/essai"
+    assert "_doc" not in declaree
+
+
+def test_la_cible_locale_ne_demande_ni_hote_ni_ssh(publication, instance):
+    instance(publication={"cible": "local", "chemin": "/srv/sites/essai"})
+    declaree = publication.destination()
+    assert (declaree["cible"], declaree["chemin"]) == ("local", "/srv/sites/essai")
+    assert declaree["libelle"] == "ce serveur, /srv/sites/essai"
+    assert publication.destination_pour_le_shell(declaree) == (
+        "export VIGIE_CIBLE=local\nexport VIGIE_CIBLE_CHEMIN=/srv/sites/essai")
+
+
+def test_la_cible_locale_refuse_un_chemin_relatif(publication, instance):
+    instance(publication={"cible": "local", "chemin": "sites/essai"})
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.destination()
+    assert "absolu" in str(refus.value)
+
+
+def test_lenvironnement_reste_prioritaire(publication, instance, monkeypatch):
+    """Pour qui publie déjà ainsi, ou ponctuellement ailleurs."""
+    instance(publication={"cible": "rsync", "hote": "vps", "chemin": "/srv/a"})
+    monkeypatch.setenv("CF_PROJECT", "vigie-ailleurs")
+    declaree = publication.destination()
+    assert (declaree["cible"], declaree["projet"]) == ("cloudflare", "vigie-ailleurs")
+    assert declaree["source"] == "environnement"
+
+
+def test_lancienne_cle_cf_project_vaut_encore_cloudflare(publication, instance):
+    instance(cf_project="vigie-historique")
+    assert publication.destination()["projet"] == "vigie-historique"
+
+
+def test_le_bloc_publication_lemporte_sur_lancienne_cle(publication, instance):
+    """C'est le cas de Lasalle au 16/09/2026 : `cf_project` était resté, et
+    c'est lui que lisait le bouton."""
+    instance(cf_project="vigie-abandonne",
+             publication={"cible": "rsync", "hote": "vps", "chemin": "/srv/l"})
+    assert publication.destination()["cible"] == "rsync"
+
+
+def test_rien_de_declare_rend_none(publication, instance):
+    instance()
+    assert publication.destination() is None
+
+
+@pytest.mark.parametrize("bloc, motif", [
+    ({"cible": "rsync", "hote": "vps"}, "chemin"),
+    ({"cible": "cloudflare"}, "projet"),
+    ({"cible": "ftp", "hote": "x"}, "inconnu"),
+    ({"cible": "rsync", "hote": "-e sh", "chemin": "/srv"}, "tiret"),
+])
+def test_une_declaration_incomplete_est_refusee_pas_ignoree(
+        publication, instance, bloc, motif):
+    """La traiter comme une absence ferait publier ailleurs, ou nulle part,
+    sans qu'une ligne le dise."""
+    instance(publication=bloc)
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.destination()
+    assert motif in str(refus.value).lower()
+
+
+def test_la_destination_passe_au_shell_sans_etre_reinterpretee(publication, tmp_path):
+    """Le script évalue ce que rend `destination --shell` : une valeur piégée
+    doit arriver telle quelle, pas s'exécuter."""
+    import subprocess
+
+    temoin = tmp_path / "execute"
+    declaree = {"cible": "rsync", "hote": "vps",
+                "chemin": f"/srv/a b'; touch {temoin}; '",
+                "rsync_path": "sudo -u web rsync"}
+    sortie = subprocess.run(
+        ["bash", "-c", publication.destination_pour_le_shell(declaree)
+         + '\nprintf "%s|%s" "$VIGIE_CIBLE_CHEMIN" "$VIGIE_CIBLE_RSYNC_PATH"'],
+        capture_output=True, text=True, check=True).stdout
+    assert sortie == f"{declaree['chemin']}|sudo -u web rsync"
+    assert not temoin.exists()
+
+
+def test_letat_dit_une_destination_refusee(publication, instance, monkeypatch):
+    """La page Publication doit montrer POURQUOI le bouton refusera, avant le clic."""
+    monkeypatch.setattr(publication, "_deploiement", None)
+    instance(publication={"cible": "rsync", "hote": "vps"})
+    etat = publication.etat_mise_en_ligne()
+    assert etat["destination"] is None
+    assert "chemin" in etat["destination_erreur"]
+
+
+# ── La ligne de commande passe par le même flux ──────────────────────────────
+
+def test_la_ligne_de_commande_ne_publie_pas_sans_apercu(publication, emplacements,
+                                                       capsys):
+    assert publication.main(["publier"]) == 1
+    assert "aperçu" in capsys.readouterr().err.lower()
+
+
+def test_la_ligne_de_commande_publie_comme_latelier(publication, emplacements,
+                                                   monkeypatch):
+    """Même état, même `version.json` : c'est ce qui manquait pour que l'atelier
+    voie ce que la ligne de commande avait publié."""
+    publication.generer_apercu(builder=builder([1, 2]),
+                               controleur=lambda cible: controle(True))
+    monkeypatch.setattr(publication, "controler", lambda cible: controle(True))
+    assert publication.main(["publier"]) == 0
+    etat = publication.lire_etat()
+    assert etat["publie"]["publie_par"].endswith("(ligne de commande)")
+    declare = json.loads((emplacements["site"] / "version.json").read_text())
+    assert declare["empreinte"] == etat["publie"]["empreinte"]
+
+
+def test_la_ligne_de_commande_dit_labsence_de_destination(publication, instance,
+                                                         capsys):
+    instance()
+    assert publication.main(["destination", "--shell"]) == 1
+    assert "publication" in capsys.readouterr().err
+
+
+# ── Le script de publication ne contourne plus le flux ───────────────────────
+# Lecture du script plutôt qu'exécution : le lancer demande une base, un build
+# et un hébergeur, et ce qui est en jeu ici est une DÉCISION.
+
+SCRIPT = (ROOT / "deploy" / "publier-site.sh").read_text(encoding="utf-8")
+
+
+def test_le_script_ne_construit_plus_le_snapshot_dans_les_repertoires_servis():
+    """C'est le contournement du 16/09/2026 : `build_public_snapshot.py`
+    écrivait directement dans les deux répertoires servis, et l'atelier n'en
+    savait rien."""
+    assert "build_public_snapshot" not in SCRIPT
+    assert '"$PUBLICATION" apercu' in SCRIPT
+    assert '"$PUBLICATION" publier' in SCRIPT
+    assert SCRIPT.index('"$PUBLICATION" apercu') < SCRIPT.index('"$PUBLICATION" publier') \
+        < SCRIPT.index("pnpm run build")
+
+
+def test_le_script_lit_la_destination_par_le_flux_et_nen_devine_aucune():
+    assert '"$PUBLICATION" destination --shell' in SCRIPT
+    assert "indecis" not in SCRIPT
+
+
+def test_le_script_constate_ce_qui_est_servi_apres_le_televersement():
+    assert SCRIPT.rindex('"$PUBLICATION" verifier') > SCRIPT.index("rsync -az")
+
+
+def test_le_script_refuse_un_build_qui_porte_des_fichiers_caches():
+    bloc = SCRIPT[SCRIPT.index('caches="$(find'):SCRIPT.index('if [ "$DEPLOYER" -eq 0 ]')]
+    assert "exit 1" in bloc
+    assert "| head" not in bloc.split("\n", 1)[0], \
+        "sous pipefail, `| head` ferait échouer l'affectation"
+
+
+def test_le_script_est_du_bash_valide():
+    import subprocess
+    subprocess.run(["bash", "-n", str(ROOT / "deploy" / "publier-site.sh")], check=True)
+
+
+def test_lapercu_sert_les_donnees_du_brouillon(publication, emplacements, tmp_path,
+                                               monkeypatch):
+    """01/10/2026 : une feuille « en clair » retenue n'existait que dans le
+    brouillon ; l'aperçu servait `/data/` depuis ce qui est en ligne, et son
+    lien menait au 404. L'aperçu montre ce qui SERA publié."""
+    def avec_feuille(out):
+        stats = snapshot(out, [1])
+        (out / "conseils").mkdir()
+        (out / "conseils" / "seance.html").write_text("feuille")
+        return stats
+
+    publication.generer_apercu(builder=avec_feuille,
+                               controleur=lambda cible: controle(True))
+    build = tmp_path / "apercu_build"
+
+    def pnpm_vert(cmd, cwd, env, stdout, stderr):
+        (build / "data").mkdir(parents=True)
+        (build / "index.html").write_text("<h1>aperçu</h1>")
+        (build / "data" / "en-ligne-seulement.json").write_text("{}")
+        return type("Fini", (), {"returncode": 0})()
+
+    faux_vite = tmp_path / "vite"
+    faux_vite.write_text("")
+    monkeypatch.setattr(publication, "_vite", lambda: faux_vite)
+    monkeypatch.setattr(publication, "APERCU_LOG", tmp_path / "apercu.log")
+    monkeypatch.setattr(publication, "VERROU_BUILD", tmp_path / "build.lock")
+    monkeypatch.setattr(publication.subprocess, "run", pnpm_vert)
+
+    publication.construire_apercu(build=build)
+
+    assert (build / "data" / "conseils" / "seance.html").read_text() == "feuille"
+    assert not (build / "data" / "en-ligne-seulement.json").exists()
+
+
+
+# ── La passe planifiée republie après une correction ─────────────────────────
+
+def _geste(base, table, at, entity_id=None, action="update"):
+    base.execute("INSERT INTO audit_log(table_name, action, entity_id, at) "
+                 "VALUES (?,?,?,?)", (table, action, entity_id, at))
+    base.commit()
+
+
+# Aperçu publié généré à 12:00 heure d'été française, soit 10:00 dans la base.
+PUBLIE_A_MIDI = {"publie": {"apercu_genere_le": "2026-10-03T12:00:00+02:00",
+                            "publie_le": "2026-10-03T12:05:00+02:00"}}
+
+
+def test_une_correction_apres_lapercu_publie_demande_une_republication(publication, base):
+    """Une fusion de fiches faite en base n'ajoute rien à `collector_runs` : la
+    passe disait « rien de neuf » et la correction restait hors ligne."""
+    _geste(base, "entities", "2026-10-03 10:30:00")
+    _geste(base, "entities", "2026-10-03 11:00:00")
+    _geste(base, "annotations", "2026-10-04 07:00:00")
+    assert publication.corrections_depuis_la_publication(base, PUBLIE_A_MIDI) == {
+        "entities": 2, "annotations": 1}
+
+
+def test_un_geste_deja_dans_lapercu_publie_ne_republie_pas(publication, base):
+    _geste(base, "entities", "2026-10-03 09:59:59")
+    assert publication.corrections_depuis_la_publication(base, PUBLIE_A_MIDI) == {}
+
+
+def test_la_borne_est_lheure_de_lapercu_pas_celle_de_la_promotion(publication, base):
+    """Un geste entre la génération (10:00) et la promotion (10:05) est dans la
+    base mais pas dans la version servie : le repère de promotion l'oublierait."""
+    _geste(base, "entities", "2026-10-03 10:03:00")
+    assert publication.corrections_depuis_la_publication(base, PUBLIE_A_MIDI) == {
+        "entities": 1}
+
+
+def test_a_la_seconde_de_lapercu_on_republie_plutot_que_doublier(publication, base):
+    _geste(base, "entities", "2026-10-03 10:00:00")
+    assert publication.corrections_depuis_la_publication(base, PUBLIE_A_MIDI) == {
+        "entities": 1}
+
+
+def test_les_gestes_de_publication_et_les_propositions_ne_republient_pas(publication, base):
+    """Republier à cause de la trace de sa propre publication ferait boucler la
+    passe ; une proposition de citoyen n'entre dans les données qu'une fois
+    validée, et la validation écrit son propre geste."""
+    _geste(base, "publication", "2026-10-03 10:06:00", action="publication")
+    _geste(base, "propositions", "2026-10-03 11:00:00", action="proposer")
+    assert publication.corrections_depuis_la_publication(base, PUBLIE_A_MIDI) == {}
+
+
+def test_un_geste_sans_entite_republie(publication, base):
+    """Dossiers et saisies sont journalisés sans `entity_id` : filtrer sur lui
+    (comme la liste « fiches touchées ») les aurait laissés hors ligne."""
+    _geste(base, "dossiers", "2026-10-03 11:00:00", action="retenir")
+    _geste(base, "saisies", "2026-10-03 11:01:00", action="create")
+    assert publication.corrections_depuis_la_publication(base, PUBLIE_A_MIDI) == {
+        "dossiers": 1, "saisies": 1}
+
+
+def test_rien_na_jamais_ete_publie_la_passe_ne_publie_pas_la_premiere_fois(publication, base):
+    """La première mise en ligne d'une instance est un geste humain."""
+    _geste(base, "entities", "2026-10-03 11:00:00")
+    assert publication.corrections_depuis_la_publication(base, {}) == {}
+
+
+def test_sans_date_de_generation_on_se_replie_sur_la_promotion(publication, base):
+    etat = {"publie": {"publie_le": "2026-10-03T12:05:00+02:00"}}
+    _geste(base, "entities", "2026-10-03 10:03:00")
+    _geste(base, "entities", "2026-10-03 10:06:00")
+    assert publication.corrections_depuis_la_publication(base, etat) == {"entities": 1}
+
+
+def test_la_passe_decide_sur_les_corrections_comme_sur_les_ajouts():
+    """`collecte.sh` est du shell : le test garantit seulement qu'il se parse et
+    que la décision lit bien les deux compteurs (le jeu complet se joue sur le
+    serveur)."""
+    script = ROOT / "deploy" / "collecte.sh"
+    subprocess.run(["bash", "-n", str(script)], check=True)
+    texte = script.read_text(encoding="utf-8")
+    assert "corrections_depuis_la_publication" in texte
+    assert '"${ajouts:-0}" -eq 0 ] && [ "${corrections:-0}" -eq 0' in texte
+
+
+# ── Un brouillon n'est généré que si la génération est allée au bout ─────────
+#
+# 04/10/2026 : `stats.json` est le premier fichier de `build_snapshot`. Un
+# plantage en cours de route le laissait derrière lui, l'atelier construisait
+# le site sur ce brouillon tronqué et affichait « 404 /entite/1129 » — la cause
+# était la génération, pas le build.
+
+def _plantage(out):
+    """Un builder qui écrit `stats.json` puis meurt, comme le vrai."""
+    snapshot(out, [1])
+    raise RuntimeError("plantage en cours de génération")
+
+
+def test_un_brouillon_tronque_par_un_plantage_ne_se_construit_pas(
+        publication, emplacements, monkeypatch):
+    publication.generer_apercu(builder=builder([1, 2]),
+                               controleur=lambda cible: controle(True))
+    with pytest.raises(RuntimeError):
+        publication.generer_apercu(builder=_plantage,
+                                   controleur=lambda cible: controle(True))
+    assert (emplacements["brouillon"] / "stats.json").is_file()   # le piège
+    monkeypatch.setattr(publication, "_vite", lambda: Path("/absent"))
+
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.construire_apercu()
+
+    assert "pas allée au bout" in str(refus.value)
+    assert publication.etape(publication.lire_etat()) == "aucun_apercu"
+
+
+def test_un_brouillon_tronque_ne_se_publie_pas(publication, emplacements):
+    snapshot(emplacements["publie"], [1], marque="en ligne")
+    avant = empreinte(emplacements["publie"])
+    publication.generer_apercu(builder=builder([1, 2]),
+                               controleur=lambda cible: controle(True))
+    with pytest.raises(RuntimeError):
+        publication.generer_apercu(builder=_plantage,
+                                   controleur=lambda cible: controle(True))
+
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.publier(auteur="admin@exemple", role="admin",
+                            controleur=lambda cible: controle(True))
+
+    assert "pas allée au bout" in str(refus.value)
+    assert empreinte(emplacements["publie"]) == avant
+
+
+def test_une_generation_menee_au_bout_se_construit(publication, emplacements,
+                                                   monkeypatch):
+    publication.generer_apercu(builder=builder([1, 2]),
+                               controleur=lambda cible: controle(True))
+    monkeypatch.setattr(publication, "_vite", lambda: Path("/absent"))
+
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.construire_apercu()
+
+    # Refusé plus loin, pour les dépendances du site — pas pour la génération.
+    assert "pas allée au bout" not in str(refus.value)
+    assert "pnpm install" in str(refus.value)
+
+
+def test_un_brouillon_anterieur_a_la_regle_est_refuse_et_se_regenere(
+        publication, emplacements):
+    """Compat : un état écrit avant `complet` ne dit pas si le répertoire est
+    entier. Refusé, puis une régénération suffit."""
+    snapshot(emplacements["brouillon"], [1, 2])
+    publication.ecrire_etat({"brouillon": {
+        "genere_le": "2026-09-30T10:00:00+00:00", "controle": controle(True),
+        "repertoire": str(emplacements["brouillon"]), "existe": True}})
+
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.publier(auteur="admin@exemple", role="admin",
+                            controleur=lambda cible: controle(True))
+    assert "pas allée au bout" in str(refus.value)
+
+    publication.generer_apercu(builder=builder([1, 2]),
+                               controleur=lambda cible: controle(True))
+    publication.publier(auteur="admin@exemple", role="admin",
+                        controleur=lambda cible: controle(True))
+
+
+def test_l_etat_d_un_brouillon_ne_vaut_pas_pour_un_autre_repertoire(
+        publication, emplacements, tmp_path):
+    publication.generer_apercu(builder=builder([1]),
+                               controleur=lambda cible: controle(True))
+    autre = tmp_path / "ailleurs"
+    snapshot(autre, [1])
+    assert publication._generation_aboutie(emplacements["brouillon"]) is True
+    assert publication._generation_aboutie(autre) is False
+
+
+def test_un_apercu_de_compte_tronque_ne_se_construit_ni_ne_se_publie(
+        publication, emplacements, tmp_path, monkeypatch):
+    monkeypatch.setattr(publication, "APERCUS", tmp_path / "apercus")
+    monkeypatch.setattr(publication, "VERROU", tmp_path / "publication.lock")
+    publication.generer_apercu_du_compte(
+        7, "x", builder=builder([1, 2]), controleur=lambda cible: controle(True))
+    with pytest.raises(RuntimeError):
+        publication.generer_apercu_du_compte(
+            7, "x", builder=_plantage, controleur=lambda cible: controle(True))
+    apercu = publication.apercu_du_compte(7)
+    monkeypatch.setattr(publication, "_vite", lambda: Path("/absent"))
+
+    assert apercu["existe"] is False        # la fiche a été retirée avant le builder
+    with pytest.raises(publication.PublicationRefusee) as refus:
+        publication.construire_apercu(Path(apercu["repertoire"]))
+    assert "pas allée au bout" in str(refus.value)
+    with pytest.raises(publication.PublicationRefusee):
+        publication.publier(auteur="a", role="admin", apercu=apercu,
+                            controleur=lambda cible: controle(True))

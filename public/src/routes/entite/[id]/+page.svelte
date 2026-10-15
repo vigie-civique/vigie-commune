@@ -1,0 +1,634 @@
+<script>
+  import { COMMUNE, SITE_NOM } from '#lib/instance.js'
+  import { onMount } from 'svelte'
+  import { TYPE_LABELS, euros } from '#lib/data.js'
+  import { enumerer } from '#lib/couverture.js'
+  import { poserFond } from '#lib/carte/fond.js'
+
+  // Fiche acteur. Jusqu'au 26/07/2026 elle n'affichait que nom, type, fiabilité
+  // et un point sur la carte : les 6 154 liens acteur↔événement de la base
+  // n'étaient pas exportés. Ils le sont désormais (dans `entite/<id>.json`), ce qui
+  // permet enfin de répondre à la seule question qui compte sur une fiche :
+  // « qu'est-ce que cet acteur a à voir avec les affaires de la commune ? »
+
+  // Données fournies par +page.server.js au prérendu : un seul bundle
+  // `data/entite/<id>.json`, déjà filtré et résolu. Le composant téléchargeait
+  // auparavant six JSON complets (~3 Mo) pour n'en afficher qu'une fraction, et
+  // faisait tout le filtrage dans le navigateur.
+  export let data
+
+  $: ({ entity, relations, liens, flows, marches } = data)
+  // Les financeurs relevés ou non par la collecte (cf. +page.server.js).
+  $: releves = (data.financeurs || []).filter((f) => f.releve)
+  $: nonReleves = (data.financeurs || []).filter((f) => !f.releve)
+  const minuscule = (f) => f.libelle[0].toLowerCase() + f.libelle.slice(1)
+
+  // Comptes d'un syndicat auquel l'intercommunalité adhère (balances DGFiP).
+  // Le dernier exercice publié, budget par budget — jamais additionnés — et,
+  // en dessous, la tendance des recettes de fonctionnement. Un poste absent de
+  // la balance n'est pas affiché : zéro et « aucun compte » ne disent pas la
+  // même chose.
+  $: comptes = data.comptes_syndicat || []
+  $: dernierExercice = comptes[0]
+  const POSTES_SYNDICAT = [
+    ['recettes_fonctionnement', 'Recettes de fonctionnement'],
+    ['contributions_membres', '… dont contributions des membres'],
+    ['ventes_et_redevances', '… dont ventes et redevances'],
+    ['depenses_fonctionnement', 'Dépenses de fonctionnement'],
+    ['personnel', '… dont personnel'],
+    ['subventions_versees', '… dont subventions versées'],
+    ['depenses_investissement', 'Dépenses d’équipement'],
+    ['subventions_equipement_versees', 'Subventions d’équipement versées'],
+    ['encours_dette', 'Encours de la dette au 31/12'],
+  ]
+  const FINANCEURS = [
+    ['subventions_etat', 'État'], ['subventions_region', 'Région'],
+    ['subventions_departement', 'Département'], ['subventions_europe', 'Union européenne'],
+    ['subventions_autres', 'Autres (dont agences de l’eau)'],
+  ]
+  // La tendance ne suit que le budget principal — le plus gros de chaque
+  // exercice — pour ne pas mêler deux budgets sur une même ligne.
+  $: tendance = comptes.slice().reverse().map((c) => {
+    const principal = c.budgets.reduce((m, b) =>
+      (b.postes.recettes_fonctionnement ?? 0) > (m?.postes.recettes_fonctionnement ?? -1) ? b : m, null)
+    return { year: c.year, recettes: principal?.postes.recettes_fonctionnement }
+  }).filter((t) => t.recettes != null)
+  $: id = entity?.id
+
+  // Chronologie — pour les personnes exerçant un rôle public.
+  //
+  // La fiche listait des mandats, des commissions et des versements dans des
+  // blocs séparés, chacun trié pour son compte. Or ce qu'on cherche sur une
+  // personne, c'est une trajectoire : quand elle entre au conseil, quand elle
+  // prend une commission, quand une structure qu'elle dirige reçoit une
+  // subvention. Ces faits ne prennent leur sens que remis dans l'ordre, les uns
+  // à côté des autres.
+  //
+  // Rien de nouveau n'est affirmé ici : ce sont les mêmes données, remises en
+  // ordre. Chaque entrée reste rattachée à ce qui l'atteste.
+  const libelleRel = (r) => {
+    const l = REL_LABELS[r.relation_type]
+    if (!l) return r.relation_type
+    return typeof l === 'string' ? l : (r.from_id === id ? l.from : l.to)
+  }
+
+  $: chronologie = entity?.type !== 'person' ? [] : [
+    // Début et fin de chaque rôle : deux moments distincts, deux entrées.
+    ...relations.flatMap((r) => {
+      const autre = r.from_id === id ? r.to_name : r.from_name
+      const out = []
+      if (r.since) {
+        out.push({ date: r.since, genre: 'debut',
+                   texte: `${libelleRel(r)}, ${autre}` })
+      }
+      // Une relation dont le début et la fin tombent le même jour décrit un
+      // fait ponctuel — une candidature à une élection — et non une période.
+      // Afficher « Candidat·e » puis « Fin : Candidat·e » à la même date
+      // n'apprenait rien et faisait douter des dates.
+      if (r.until && r.until !== r.since) {
+        out.push({ date: r.until, genre: 'fin',
+                   texte: `Fin : ${libelleRel(r)}, ${autre}` })
+      }
+      return out
+    }),
+    // Versements où la personne ou sa structure est partie.
+    ...flows.filter((f) => f.year).map((f) => ({
+      date: String(f.year),
+      genre: 'argent',
+      texte: `${f.type_norm || f.type || 'Flux'}, ${f.to_id === id ? (f.from_name || '') : (f.to_name || '')}`,
+      montant: f.amount,
+    })),
+  ].sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+
+  const anneeDe = (d) => (d || '').slice(0, 4)
+  $: chronoParAnnee = chronologie.reduce((acc, e) => {
+    const a = anneeDe(e.date) || '-'
+    ;(acc[a] = acc[a] || []).push(e)
+    return acc
+  }, {})
+  $: anneesChrono = Object.keys(chronoParAnnee).sort().reverse()
+
+  const jourMois = (d) => {
+    if (!d || d.length < 10) return ''
+    try { return new Date(d + 'T00:00:00').toLocaleDateString('fr-FR', { day: '2-digit', month: 'short' }) }
+    catch { return '' }
+  }
+
+  let mapEl, map, L
+  let fondAbsent = ''
+
+  const ROLE_LABELS = {
+    sujet: 'Concerné', 'mentionné': 'Cité', organisateur: 'Organisateur',
+    lieu: 'Lieu', beneficiaire: 'Bénéficiaire', 'bénéficiaire': 'Bénéficiaire',
+    votant: 'A voté', acheteur: 'Acheteur', vendeur: 'Vendeur', 'présent': 'Présent',
+  }
+  const TYPE_EVENT = {
+    deliberation: 'Délibération', conseil_municipal: 'Conseil municipal',
+    'délibérations_cc': 'Délibération intercommunale', pv_cc: 'PV intercommunal',
+    'marché_public': 'Marché public', local_event: 'Événement',
+    exposition: 'Exposition', evenement_culturel: 'Événement culturel',
+    bodacc_creation: 'Création (BODACC)', bodacc_radiation: 'Radiation (BODACC)',
+    bodacc_modification: 'Modification (BODACC)', bodacc_vente: 'Vente (BODACC)',
+    bodacc_collective: 'Procédure collective (BODACC)', bodacc_divers: 'Annonce (BODACC)',
+    'actualité_cc': 'Actualité intercommunale', article_local: 'Article',
+  }
+  // `confirmed` n'est jamais attribué en base (constat du 12/08/2026, cf.
+  // /methode) : le libellé est conservé pour ne pas afficher un code brut si
+  // la valeur réapparaissait, mais il n'y a rien à documenter de plus.
+  const CONF_LABELS = { verified: 'Source publique identifiée', confirmed: 'Recoupée' }
+  // Certains types de lien sont orientés (from = financeur, to = bénéficiaire).
+  // Un libellé fixe inversait le sens réel : la fiche de la commune affichait
+  // « Subventionné par <asso> » alors que c'est elle qui verse. Ces types-là
+  // prennent donc deux formes, choisies selon la position de la fiche courante.
+  const REL_LABELS = {
+    maire: 'Maire', adjoint: 'Adjoint·e', 'élu_cm': 'Conseiller·ère municipal·e',
+    'élu_cc': 'Conseiller·ère communautaire', 'délégué_cm': 'Délégué·e',
+    'délégué_cc': 'Délégué·e communautaire', membre_commission: 'Membre de commission',
+    candidat: 'Candidat·e', agent_communal: 'Agent communal',
+    'subventionné': { from: 'Subventionne', to: 'Subventionné par' },
+    prestataire: { from: 'Prestataire de', to: 'Prestataire' },
+    prestataire_commune: { from: 'Prestataire de', to: 'Prestataire' },
+    locataire_commune: { from: 'Locataire de', to: 'Loue à' },
+    dirigeant: { from: 'Dirige', to: 'Dirigeant·e' },
+    'gérant': { from: 'Gère', to: 'Gérant·e' },
+    'président': { from: 'Préside', to: 'Président·e' },
+    'propriétaire': { from: 'Propriétaire de', to: 'Propriétaire' },
+  }
+
+  // Seule la carte reste chargée côté client : Leaflet a besoin du DOM, et le
+  // texte de la fiche doit partir dans le HTML prérendu sans attendre le JS.
+  onMount(async () => {
+    if (!entity?.lat || !entity?.lng) return
+    L = (await import('leaflet')).default
+    await import('leaflet/dist/leaflet.css')
+    map = L.map(mapEl, { attributionControl: true, zoomControl: false }).setView([entity.lat, entity.lng], 15)
+    // Fond servi avec le site, jamais chez un tiers. C'est la page la plus
+    // nombreuse du site — un millier de fiches par instance — donc celle qui
+    // envoyait le plus d'adresses de lecteurs à openstreetmap.org, et sur
+    // laquelle la politique d'usage de leurs tuiles était le plus clairement
+    // dépassée. Cf. #lib/carte/fond.js
+    const fond = await poserFond(L, map)
+    if (!fond.ok) fondAbsent = fond.raison
+    L.circleMarker([entity.lat, entity.lng], { radius: 8, color: '#fff', weight: 2, fillColor: '#2563eb', fillOpacity: .9 }).addTo(map)
+  })
+
+  const today = new Date().toISOString().slice(0, 10)
+  const actif = (r) => !r.until || r.until > today
+  $: relActives = relations.filter(actif)
+  $: relPassees = relations.filter(r => !actif(r))
+
+  // Synthèse : ce qu'il faut retenir avant de dérouler les listes.
+  $: recu = flows.filter(f => f.to_id === id && f.statut !== 'demande')
+                 .reduce((s, f) => s + (f.amount || 0), 0)
+  $: verse = flows.filter(f => f.from_id === id && f.statut !== 'demande')
+                  .reduce((s, f) => s + (f.amount || 0), 0)
+  // Un cumul sans sa période se lit comme un montant annuel : « REÇU 7 M€ »
+  // additionnait 2016-2026 sans le dire (audit du 24/09/2026).
+  const periodeDe = (rows) => {
+    const a = rows.filter(f => f.statut !== 'demande').map(f => f.year).filter(Boolean).sort()
+    if (!a.length) return ''
+    return a[0] === a[a.length - 1] ? `en ${a[0]}` : `cumul ${a[0]}–${a[a.length - 1]}`
+  }
+  $: periodeRecu = periodeDe(flows.filter(f => f.to_id === id))
+  $: periodeVerse = periodeDe(flows.filter(f => f.from_id === id))
+  $: derniere = liens.find(e => e.date)?.date
+
+  // ── L'état d'activité, dit par les registres ou tu par eux ──────────────
+  // `actif` à null n'est PAS « en activité » : une association qui a cessé de
+  // se réunir sans déclarer sa dissolution reste « A » au Journal officiel
+  // pour toujours. Quand le registre se tait, on donne à la place le seul fait
+  // qu'on possède — l'année où une source publique l'a nommée en dernier.
+  const NATURES = {
+    societe: 'Société',
+    individuelle: 'Entreprise individuelle',
+    patrimoniale: 'Société de patrimoine (activité immobilière déclarée)',
+  }
+  const ANNEE = new Date().getFullYear()
+  $: an = (d) => (d || '').toString().slice(0, 4)
+  $: etat = !entity ? null
+    : entity.actif === false
+      ? `${entity.type === 'association' ? 'Dissoute' : 'Cessée'}${an(entity.fin_activite) ? ` en ${an(entity.fin_activite)}` : ''}`
+    : entity.actif === true ? 'En activité selon les registres'
+    : null
+  $: silence = entity && entity.actif == null
+    && ['business', 'association'].includes(entity.type)
+  $: anneesFlux = [...new Set(flows.map(f => f.year).filter(Boolean))].sort()
+
+  const fmt = (d) => d
+    ? new Date(d + 'T00:00:00').toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
+    : '-'
+  const relLabel = (r) => {
+    const l = REL_LABELS[r.relation_type]
+    if (!l) return (r.relation_type || '').replace(/_/g, ' ')
+    if (typeof l === 'string') return l
+    return r.from_id === id ? l.from : l.to
+  }
+
+  // Sur une fiche comme la Commune, la liste à plat répétait 15 fois
+  // « Conseiller·ère municipal·e … depuis 2026 » : ni le rôle ni l'année ne
+  // distinguaient quoi que ce soit. On regroupe par libellé (donc par type ET
+  // par sens) et on ne date que ce qui se distingue. Au-delà de MAX_NOMS, le
+  // reste passe dans un <details> — 121 bénéficiaires de subvention à la suite
+  // formaient un pavé illisible.
+  const MAX_NOMS = 12
+  function grouperRels(list) {
+    const m = new Map()
+    for (const r of list) {
+      const k = relLabel(r)
+      if (!m.has(k)) m.set(k, [])
+      m.get(k).push(r)
+    }
+    return [...m].map(([label, items]) => {
+      const annees = new Set(items.map(r => r.since ? r.since.slice(0, 4) : null))
+      return {
+        label, items,
+        visibles: items.slice(0, MAX_NOMS),
+        reste: items.slice(MAX_NOMS),
+        annee: annees.size === 1 ? [...annees][0] : null,
+      }
+    })
+  }
+  $: groupesActifs = grouperRels(relActives)
+  const evLabel = (t) => TYPE_EVENT[t] || t
+</script>
+
+<!-- Maintenant que la page est prérendue, ces balises servent enfin à quelque
+     chose : c'est ce qu'un moteur de recherche et un partage de lien affichent. -->
+<svelte:head>
+  <title>{entity?.name || 'Fiche'} - {entity?.commune || '{COMMUNE}'} | {SITE_NOM}</title>
+  <meta name="description" content={
+    `${entity?.name || ''} : ${TYPE_LABELS[entity?.type] || ''}`
+    + (entity?.commune ? ` à ${entity.commune}` : '')
+    + `. ${liens.length} acte(s) public(s) le citant, ${relActives.length} lien(s) en cours`
+    + (recu > 0 ? `, ${euros(recu)} reçus de fonds publics` : '')
+    + '. Données publiques.'} />
+</svelte:head>
+
+<section>
+  <a class="back" href="/acteurs-publics">← Qui agit&nbsp;?</a>
+
+  {#if entity}
+    <header>
+      <span class="badge {entity.type}">{TYPE_LABELS[entity.type] || entity.type}</span>
+      <h1>{entity.name}</h1>
+      {#if entity.short_name}<p class="alias">{entity.short_name}</p>{/if}
+    </header>
+
+    <!-- Synthèse chiffrée : le résumé avant le détail. -->
+    <div class="tiles">
+      {#if recu > 0}
+        <div class="tile"><span class="tval">{euros(recu)}</span><span class="tlabel">reçu{periodeRecu ? ` · ${periodeRecu}` : ''}</span></div>
+      {/if}
+      {#if verse > 0}
+        <div class="tile"><span class="tval">{euros(verse)}</span><span class="tlabel">versé{periodeVerse ? ` · ${periodeVerse}` : ''}</span></div>
+      {/if}
+      {#if relActives.length}
+        <div class="tile"><span class="tval">{relActives.length}</span><span class="tlabel">lien{relActives.length > 1 ? 's' : ''} en cours</span></div>
+      {/if}
+      {#if liens.length}
+        <div class="tile"><span class="tval">{liens.length}</span><span class="tlabel">acte{liens.length > 1 ? 's' : ''} le citant</span></div>
+      {/if}
+      {#if derniere}
+        <div class="tile"><span class="tval">{fmt(derniere)}</span><span class="tlabel">dernière apparition</span></div>
+      {/if}
+    </div>
+
+    <div class="cols">
+      <div class="info">
+        <h2>Informations</h2>
+        <dl>
+          <dt>Type</dt><dd>{TYPE_LABELS[entity.type] || entity.type}</dd>
+          {#if entity.commune}<dt>Commune</dt><dd>{entity.commune}</dd>{/if}
+          <dt>Fiabilité</dt><dd>{CONF_LABELS[entity.confidence] || entity.confidence}</dd>
+          {#if etat}<dt>État</dt><dd>{etat}</dd>{/if}
+          {#if silence}
+            <dt>État</dt>
+            <dd class="silence">
+              Les registres ne le disent pas.
+              {#if entity.derniere_trace}{' '}
+                Dernière fois qu'une source publique la nomme&nbsp;:
+                <b>{entity.derniere_trace}</b>{#if entity.derniere_trace < ANNEE - 5}, soit il y a plus de cinq ans{/if}.
+              {' '}{:else}{' '}
+                Aucune source publique ne la nomme.
+              {' '}{/if}
+            </dd>
+          {/if}
+          {#if entity.nature}<dt>Nature</dt><dd>{NATURES[entity.nature] || entity.nature}</dd>{/if}
+          {#if entity.naf_label}<dt>Activité</dt><dd>{entity.naf_label}</dd>{/if}
+          {#if entity.siren}<dt>SIREN</dt><dd>{entity.siren}</dd>{/if}
+          {#if entity.osm_category}<dt>Catégorie</dt><dd>{entity.osm_category} {entity.osm_value || ''}</dd>{/if}
+          {#if entity.urls && entity.urls.length}
+            <dt>Liens</dt>
+            <dd>{#each entity.urls as u}<a href={u.url || u} target="_blank" rel="noopener">{u.label || u.domain || u}</a><br>{/each}</dd>
+          {/if}
+        </dl>
+
+        {#if relActives.length || relPassees.length}
+          <h2>Liens avec les autres acteurs</h2>
+          <ul class="rels">
+            {#each groupesActifs as g}
+              <li>
+                <span class="rel">{g.label}{#if g.items.length > 1}<span class="count">{g.items.length}</span>{/if}</span>
+                <span class="noms">
+                  {#each g.visibles as r, i}<a href="/entite/{r.autre_id}">{r.autre}</a>{#if !g.annee && r.since}<span class="since"> ({r.since.slice(0, 4)})</span>{/if}{#if i < g.visibles.length - 1}<span class="sep">·</span>{/if}{/each}
+                  {#if g.reste.length}
+                    <details>
+                      <summary>et {g.reste.length} autre{g.reste.length > 1 ? 's' : ''}</summary>
+                      {#each g.reste as r, i}<a href="/entite/{r.autre_id}">{r.autre}</a>{#if i < g.reste.length - 1}<span class="sep">·</span>{/if}{/each}
+                    </details>
+                  {/if}
+                </span>
+                {#if g.annee}<span class="since">depuis {g.annee}</span>{/if}
+              </li>
+            {/each}
+            {#each relPassees as r}
+              <li class="passe">
+                <span class="rel">{relLabel(r)}</span>
+                <a href="/entite/{r.autre_id}">{r.autre}</a>
+                <span class="since">
+                  {r.since ? r.since.slice(0, 4) : '?'}–{r.until ? r.until.slice(0, 4) : '?'} · terminé
+                </span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+
+        {#if flows.length}
+          <h2>Flux financiers</h2>
+          <p class="note">
+            Montants constatés, hors agrégats comptables et hors subventions
+            seulement sollicitées. {anneesFlux.length ? `Période ${anneesFlux[0]}–${anneesFlux[anneesFlux.length - 1]}.` : ''}
+          </p>
+          <table>
+            <thead><tr><th>Année</th><th>Nature</th><th class="r">Montant</th></tr></thead>
+            <tbody>
+              {#each flows as f}
+                <tr class:demande={f.statut === 'demande'}>
+                  <td>{f.year || '-'}</td>
+                  <td>
+                    <span class="ftype">{(f.type_norm || f.type || '').replace(/_/g, ' ')}</span>
+                    {#if f.statut === 'demande'}<span class="tag">demandé</span>{/if}
+                    {#if f.description}<span class="fdesc">{f.description}</span>{/if}
+                    <span class="fsens">{f.to_id === id ? `de ${f.from_name || '-'}` : `à ${f.to_name || '-'}`}</span>
+                  </td>
+                  <td class="r">{euros(f.amount)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+
+        {#if dernierExercice}
+          <h2>Comptes du syndicat <span class="count">{dernierExercice.year}</span></h2>
+          <p class="note">
+            Balances comptables publiées par la DGFiP : opérations réelles de
+            l’exercice, hors écritures d’ordre (amortissements, cessions). Les
+            contributions des membres sont celles de <em>tous</em> les membres
+            du syndicat, pas la seule part de la commune ou de son
+            intercommunalité.{#if dernierExercice.budgets.length > 1}{' '}
+            Ce syndicat tient {dernierExercice.budgets.length} budgets&nbsp;: ils
+            sont présentés séparément, un budget pouvant reverser à l’autre.{/if}
+          </p>
+          {#each dernierExercice.budgets as b}
+            {#if dernierExercice.budgets.length > 1}<h3 class="budget">{b.libelle}</h3>{/if}
+            <table>
+              <tbody>
+                {#each POSTES_SYNDICAT as [cle, libelle]}
+                  {#if b.postes[cle] != null}
+                    <tr class:sous={libelle.startsWith('…')}>
+                      <td>{libelle}</td><td class="r">{euros(b.postes[cle])}</td>
+                    </tr>
+                  {/if}
+                {/each}
+                {#if FINANCEURS.some(([cle]) => b.postes[cle])}
+                  <tr><td colspan="2" class="soustitre">Subventions reçues (fonctionnement et équipement)</td></tr>
+                  {#each FINANCEURS as [cle, libelle]}
+                    {#if b.postes[cle]}
+                      <tr class="sous"><td>{libelle}</td><td class="r">{euros(b.postes[cle])}</td></tr>
+                    {/if}
+                  {/each}
+                {/if}
+              </tbody>
+            </table>
+          {/each}
+          {#if tendance.length > 1}
+            <p class="note">
+              Recettes de fonctionnement du budget principal&nbsp;:
+              {#each tendance as t, i}{i ? ' · ' : ''}{t.year}&nbsp;: {euros(t.recettes)}{/each}.
+            </p>
+          {/if}
+        {/if}
+
+        {#if marches.length}
+          <h2>Marchés publics</h2>
+          <table>
+            <thead><tr><th>Notifié</th><th>Objet</th><th class="r">Montant</th></tr></thead>
+            <tbody>
+              {#each marches as m}
+                <tr>
+                  <td>{m.date_notif || '-'}</td>
+                  <td>{m.objet}<span class="fsens">{m.titulaire_id === id ? `pour ${m.acheteur_nom}` : `titulaire : ${m.titulaire_nom || '-'}`}</span></td>
+                  <td class="r">{m.montant ? euros(m.montant) : '-'}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+
+        <!-- Deux entrées suffisent : c'est déjà une trajectoire. Le seuil plus
+             haut masquait des fiches dont la chronologie tenait tout l'intérêt. -->
+        {#if chronologie.length > 1}
+          <h2>Chronologie <span class="count">{chronologie.length}</span></h2>
+          <p class="note chrono-note">
+            Les mêmes informations que ci-dessus, remises dans l'ordre. Une
+            chronologie rapproche des faits&nbsp;; elle n'établit pas de lien de
+            cause à effet entre eux.
+          </p>
+          <ol class="chrono">
+            {#each anneesChrono as annee}
+              <li class="an">
+                <span class="an-label">{annee}</span>
+                <ul>
+                  {#each chronoParAnnee[annee] as e}
+                    <li class={e.genre}>
+                      {#if jourMois(e.date)}<span class="jour">{jourMois(e.date)}</span>{/if}
+                      <span class="quoi">{e.texte}</span>
+                      {#if e.montant != null}<span class="montant">{euros(e.montant)}</span>{/if}
+                    </li>
+                  {/each}
+                </ul>
+              </li>
+            {/each}
+          </ol>
+        {/if}
+
+        {#if liens.length}
+          <h2>Actes et publications le concernant <span class="count">{liens.length}</span></h2>
+          <ul class="events">
+            {#each liens.slice(0, 60) as e}
+              <li>
+                <span class="date">{fmt(e.date)}</span>
+                <span class="etype">{evLabel(e.type)}</span>
+                <span class="etitle">
+                  {e.title}
+                  {#if e.role && ROLE_LABELS[e.role]}<em class="role">{ROLE_LABELS[e.role]}</em>{/if}
+                </span>
+                <span class="emeta">
+                  {#if e.montant_principal}<b>{euros(e.montant_principal)}</b>{/if}
+                  {#if e.vote}{' '}
+                    <span class="vote">
+                      {#if e.vote.unanimite}unanimité
+                      {' '}{:else}{e.vote.pour ?? '?'} pour · {e.vote.contre ?? 0} contre{/if}
+                    </span>
+                  {' '}{/if}
+                  {#if e.source_url}<a href={e.source_url} target="_blank" rel="noopener">source ↗</a>{/if}
+                </span>
+              </li>
+            {/each}
+          </ul>
+          {#if liens.length > 60}
+            <p class="note">Les 60 actes les plus récents sur {liens.length}.</p>
+          {/if}
+        {/if}
+
+        {#if !flows.length && !liens.length && !relations.length && !marches.length && !comptes.length}
+          <p class="empty">
+            Aucun acte public ni flux financier n'est rattaché à cet acteur dans
+            les sources collectées à ce jour.
+          </p>
+        {/if}
+
+        <!-- Ce que la fiche ne peut pas dire. Une association sans subvention
+             du département ne disait pas qu'aucun collecteur ne lit le
+             département : le lecteur concluait à l'absence d'aide, alors que
+             c'est une absence de collecte (refonte du contenu,
+             défaut 4). Les personnes n'en ont pas : elles ne sont publiées
+             qu'au titre d'un rôle, pas pour l'argent reçu. -->
+        {#if entity.type !== 'person' && nonReleves.length}
+          <h2>Ce que cette fiche ne peut pas dire</h2>
+          <p class="note">
+            {#if releves.length}L'argent public versé par {enumerer(releves.map(minuscule))}
+              est relevé par ce site&nbsp;; celui que verse{nonReleves.length > 1 ? 'nt' : ''}
+              {enumerer(nonReleves.map(minuscule))} ne l'est pas.
+            {' '}{:else}L'argent public versé par {enumerer(nonReleves.map(minuscule))}
+              n'est pas relevé par ce site.{/if} Qu'aucun
+            versement de {nonReleves.length > 1 ? 'leur' : 'sa'} part n'apparaisse
+            ici ne veut pas dire qu'il n'y en a pas.
+            <a href="/couverture">Ce que le site couvre</a>
+          </p>
+        {/if}
+      </div>
+
+      {#if entity.lat && entity.lng}
+        <div class="map" bind:this={mapEl}></div>
+        {#if fondAbsent}<p class="sans-fond">Fond de carte indisponible : le
+          repère reste à sa position exacte.</p>{/if}
+      {/if}
+    </div>
+  {/if}
+</section>
+
+<style>
+  dd.silence { color: var(--gris); font-size: .88rem; }
+  dd.silence b { color: var(--encre); }
+  /* Chronologie : l'année sert de repère, les entrées s'y accrochent. Le trait
+     vertical fait la trajectoire — c'est ce qui distingue une chronologie
+     d'une liste triée par date. */
+  .chrono { list-style: none; padding: 0; margin: .5rem 0 1.5rem; }
+  .chrono .an { display: grid; grid-template-columns: 4rem 1fr; gap: .75rem; }
+  .an-label { font-weight: 700; color: var(--ardoise); font-variant-numeric: tabular-nums;
+              padding-top: .3rem; }
+  .chrono .an > ul { list-style: none; margin: 0; padding: 0 0 .9rem 1rem;
+                     border-left: 2px solid var(--trait); }
+  .chrono .an > ul > li { position: relative; padding: .3rem 0;
+                          display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline;
+                          font-size: .9rem; color: var(--encre); }
+  .chrono .an > ul > li::before {
+    content: ''; position: absolute; left: -1.32rem; top: .72rem;
+    width: 7px; height: 7px; border-radius: 50%; background: var(--gris-clair);
+  }
+  .chrono li.debut::before  { background: var(--recette); }
+  .chrono li.fin::before    { background: var(--gris-clair); }
+  .chrono li.argent::before { background: var(--ambre); }
+  .chrono li.fin .quoi { color: var(--gris); }
+  .chrono .jour { font-size: .76rem; color: var(--gris); font-variant-numeric: tabular-nums;
+                  min-width: 4.2rem; }
+  .chrono .montant { font-size: .85rem; color: var(--ambre); font-variant-numeric: tabular-nums; }
+  .chrono-note { margin-bottom: .75rem; }
+  @media (max-width: 680px) {
+    .chrono .an { grid-template-columns: 1fr; gap: .2rem; }
+  }
+
+  section { max-width: 1000px; margin: 0 auto; padding: 1.5rem; }
+  .back { font-size: .9rem; }
+  header { margin: 1rem 0; }
+  h1 { margin: .3rem 0 0; color: var(--encre); }
+  .alias { color: var(--gris); margin: .2rem 0 0; }
+  .badge { font-size: .75rem; padding: .15rem .6rem; border-radius: 99px; color: #fff; background: var(--gris); }
+  .badge.service { background: var(--ardoise); } .badge.association { background: var(--recette); }
+  .badge.business { background: var(--ambre); } .badge.place { background: var(--ardoise); } .badge.person { background: var(--depense); }
+
+  .tiles { display: flex; flex-wrap: wrap; gap: .6rem; margin: 1rem 0 1.4rem; }
+  .tile { background: var(--papier); border: 1px solid var(--trait); border-radius: 10px;
+          padding: .6rem .9rem; display: flex; flex-direction: column; min-width: 8rem; }
+  .tval { font-size: 1.15rem; font-weight: 600; color: var(--encre); }
+  .tlabel { font-size: .75rem; color: var(--gris); text-transform: uppercase; letter-spacing: .03em; }
+
+  .cols { display: grid; grid-template-columns: 1fr 380px; gap: 1.5rem; }
+  h2 { font-size: 1.1rem; color: var(--encre); margin: 1.6rem 0 .5rem; }
+  h2 .count { font-size: .8rem; color: var(--gris-clair); font-weight: 400; }
+  dl { display: grid; grid-template-columns: 130px 1fr; gap: .4rem 1rem; margin: 0; }
+  dt { color: var(--gris); } dd { margin: 0; }
+  .note { color: var(--gris); font-size: .82rem; margin: .2rem 0 .6rem; }
+  .empty { color: var(--gris); background: var(--papier); border: 1px solid var(--trait);
+           border-radius: 8px; padding: .9rem; font-size: .9rem; }
+
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: .45rem .5rem; border-bottom: 1px solid var(--trait); vertical-align: top; }
+  th { color: var(--gris); font-weight: 500; }
+  .r { text-align: right; white-space: nowrap; }
+  tr.demande td { color: #78716c; }
+  .ftype { text-transform: capitalize; }
+  .tag { font-size: .68rem; background: var(--ambre-pale); color: var(--ambre); padding: .05rem .4rem;
+         border-radius: 99px; margin-left: .3rem; }
+  .fdesc, .fsens { display: block; color: var(--gris); font-size: .8rem; }
+  tr.sous td:first-child { padding-left: 1.2rem; color: var(--gris); }
+  .soustitre { font-size: .8rem; color: var(--gris); padding-top: .6rem; }
+  h3.budget { font-size: .9rem; margin: .8rem 0 .3rem; }
+
+  .rels { list-style: none; padding: 0; margin: 0; }
+  .rels li { display: grid; grid-template-columns: 12rem 1fr auto; gap: .2rem .8rem; align-items: baseline;
+             padding: .35rem 0; border-bottom: 1px solid var(--trait-pale); font-size: .92rem; }
+  .rels .rel { color: var(--gris); }
+  .rels .count { display: inline-block; margin-left: .35rem; padding: 0 .35rem; border-radius: 99px;
+                 background: var(--trait-pale); color: var(--gris); font-size: .75rem; }
+  .rels .noms { line-height: 1.6; }
+  .rels .sep { color: var(--trait); margin: 0 .35rem; }
+  .rels details { margin-top: .15rem; }
+  .rels summary { cursor: pointer; color: var(--gris); font-size: .82rem; }
+  .rels summary:hover { color: var(--ardoise); }
+  .rels .since { color: var(--gris-clair); font-size: .8rem; white-space: nowrap; }
+  .rels li.passe { opacity: .65; }
+
+  .events { list-style: none; padding: 0; margin: 0; }
+  .events li { display: grid; grid-template-columns: 6.5rem 9rem 1fr auto;
+               gap: .6rem; align-items: baseline; padding: .45rem .2rem;
+               border-bottom: 1px solid var(--trait-pale); font-size: .9rem; }
+  .events .date { color: var(--ardoise); font-size: .82rem; white-space: nowrap; }
+  .events .etype { color: var(--gris); font-size: .78rem; }
+  .events .role { color: var(--gris-clair); font-style: normal; font-size: .75rem;
+                  border: 1px solid var(--trait); border-radius: 99px; padding: 0 .4rem; margin-left: .35rem; }
+  .events .emeta { text-align: right; white-space: nowrap; font-size: .8rem; color: var(--gris); }
+  .events .vote { color: var(--gris); margin-left: .4rem; }
+  .events a { font-size: .78rem; color: var(--gris); margin-left: .4rem; }
+
+  .map { height: 320px; border-radius: 10px; border: 1px solid var(--trait); }
+  .sans-fond { margin: .5rem 0 0; font-size: .82rem; color: var(--gris); }
+  .err { color: var(--depense); }
+  @media (max-width: 760px) {
+    .cols { grid-template-columns: 1fr; } .map { height: 260px; }
+    .rels li { grid-template-columns: 1fr; gap: .1rem; }
+    .events li { grid-template-columns: 1fr; gap: .15rem; }
+    .events .emeta { text-align: left; }
+  }
+</style>

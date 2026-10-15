@@ -1,0 +1,381 @@
+"""La saisie manuelle : ce qu'elle écrit, et ce qu'elle ne peut pas toucher.
+
+Deux propriétés à tenir, et elles comptent autant l'une que l'autre.
+
+**Rejouable** — une saisie vit dans `config/saisies.json` et non en base, parce
+que la base est reconstructible et le jugement humain non. Si le rejeu n'est pas
+idempotent, chaque collecte double les montants publiés : ce piège a déjà été
+payé deux fois dans ce projet, sur les subventions puis sur les baux.
+
+**Cloisonnée** — le collecteur de saisies n'écrit et ne supprime que des lignes
+dont il est l'auteur. La règle « ne pas corrompre ce qui vient d'un collecteur
+institutionnel » doit tenir même si le fichier de saisies est trafiqué.
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from collectors.origine import ATELIER, INSTITUTIONNEL
+
+
+@pytest.fixture
+def atelier(tmp_path, monkeypatch, schema_sql):
+    """Une base réelle et un fichier de saisies, tous deux jetables."""
+    import sqlite3
+
+    from collectors import db as db_mod
+
+    chemin_db = tmp_path / "instance.db"
+    conn = sqlite3.connect(chemin_db)
+    conn.executescript(schema_sql)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(db_mod, "DB_PATH", chemin_db)
+
+    fichier = tmp_path / "saisies.json"
+
+    from collectors import saisies as mod
+    monkeypatch.setattr(mod, "SAISIES", fichier)
+
+    def ecrire(*lignes):
+        fichier.write_text(json.dumps({"version": 1, "saisies": list(lignes)},
+                                      ensure_ascii=False), encoding="utf-8")
+
+    def lire(sql, params=()):
+        c = sqlite3.connect(chemin_db)
+        c.row_factory = sqlite3.Row
+        try:
+            return [dict(r) for r in c.execute(sql, params)]
+        finally:
+            c.close()
+
+    return {"ecrire": ecrire, "lire": lire, "db": chemin_db, "fichier": fichier}
+
+
+def saisie_flux(**surcharge):
+    base = {
+        "id": "a1b2c3d4",
+        "objet": "flux",
+        "valeurs": {
+            "type": "subvention", "year": 2026, "amount": 1200.0,
+            "sens": "verse", "tiers": {"nom": "Foyer rural", "type": "association"},
+            "description": "Subvention votée au conseil du 27 avril",
+        },
+        "source": {"raw_document_id": None, "sans_document_motif": "test",
+                   "citation": "« une subvention de 1 200 € »"},
+        "confidence": "confirmed",
+        "saisi_par": "julien@exemple.fr",
+        "saisi_le": "2026-08-20T22:00:00+00:00",
+    }
+    base.update(surcharge)
+    return base
+
+
+class TestEcriture:
+    def test_un_flux_saisi_arrive_en_base(self, atelier):
+        from collectors.saisies import import_saisies
+
+        atelier["ecrire"](saisie_flux())
+        resultat = import_saisies()
+
+        assert resultat["ecrites"] == 1
+        lignes = atelier["lire"]("SELECT * FROM financial_flows")
+        assert len(lignes) == 1
+        ligne = lignes[0]
+        assert ligne["amount"] == 1200.0
+        assert ligne["origine"] == ATELIER
+        assert ligne["source"] == "atelier:a1b2c3d4"
+        assert ligne["saisi_par"] == "julien@exemple.fr"
+
+    def test_le_sens_decide_du_payeur(self, atelier):
+        """« Versé » et « reçu » ne sont pas un détail d'affichage : ils
+        décident de quel côté du budget la somme apparaît."""
+        from collectors.saisies import import_saisies
+
+        atelier["ecrire"](saisie_flux(),
+                          saisie_flux(id="e5f6", valeurs={
+                              **saisie_flux()["valeurs"], "sens": "recu",
+                              "type": "dotation"}))
+        import_saisies()
+
+        recue, versee = atelier["lire"](
+            "SELECT from_id, to_id, type FROM financial_flows ORDER BY type")
+        assert recue["type"] == "dotation"           # encaissée par la commune
+        assert versee["type"] == "subvention"        # payée par la commune
+        assert recue["from_id"] == versee["to_id"]   # le tiers, des deux côtés
+        assert recue["to_id"] == versee["from_id"]   # la commune, des deux côtés
+
+    def test_lassemblee_decide_qui_paie(self, atelier):
+        """Une convention votée par l'intercommunalité n'est pas une dépense de
+        la commune. Sans ce champ, toute saisie de flux la lui attribuait."""
+        from collectors.db import pivot_ids
+        from collectors.saisies import import_saisies
+
+        atelier["ecrire"](saisie_flux(valeurs={**saisie_flux()["valeurs"],
+                                               "assemblee": "epci"}))
+        import_saisies()
+
+        import sqlite3
+        conn = sqlite3.connect(atelier["db"])
+        conn.row_factory = sqlite3.Row
+        pivots = pivot_ids(conn)
+        conn.commit()
+        ligne = atelier["lire"]("SELECT from_id, to_id FROM financial_flows")[0]
+        assert ligne["from_id"] == pivots["epci"]
+        assert ligne["to_id"] != pivots["commune"]
+
+    def test_sans_assemblee_la_commune_paie(self, atelier):
+        from collectors.db import pivot_ids
+        from collectors.saisies import import_saisies
+
+        atelier["ecrire"](saisie_flux())
+        import_saisies()
+
+        import sqlite3
+        conn = sqlite3.connect(atelier["db"])
+        conn.row_factory = sqlite3.Row
+        assert atelier["lire"]("SELECT from_id FROM financial_flows")[0]["from_id"] \
+            == pivot_ids(conn)["commune"]
+
+    def test_le_rejeu_ne_double_pas(self, atelier):
+        """Le piège déjà payé deux fois : `financial_flows` n'a aucune contrainte
+        UNIQUE, donc un INSERT OR IGNORE n'y ignore rien."""
+        from collectors.saisies import import_saisies
+
+        atelier["ecrire"](saisie_flux())
+        import_saisies()
+        second = import_saisies()
+
+        assert second["ecrites"] == 0
+        assert second["ignorees"] == 1
+        assert len(atelier["lire"]("SELECT id FROM financial_flows")) == 1
+
+    def test_une_ligne_de_budget_vote(self, atelier):
+        from collectors.saisies import import_saisies
+
+        atelier["ecrire"]({
+            "id": "bv01", "objet": "budget_vote",
+            "valeurs": {"year": 2026, "agregat": "Recettes de fonctionnement",
+                        "value": 2459773.03, "scope": "principal"},
+            "source": {"sans_document_motif": "test"},
+            "confidence": "confirmed", "saisi_par": "julien@exemple.fr",
+            "saisi_le": "2026-08-20T22:00:00+00:00",
+        })
+        import_saisies()
+
+        ligne, = atelier["lire"]("SELECT * FROM budget_vote")
+        assert ligne["value"] == pytest.approx(2459773.03)
+        assert ligne["origine"] == ATELIER
+
+
+class TestRetrait:
+    def test_retirer_efface_la_ligne_saisie(self, atelier):
+        from collectors.saisies import import_saisies
+
+        atelier["ecrire"](saisie_flux())
+        import_saisies()
+        atelier["ecrire"](saisie_flux(retire=True))
+        resultat = import_saisies()
+
+        assert resultat["retirees"] == 1
+        assert atelier["lire"]("SELECT id FROM financial_flows") == []
+
+    def test_le_retrait_natteint_aucune_ligne_de_collecteur(self, atelier):
+        """LE test de cloisonnement. Même avec un fichier de saisies fabriqué
+        pour désigner une ligne institutionnelle, le retrait ne peut pas
+        l'atteindre : il ne filtre que sur `source = atelier:<id>`."""
+        import sqlite3
+
+        conn = sqlite3.connect(atelier["db"])
+        conn.execute(
+            "INSERT INTO financial_flows(type, year, amount, source, origine) "
+            "VALUES('dotation', 2024, 90000, 'OFGL', ?)", (INSTITUTIONNEL,))
+        conn.commit()
+        conn.close()
+
+        from collectors.saisies import import_saisies
+
+        # Une saisie dont l'identifiant est choisi pour tenter d'attraper autre
+        # chose que ses propres lignes.
+        atelier["ecrire"]({"id": "' OR 1=1 --", "objet": "flux", "retire": True,
+                           "valeurs": {}, "source": {}})
+        import_saisies()
+
+        restantes = atelier["lire"]("SELECT source, origine FROM financial_flows")
+        assert len(restantes) == 1
+        assert restantes[0]["source"] == "OFGL"
+        assert restantes[0]["origine"] == INSTITUTIONNEL
+
+
+class TestCeQuUnFluxFaitNaitre:
+    """Un flux saisi crée son tiers et la relation qui les lie. Les deux
+    naissaient `confirmed` quelle que soit la saisie, et survivaient au retrait :
+    une proposition `probable` laissait en base une fiche et un lien publiables.
+    """
+
+    def _etat(self, atelier):
+        return (atelier["lire"]("SELECT name, confidence, origine FROM entities"
+                                " WHERE name='Foyer rural'"),
+                atelier["lire"]("SELECT confidence, source FROM relations"))
+
+    def test_une_saisie_probable_ne_cree_rien_de_publiable(self, atelier):
+        from collectors.saisies import import_saisies
+
+        atelier["ecrire"](saisie_flux(confidence="probable"))
+        import_saisies()
+
+        fiches, liens = self._etat(atelier)
+        assert fiches == [{"name": "Foyer rural", "confidence": "probable",
+                           "origine": ATELIER}]
+        assert liens == [{"confidence": "probable", "source": "atelier:a1b2c3d4"}]
+
+    def test_retirer_une_saisie_probable_emporte_tout(self, atelier):
+        from collectors.saisies import import_saisies
+
+        atelier["ecrire"](saisie_flux(confidence="probable"))
+        import_saisies()
+        atelier["ecrire"](saisie_flux(confidence="probable", retire=True))
+        import_saisies()
+
+        assert self._etat(atelier) == ([], [])
+        assert atelier["lire"]("SELECT id FROM financial_flows") == []
+
+    def test_une_fiche_confirmee_survit_au_retrait(self, atelier):
+        """Confirmée, la fiche a été tranchée : seuls le flux et son lien partent."""
+        from collectors.saisies import import_saisies
+
+        atelier["ecrire"](saisie_flux())
+        import_saisies()
+        atelier["ecrire"](saisie_flux(retire=True))
+        import_saisies()
+
+        fiches, liens = self._etat(atelier)
+        assert [f["confidence"] for f in fiches] == ["confirmed"] and liens == []
+
+    def test_un_tiers_deja_en_base_nest_ni_requalifie_ni_emporte(self, atelier):
+        import sqlite3
+
+        from collectors.saisies import import_saisies
+
+        conn = sqlite3.connect(atelier["db"])
+        eid = conn.execute(
+            "INSERT INTO entities(type, name, confidence, origine)"
+            " VALUES('association', 'Foyer rural', 'verified', ?)",
+            (INSTITUTIONNEL,)).lastrowid
+        conn.commit()
+        conn.close()
+
+        def ligne(**k):
+            s = saisie_flux(confidence="probable", **k)
+            s["valeurs"] = {**s["valeurs"], "tiers": {"id": eid}}
+            return s
+
+        atelier["ecrire"](ligne())
+        import_saisies()
+        atelier["ecrire"](ligne(retire=True))
+        import_saisies()
+
+        fiches, liens = self._etat(atelier)
+        assert fiches == [{"name": "Foyer rural", "confidence": "verified",
+                           "origine": INSTITUTIONNEL}]
+        assert liens == []
+
+    def test_deux_saisies_un_seul_lien_qui_survit_au_retrait_de_lune(self, atelier):
+        from collectors.saisies import import_saisies
+
+        seconde = saisie_flux(id="e5f6a7b8")
+        seconde["valeurs"] = {**seconde["valeurs"], "year": 2025}
+        atelier["ecrire"](saisie_flux(), seconde)
+        import_saisies()
+        assert len(self._etat(atelier)[1]) == 1
+
+        atelier["ecrire"](saisie_flux(retire=True), seconde)
+        import_saisies()
+        assert self._etat(atelier)[1] == [
+            {"confidence": "confirmed", "source": "atelier:e5f6a7b8"}]
+        assert len(atelier["lire"]("SELECT id FROM financial_flows")) == 1
+
+
+class TestContratDesChamps:
+    def test_chaque_objet_declare_sa_table(self):
+        from collectors.saisies import CHAMPS_SAISIE
+        for objet, contrat in CHAMPS_SAISIE.items():
+            assert contrat.get("_table"), objet
+            assert contrat.get("_libelle"), objet
+
+    def test_tout_objet_saisissable_a_un_inserteur(self):
+        """Un objet annoncé au formulaire sans code pour l'écrire produirait une
+        saisie acceptée, enregistrée dans le fichier, et jamais visible nulle
+        part — la pire des pannes, celle qui ne dit rien."""
+        from collectors.saisies import CHAMPS_SAISIE, _INSERTEURS
+        assert set(CHAMPS_SAISIE) == set(_INSERTEURS)
+
+    def test_verified_nest_pas_offert_a_la_saisie(self):
+        """Un humain qui lit un procès-verbal *confirme* ; il ne certifie pas.
+        `verified` reste la marque d'une source institutionnelle."""
+        from collectors.saisies import CONFIANCES
+        assert "verified" not in CONFIANCES
+
+
+class TestEcrituresSimultanees:
+    """Plusieurs éditeurs écrivent le même fichier : aucune saisie ne se perd.
+
+    Mesuré sur l'atelier de Lasalle le 17/09/2026, avant le verrou : quatre
+    éditeurs, vingt-cinq saisies chacun, 31 conservées sur 100 et 66 échecs sur
+    un temporaire disparu. Ceux dont la saisie avait été écrasée n'en savaient
+    rien — l'écriture avait réussi pour eux.
+    """
+
+    def test_quatre_editeurs_ne_perdent_rien(self, atelier):
+        import threading
+
+        from collectors import saisies as mod
+
+        erreurs = []
+
+        def editeur(n):
+            for i in range(25):
+                try:
+                    with mod.modifier() as data:
+                        data["saisies"].append({"id": f"{n}-{i}"})
+                except Exception as e:  # noqa: BLE001 — c'est ce qu'on compte
+                    erreurs.append(repr(e))
+
+        fils = [threading.Thread(target=editeur, args=(n,)) for n in range(4)]
+        for f in fils:
+            f.start()
+        for f in fils:
+            f.join()
+
+        assert erreurs == []
+        ids = {s["id"] for s in mod.charger()["saisies"]}
+        assert len(ids) == 100
+
+    def test_une_erreur_dans_le_bloc_ne_reecrit_rien(self, atelier):
+        from collectors import saisies as mod
+
+        atelier["ecrire"]({"id": "deja-la"})
+        with pytest.raises(RuntimeError):
+            with mod.modifier() as data:
+                data["saisies"].clear()
+                raise RuntimeError("abandon")
+        assert [s["id"] for s in mod.charger()["saisies"]] == ["deja-la"]
+
+    def test_a_blanc_ne_reecrit_rien(self, atelier):
+        from collectors import saisies as mod
+
+        atelier["ecrire"]({"id": "deja-la"})
+        with mod.modifier(ecrire=False) as data:
+            data["saisies"].append({"id": "jamais-ecrite"})
+        assert [s["id"] for s in mod.charger()["saisies"]] == ["deja-la"]
+
+    def test_aucun_temporaire_ne_traine(self, atelier):
+        from collectors import saisies as mod
+
+        with mod.modifier() as data:
+            data["saisies"].append({"id": "x"})
+        voisins = {p.name for p in atelier["fichier"].parent.iterdir()
+                   if p.name.startswith("saisies.json")}
+        assert voisins == {"saisies.json", "saisies.json.verrou"}

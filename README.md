@@ -1,0 +1,631 @@
+# Vigie Civique
+
+Un observatoire citoyen des décisions publiques d'une petite commune, construit
+à partir de données et de documents publics uniquement.
+
+Instance de référence : **[Lasalle (Gard, 30460)](https://lasalle.vigie-civique.fr)**
+— 1 421 fiches publiées, 4 025 actes dont 2 425 délibérations, les marchés
+publics, le budget et le foncier (relevé du 03/09/2026).
+
+En dessous de 3 500 habitants, l'obligation légale d'ouvrir ses données ne
+s'applique pas. C'est précisément là que rien n'est publié, et c'est le trou que
+ce dispositif cherche à combler.
+
+---
+
+## Ce que fait le dispositif
+
+Des **collecteurs** interrogent des sources publiques (SIRENE, RNA, BODACC, DVF,
+OFGL/DGFiP, DECP/BOAMP, Sitadel, Géorisques, RNE, BANATIC, HATVP, JADE, INSEE
+Melodi et base permanente des équipements, DPE, FINESS, cadastre Etalab,
+résultats électoraux, Hub'Eau, SISPEA, Géoportail de l'urbanisme, RAA de
+préfecture, chambres régionales des comptes, sites officiels de la commune et de
+l'intercommunalité) et alimentent une base SQLite.
+`python3 -m collectors.run_all` en enchaîne 48.
+
+Un **script de publication** (`scripts/build_public_snapshot.py`) en extrait un
+snapshot JSON filtré, qui alimente un **site statique** SvelteKit sans backend
+ni base de données en ligne.
+
+Un **atelier** (`dashboard/` + `api.py`) permet de corriger, valider et annoter
+la base, et d'y **saisir** ce qu'aucun collecteur ne peut atteindre — un budget
+voté, une dotation notifiée, une subvention lue dans un compte rendu. Il est
+**facultatif** et ne se met pas en ligne à la légère : voir « Les deux moitiés »
+plus bas.
+
+Ce que l'atelier a le droit de réécrire dépend de l'**origine** de la ligne. Une
+donnée déjà structurée par une administration (API, CSV) ne se rectifie pas à la
+main : le montant est celui qu'elle publie. Une donnée lue dans un PDF ou une
+page web, si — le chiffre y est notre lecture d'une phrase. Une ligne
+institutionnelle peut en revanche toujours être écartée de la publication.
+`collectors/origine.py` porte la règle, l'API la fait respecter.
+
+Le filtrage n'est pas un détail : c'est le cœur du dispositif. Il écarte les
+personnes physiques sans rôle civique public, les pistes de travail non
+établies, les liens de famille, les domiciles et les dates de naissance. Sur
+l'instance de Lasalle, la base de travail compte 3 984 personnes dont **49
+seulement sont publiées** — celles qui exercent une fonction publique — et
+292 relations publiées sur 1 497 (relevé du 03/09/2026).
+
+**Une entité non classée n'est pas publiée.** Le classement de périmètre
+(C1 la commune, C2 l'intercommunalité, C3 le supra-communal, `lien` le
+rattachement) est le dernier step de la collecte, et le snapshot refuse de se
+construire sur une base qui ne l'a jamais reçu. Le défaut inverse — publier ce
+qu'on n'a pas classé — a tenu jusqu'au 14/08/2026 : sur une instance neuve, il
+publiait 10 735 fiches dont 6 151 relevaient d'une commune voisine.
+
+**Être dans le périmètre ne veut pas dire être collecté au même niveau.** Le
+périmètre dit qui est suivi, la *profondeur* dit jusqu'où. La commune de
+collecte est suivie complètement ; l'intercommunalité l'est comme institution —
+compétences, élus, budgets, marchés, délibérations — et ses autres communes
+membres au titre du contexte institutionnel seulement. Leurs commerces, leurs
+associations, leurs mutations immobilières et leurs points d'intérêt ne sont pas
+aspirés : un site communal parle de sa commune. Le partage se lit dans
+`PROFONDEUR_STEP` (`collectors/config.py`), en un seul endroit, et une instance
+qui veut suivre plusieurs communes en propre le déclare dans `collecte.fond`.
+
+## Ce que le dispositif dit de lui-même
+
+Trois principes, visibles dans le code autant que sur le site :
+
+**La provenance de chaque acte est affichée sur sa propre ligne**, en trois
+axes indépendants — d'où vient l'information (source primaire, registre
+national, source secondaire), si le document est consultable, et ce qui a été
+fait entre la source et l'affichage (donnée structurée, extraction
+automatique, rectification humaine). Voir `provenance()` dans le script de
+publication.
+
+**Un fait, un calcul et une interprétation n'ont pas la même apparence.** Le
+composant `public/src/lib/components/Niveau.svelte` matérialise cette
+distinction. Un chiffre que le site calcule dit qu'il le calcule et sur quoi.
+
+**Les lacunes sont publiées.** La page `/couverture` expose la période
+réellement couverte par source, la fraîcheur de chaque collecteur et ce que le
+dispositif ne sait pas faire. Sur Lasalle, elle annonce en tête la part des
+actes qui renvoient vers la pièce elle-même : 65,6 % au 03/09/2026, soit 2 641
+sur 4 025.
+
+---
+
+## Les deux moitiés : le site public et l'atelier
+
+|  | **Site public** | **Atelier** |
+|---|---|---|
+| Sert | le snapshot filtré | la base de travail entière, **non filtrée** |
+| Hébergement | fichiers statiques, aucun backend | un serveur — ou rien du tout |
+| Nécessaire ? | c'est l'objet du dispositif | **non** |
+
+L'atelier lit et écrit la base de travail : celle qui contient ce que le site
+public écarte. Le mettre sur l'internet public, c'est exposer ce que le filtre
+retient. Trois usages possibles, par ordre de prudence :
+
+1. **en local**, le temps d'une session de travail, sur la machine qui porte la
+   base — rien n'est exposé, aucun secret à gérer. C'est le mode par défaut, et
+   il suffit tant qu'une seule personne tient l'instance ;
+2. **derrière un accès restreint** (VPN, réseau local) pour travailler à
+   plusieurs ;
+3. **en ligne avec TLS et comptes nommés**, quand plusieurs personnes
+   contribuent depuis des lieux différents.
+
+Le troisième cas n'est pas une décision technique : c'est une décision sur qui a
+accès à des données qu'on a choisi de ne pas publier. `deploy/README.md` détaille
+les trois, et ce que le dispositif fait — et ne fait pas — pour vous.
+
+---
+
+## Rejouer sur une autre commune : l'état réel
+
+Le site a longtemps publié que « changer de commune tient dans un seul fichier
+de configuration ». C'était exagéré. Voici où en est la mesure, refaite à
+chaque publication par `mesurer_replicabilite()` :
+
+| | fichiers nommant une commune | occurrences |
+|---|---|---|
+| moteur (collecteurs, scripts, API) | 0 | 0 |
+| site public | 0 | 0 |
+| atelier | 0 | 0 |
+
+Ces chiffres sont produits par `scripts/verifier_generique.py`, qui est aussi le
+contrôle d'admission du kit : le moteur est analysé par AST — pour ne pas
+confondre une docstring qui documente un piège avec le code qui l'applique — et
+le site, qui est du texte éditorial, ligne à ligne. Vous pouvez les refaire :
+
+```bash
+python3 scripts/verifier_generique.py
+```
+
+Le contrôle interdit des **formes** et pas seulement des mots : un code INSEE ou
+un SIREN littéral, un identifiant d'entité en dur (`XXX_ID = 63` — c'est un
+numéro de ligne, il désigne n'importe quoi dans une autre base), une URL de site
+officiel, un nom de base de données. Ces quatre règles-là sont exhaustives. La
+cinquième, qui cherche des noms de communes, ne vaut que ce que vaut sa liste.
+
+Ce qui est effectivement paramétré :
+
+| Où | Quoi | Versionné ? |
+|---|---|---|
+| `config/instance.json` | commune, INSEE, EPCI, communes membres, centroïde, éditeur | non |
+| `config/publication_rules.json` | règles de publication, sources autorisées, axes de provenance | non (exemple fourni) |
+| `config/profils_locaux.json` | élus et candidats | non |
+| `config/seed_local.json` | catalogue des comptes rendus, subventions, baux | non |
+| `public/src/lib/instance.js`, `dashboard/src/lib/instance.js` | libellés du site et de l'atelier | non — **générés** |
+
+Les deux `instance.js` ne s'éditent pas : `scripts/generer_libelles.py` les
+écrit depuis l'instance, et calcule les formes grammaticales — « d'Alès » et non
+« de Alès », « au Bez » et non « à Le Bez ». Une chaîne « de {COMMUNE} » écrite
+à la main finit toujours par produire une faute sur la commune suivante.
+
+Ce qui reste irréductible : les **collecteurs de sites officiels**
+(`events_scraper`, `cm_*`, connecteurs) dépendent de la structure du site de
+chaque mairie. Le moteur fournit des connecteurs pour deux familles courantes
+(WordPress via son API REST, Drupal en HTML) ; hors de là, il faut écrire
+l'analyseur. Il n'existe pas de format commun aux sites de mairie.
+
+En clair : les collecteurs nationaux (SIRENE, RNA, BODACC, DVF, OFGL, RNE,
+Sitadel, DECP, élections, Hub'Eau) fonctionnent tels quels pour n'importe quelle
+commune française. Le reste demande du travail. Comptez plutôt quelques jours
+qu'une heure.
+
+---
+
+## Installer sans taper une ligne
+
+Trois fichiers à la racine, un par système. On double-clique le sien, et tout le
+reste se passe dans le navigateur : la commune à observer, l'éditeur du site, le
+compte de l'atelier, la première collecte, la publication.
+
+| Système | Fichier à double-cliquer | La première fois |
+|---|---|---|
+| macOS | `Installer sur macOS.command` | clic droit → « Ouvrir » |
+| Windows | `Installer sur Windows.bat` | « Informations complémentaires » → « Exécuter quand même » |
+| Linux | `Installer sur Linux.sh` | clic droit → « Exécuter comme un programme » |
+
+Le détour par le clic droit n'est pas un défaut de l'installateur : c'est le
+contrôle de provenance du système, qui se prononce sur la signature d'un
+éditeur commercial et pas sur le contenu du fichier.
+
+**Rien n'est installé sur la machine.** Pas de mot de passe d'administrateur, pas
+de service qui démarre tout seul, pas de PATH modifié. Ce qui manque est posé
+dans `installateur/.outils/` : Node (depuis nodejs.org, empreinte vérifiée
+contre celle que le projet publie) et, si la machine n'a aucun Python ≥ 3.11, un
+interpréteur téléchargé par `uv`. Supprimer le dossier désinstalle tout.
+
+Ce que l'assistant fait dans l'ordre, chaque étape étant rejouable après une
+coupure : les outils, les dépendances (`venv` + `pnpm install --frozen-lockfile`), l'amorçage de
+l'instance depuis les référentiels nationaux, le secret de session et le premier
+compte, la collecte, la publication. Il finit en posant un fichier
+**« Vigie Civique »** à double-cliquer, qui ouvre l'atelier.
+
+Ce lanceur n'ouvre qu'UNE fenêtre et UNE adresse : l'atelier est construit
+(`dashboard/dist`) et servi par l'API elle-même. Plus de serveur de
+développement, plus de proxy — donc plus la panne la plus fréquente du
+dispositif, « Serveur inaccessible » affiché par une interface qui tourne très
+bien mais n'atteint pas son API.
+
+Ce montage se **demande** (`VIGIE_ATELIER_STATIQUE=1`, ce que fait le lanceur) :
+sans lui l'API ne sert rien à la racine, même si un `dist/` traîne d'un ancien
+build. Une instance existante ne change donc pas de comportement, et
+`pnpm run dev` reste le mode de développement.
+
+Ce que l'assistant ne devine pas — l'adresse du site de la mairie, le connecteur
+qui sait le lire, le chemin des recueils de la préfecture — est affiché en fin
+de parcours, tel que l'amorçage l'a laissé dans `config/instance.json`.
+
+L'assistant est un serveur local : il n'écoute que `127.0.0.1`, exige un jeton
+tiré au sort au démarrage et présent dans l'adresse ouverte, et vérifie l'en-tête
+`Host`. Une page web ouverte par ailleurs dans le même navigateur ne peut donc
+ni lire ce jeton ni s'en servir.
+
+---
+
+## Installation
+
+Les fichiers nationaux volumineux restent hors de Git. Par défaut, DECP et le
+cache DVF vivent sous `data/raw/`. Plusieurs instances installées sur la même
+machine peuvent partager un seul magasin en définissant son chemin absolu :
+
+```bash
+export VIGIE_NATIONAL_STORE=/chemin/vers/vigie-national
+```
+
+Le magasin contient les consolidés DECP, les réponses DVF Cerema par commune et
+les CSV DVF départementaux utilisés en repli. Supprimer une base communale ne
+supprime pas ce magasin ; il peut être purgé séparément lorsqu'on souhaite
+récupérer l'espace disque.
+
+C'est un cache, jamais une source : il peut être monté en lecture seule, ou
+appartenir à l'instance qui l'alimente. Une instance qui ne peut pas y écrire
+collecte normalement — elle télécharge, elle se sert, elle ne partage pas.
+
+```bash
+python3 -m venv venv && venv/bin/pip install -r requirements.txt
+
+# 1. Amorcer l'instance depuis le code INSEE de la commune.
+#    Interroge geo.api.gouv.fr et recherche-entreprises.api.gouv.fr, écrit
+#    config/instance.json, adapte les règles de publication, et génère les
+#    libellés du site et de l'atelier.
+venv/bin/python scripts/init_instance.py 30140
+
+#    → relire config/instance.json : c'est le SEUL endroit du dispositif où une
+#      donnée de commune a le droit d'exister. Renseigner la clé « editeur »
+#      (nom, statut, courriel, hébergeur) : les mentions légales l'affichent.
+
+cp config/profils_locaux.exemple.json config/profils_locaux.json
+cp config/seed_local.exemple.json config/seed_local.json
+
+# 2. Collecter. Le step « init » crée la base, le step « perimetre » la classe.
+venv/bin/python -m collectors.run_all
+
+# 3. Publier : snapshot filtré → contrôles → site statique dans public/build/
+cd public && pnpm install --frozen-lockfile && cd ..
+./deploy/publier-site.sh
+```
+
+> **`--frozen-lockfile`, toujours.** pnpm (épinglé par `packageManager`) refuse
+> alors d'installer autre chose que ce que dit `pnpm-lock.yaml`. Le durcissement
+> de la chaîne d'approvisionnement (versions de moins de 7 jours refusées,
+> scripts d'installation bloqués, perte de provenance refusée) vit dans
+> `pnpm-workspace.yaml`, un par paquet. Les versions de Svelte, SvelteKit, Vite et
+> leurs greffons sont **épinglées à l'exact** dans les deux `package.json`
+> (23/08/2026). Ce n'est pas de la prudence de principe : les plages `^2.5.0`
+> laissaient SvelteKit dériver jusqu'à 2.70, qui attend Svelte 5 et importe de
+> lui `untrack`, `fork` et `settled` — absents de Svelte 4. Le build passait,
+> en crachant six avertissements « is not exported by » que plus personne ne
+> lisait. Une combinaison qui produit des avertissements à chaque build est une
+> combinaison dont on ne saura pas voir le jour où ils deviendront des erreurs.
+>
+> Combinaison éprouvée (15/10/2026) : svelte 5.57.2, @sveltejs/kit 3.0.1,
+> @sveltejs/vite-plugin-svelte 7.3.1, @sveltejs/adapter-static 4.0.0,
+> vite 8.3.4, marked 18.1.0 — Node ≥ 22.17. Depuis SvelteKit 3, sa
+> configuration vit dans le greffon `sveltekit(...)` de `vite.config.js`
+> (`svelte.config.js` n'est plus lu), `$lib` s'écrit `#lib` (champ `imports`
+> de `package.json`), et `$page` vient de `#lib/etat-app` (pont vers
+> `$app/state`, que les composants sans runes ne suivraient pas). Site public sans aucun
+> avertissement ; l'atelier garde les six avertissements d'accessibilité qu'il
+> avait déjà sous Svelte 4 (trois `<li>` cliquables, `EntityCard` et
+> `SearchBar`). Les composants restent écrits en Svelte 4 (mode « legacy » de
+> Svelte 5) : le passage aux runes est un chantier à part.
+>
+> Pour en changer : monter les versions **ensemble**, relancer les deux builds,
+> et n'épingler que si la sortie est vierge d'avertissements nouveaux.
+
+### Contrôles
+
+```bash
+pip install pytest
+python3 -m pytest                        # la suite entière, ~10 s, sans réseau ni base
+python3 scripts/verifier_generique.py    # le moteur ne nomme aucune commune
+```
+
+Ils portent sur les trois fonctions qui décident de ce qui sort du dispositif :
+le filtre de publication, le classement de périmètre, et la liste des fichiers
+distribués. Chacune a laissé passer un défaut réel en août 2026. La même chose
+tourne en intégration continue à chaque envoi, avec en plus la chaîne complète
+sur une commune factice — base, snapshot, contrôle d'étanchéité, site.
+
+`init_instance.py` liste en fin d'exécution ce qui reste à renseigner à la main
+— typiquement l'adresse du site de la mairie et le connecteur qui sait le lire.
+
+---
+
+## Travailler à plusieurs, sans serveur
+
+La base est reconstructible : les collecteurs relisent des sources publiques,
+n'importe qui la refait avec ce code et un code INSEE. Ce qui ne se régénère
+pas, c'est le jugement humain — les sièges tranchés, les sites validés, les
+corrections, les notes. C'est petit, et c'est ça qu'on partage.
+
+Chacun collecte donc chez lui, et les ateliers échangent leurs **décisions** par
+un dépôt privé, un envoi, une clé USB :
+
+```bash
+python3 scripts/exporter_decisions.py            # → decisions/
+python3 scripts/importer_decisions.py            # simulation, chez l'autre
+python3 scripts/importer_decisions.py --appliquer
+```
+
+Les décisions sont désignées par des **clés naturelles** — SIREN, numéro RNA,
+identifiant d'avis BOAMP, empreinte de source pour les actes — et jamais par les
+`id`, qui sont des compteurs locaux ne voulant rien dire sur une autre machine.
+
+Trois refus, et ce sont eux qui comptent :
+
+- une clé qui ne désigne rien ici **n'est pas rattachée au hasard**, elle est
+  rapportée : l'autre atelier a collecté ce que cette base n'a pas ;
+- deux jugements contraires sur le même objet **ne sont pas fusionnés**. C'est un
+  désaccord éditorial, il remonte à un humain ;
+- des décisions portant sur **une autre commune** sont refusées d'emblée.
+
+⚠ **L'export peut nommer des personnes physiques** : l'atelier travaille sur la
+base non filtrée. Le dépôt qui le reçoit doit être privé, et ses membres avoir
+déjà accès à la base. `--sans-personnes` les retire, au prix de reprendre ces
+arbitrages à la main de l'autre côté.
+
+Pour une séance de travail en direct, plutôt qu'en différé : une machine tient
+l'atelier, les autres s'y connectent par un réseau privé maillé (Tailscale,
+WireGuard). L'atelier continue de n'écouter qu'en local — c'est le « local » qui
+s'étend. Rien n'est exposé à l'internet.
+
+---
+
+## Ouvrir l'atelier, en local
+
+L'atelier sert **la base de travail entière, non filtrée** : personnes physiques
+sans rôle civique, pistes non établies, liens de famille, adresses. Tout ce que
+le site public écarte. En local il n'écoute que `127.0.0.1` et rien n'est
+exposé — c'est le mode par défaut, et il suffit tant qu'une seule personne tient
+l'instance. Pour les deux autres modes, voir `deploy/README.md`.
+
+Quatre étapes, dans cet ordre. **Les deux premières sont des prérequis** : sans
+elles l'API démarre mais refuse toute connexion, et l'erreur n'est pas parlante.
+
+```bash
+# 1. Le secret de session. Sans lui, l'API REFUSE DE DÉMARRER et le dit :
+#    un service qui ne peut authentifier personne n'a rien à faire en écoute.
+#    ⚠ Ne faire ce `cp` qu'UNE FOIS. Le rejouer sur un .env déjà rempli remet
+#      le secret à vide, et l'atelier redevient inaccessible.
+cp deploy/env.exemple .env
+chmod 600 .env
+openssl rand -hex 32                      # coller la valeur après « JWT_SECRET= »
+#    ADMIN_KEY peut rester VIDE : c'est une clé de service qui contourne le
+#    verrou JWT, et une clé absente ne donne aucun accès. ALLOWED_ORIGINS ne
+#    sert qu'à un atelier en ligne ; en local, laissez-la vide.
+
+# 2. Le premier compte, administrateur. Le mot de passe est demandé au clavier,
+#    il n'apparaît nulle part.
+venv/bin/python scripts/create_user.py add --email vous@exemple.org --role admin
+#    Les autres personnes entrent sur invitation : page « Comptes » de l'atelier.
+#    Rôles emboîtés — contributeur (propose), validateur (tranche, voit les
+#    analyses), administrateur (comptes et publication).
+venv/bin/python scripts/create_user.py list
+
+# 3. L'API — dans un terminal qu'on laisse ouvert.
+venv/bin/uvicorn api:app --port 8765
+
+# 4. L'interface — dans un autre terminal.
+cd dashboard && pnpm install && pnpm run dev
+```
+
+Puis **http://localhost:5173**. Vite proxie `/api` vers le port 8765 : rien
+d'autre à régler.
+
+Pour vérifier que le verrou fonctionne, l'API étant lancée :
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/api/stats
+```
+
+**401** est la bonne réponse : la route existe et refuse sans jeton. Ce contrôle
+ne dit rien du secret, lui — sans `JWT_SECRET`, l'API ne serait pas là pour
+répondre : elle refuse de démarrer, en l'écrivant dans son terminal.
+
+Deux pannes se ressemblent et n'ont rien à voir :
+
+| Ce qu'on voit | Ce que c'est |
+|---|---|
+| L'API s'arrête au lancement, avec un message sur `JWT_SECRET` | secret vide — étape 1 |
+| « Serveur inaccessible » sur la page de connexion, alors que les deux terminaux tournent | l'interface n'atteint pas l'API — port, proxy, ou service arrêté |
+
+Dans le second cas, `curl` sur `127.0.0.1:8765` répond alors que le navigateur
+ne passe pas : viser un service local par `127.0.0.1` et jamais par `localhost`,
+qui résout d'abord en IPv6 là où le service n'écoute qu'en IPv4.
+
+---
+
+## Publier
+
+`./deploy/publier-site.sh` enchaîne trois étapes, et chacune peut refuser :
+
+1. **le snapshot** — s'arrête si le périmètre n'a jamais été classé ;
+2. **les invariants** (`scripts/verify_snapshot.py`) — un contrôle écrit comme
+   un adversaire, qui **n'importe pas le builder** et attaque le répertoire
+   publié : confidences privées, relations hors liste, coordonnées de personnes,
+   secrets, chemins locaux, et part de la commune dans ce qui est publié. Si le
+   builder et le contrôleur partageaient du code, ils partageraient leurs bugs ;
+3. **le build** — `pnpm run build` échoue si une page est livrée sans son contenu
+   (`public/scripts/verifier_build.mjs`). Les données étant figées au build,
+   chaque page lit le snapshot dans son `+page.server.js` : rien n'est chargé
+   côté client.
+
+Le résultat est un site statique ordinaire dans `public/build/`, à téléverser où
+vous voulez. Le script sait le faire par `rsync` ou vers Cloudflare Pages, une
+fois la destination déclarée dans le bloc `publication` de
+`config/instance.json` (`./deploy/publier-site.sh --deployer`, cf.
+`deploy/README.md`) ; pour tout autre hébergeur, rien à changer avant la
+dernière étape.
+
+### Depuis l'atelier : regarder avant de publier
+
+La page **Publication** de l'atelier fait la même chose en deux temps, pour que
+ce qui part en ligne ait été vu :
+
+1. **Générer un aperçu** construit le snapshot dans un brouillon
+   (`outputs.preview_snapshot_dir`, par défaut `audits/public_snapshot_preview`)
+   et lance les invariants dessus. **Rien de servi ne bouge à cette étape** — ni
+   le snapshot de l'atelier, ni celui du site.
+2. **Prévisualiser** démarre le site public lui-même sur son propre port
+   (`VIGIE_APERCU_PORT`, 5180 par défaut), branché sur le brouillon par
+   `VIGIE_DATA_DIR`. C'est le vrai site, pas une maquette : mêmes gabarits,
+   même feuille de style. L'atelier l'encadre d'un bandeau ; le site, lui,
+   n'est pas modifié.
+3. **Les contrôles** s'affichent règle par règle, chaque cas renvoyant vers la
+   fiche fautive dans l'atelier. Tant qu'ils sont rouges, le bouton de
+   publication n'est pas proposé.
+4. **Publier ce snapshot** — réservé au rôle `admin` — recopie le brouillon
+   contrôlé vers les deux emplacements servis, en recontrôlant à chaque arrivée.
+   Les autres rôles voient l'état et l'aperçu, sans pouvoir publier.
+
+Qui a généré, qui a publié, quand et avec quel verdict : dans `audit_log`, comme
+toute écriture de l'atelier.
+
+Détails, atelier sur serveur, secrets et durcissement : **`deploy/README.md`**.
+
+---
+
+## Ce que ce dépôt ne contient pas
+
+Ni base de données, ni snapshot publié, ni notes d'enquête, ni fichiers
+nominatifs. Ce n'est pas un oubli : un dépôt public d'un projet qui documente
+des personnes doit être tenu à la même règle que le site qu'il produit.
+
+Les fichiers `config/instance.json`, `config/profils_locaux.json` et
+`config/seed_local.json` restent sur la machine qui fait tourner la collecte.
+
+`scripts/build_kit.py` fabrique une archive du dispositif — utile pour
+l'emporter là où un dépôt distant n'est pas commode. Sa liste de fichiers vient
+de `git ls-files` et non d'un parcours du disque : ce qui n'est pas versionné
+n'est pas distribué, une règle unique et vérifiable. Un fichier qu'il ne sait
+pas lire est **refusé**, pas ignoré.
+
+Son usage principal est cependant d'être un **contrôle** : il refuse de
+construire si un nom de personne, un secret, un chemin personnel ou un binaire
+non identifié s'est glissé dans ce qui serait distribué. Il tourne à ce titre en
+intégration continue, même quand personne n'a besoin de l'archive. L'archive
+elle-même n'est pas versionnée.
+
+---
+
+## Empreinte : ce que ce dispositif a coûté à produire
+
+Ce dispositif a été écrit avec un assistant de programmation (Claude Code). Un
+projet qui demande aux collectivités de rendre des comptes doit pouvoir en
+rendre sur ce qu'il consomme. Voici ce qui est mesuré, ce qui est estimé, et ce
+qui n'est pas compté.
+
+**Le code (mesuré, 12/10/2026).** Moteur : environ 121 000 lignes dans
+592 fichiers suivis — Python 83 000 (dont 23 000 de tests), Svelte 25 000,
+JavaScript 4 600, le reste en Markdown, JSON, SQL, shell et YAML. Portail
+national (dépôt séparé) : environ 25 700 lignes. Le moteur compte 473 commits
+depuis le 12/08/2026, mais il descend d'un premier projet, `Commune` (une seule
+commune, 132 commits depuis le 08/04/2026), dont il reprend les collecteurs et
+les enseignements : l'effort réel de conception est antérieur à son premier
+commit.
+
+**Les tokens (mesuré, avec une lacune).** Les journaux de session conservés
+couvrent du 21/08 au 12/10/2026 : 26 jours actifs, environ 9 100 messages,
+**8,5 millions de tokens générés**, 46 millions écrits en cache et
+**2,27 milliards relus en cache**. Classés par dossier de travail, **70 % des
+tokens générés et 75 % des tokens relus** viennent des dossiers du dispositif
+(moteur, instances, diffusion, worktrees) : 6,0 millions générés, 31 millions
+écrits, 1,71 milliard relus. Le reste (ADYCT, RIMA, comptes d'association,
+mémoire de l'assistant, scripts) n'est pas imputable au dispositif. La
+relecture du contexte à chaque tour, et non l'écriture, est le gros du coût
+d'un agent : environ 270 tokens relus pour un token produit. Les sessions d'avril
+à août (la phase `Commune`) ne sont plus dans les journaux : le total est
+**sous-estimé** pour l'ensemble du projet. Les modèles sont de classe Opus pour
+l'essentiel (environ 88 % des tokens générés), Sonnet pour le reste.
+
+**L'énergie (estimée, à lire comme un ordre de grandeur).** Aucun fournisseur
+de ces modèles ne publie de consommation par token. Les repères publiés
+portent sur une requête de conversation : 0,24 Wh pour la requête médiane de
+Gemini, mesurée sur toute la chaîne de service (accélérateurs, machine hôte,
+capacité au repos, surcharge du centre de données)
+[Elsworth et al., Google, arXiv:2508.15734, 08/2025] ; environ 0,3 Wh pour
+une requête de ChatGPT, et 2,5 Wh si l'entrée atteint 10 000 tokens
+[Epoch AI, 02/2025]. Un agent de programmation n'est pas une requête de
+conversation : la méthode de S. Couch [simonpcouch.com, 20/01/2026] en
+déduit des facteurs par token pour Claude Code (≈ 1 950 Wh par million de
+tokens générés, 490 par million écrits en cache, 39 par million relus, pour
+un contexte maximal ; ≈ moitié pour un contexte moyen) et estime une
+session médiane à 41 Wh. Leur auteur les qualifie de « calculs de coin de
+table » ; ils supposent un modèle de classe GPT-4o équivalent par token à
+Opus, et un rapport 5:1 entre l'énergie de sortie et d'entrée, tiré des prix.
+Appliqués aux journaux :
+
+| Périmètre | Énergie (contexte moyen – maximal) | CO₂e (mix français) | Eau |
+|---|---|---|---|
+| Dossiers du dispositif | **47 – 94 kWh** | 2 – 4 kg | 50 – 100 L |
+| Toute la machine | 64 – 128 kWh | 3 – 6 kg | 70 – 140 L |
+
+Le carbone utilise 0,0461 kg CO₂e/kWh, mix moyen français lissé 2022-2025
+(ADEME, Base Empreinte, tel que repris par nosgestesclimat.fr) : le lieu
+des centres de données qui ont répondu n'est pas connu, et sur un mix
+fortement carboné le chiffre serait de plusieurs fois supérieur. L'eau est
+déduite du rapport de Google (0,26 mL pour 0,24 Wh, soit environ 1,1 L par
+kWh) ; elle dépend du site et du refroidissement. Pour fixer les idées,
+94 kWh représentent environ 2 % de la consommation annuelle d'un foyer
+français.
+
+**Le poste de travail et l'hébergement (hypothèses, non mesurées).** Pour
+situer l'inférence dans l'ensemble, deux postes s'y ajoutent sur la période :
+
+| Poste | Énergie | Hypothèse |
+|---|---|---|
+| Inférence, dossiers du dispositif | 47 – 94 kWh | voir ci-dessus |
+| Poste de travail (Mac) | ~1 – 15 kWh | 5 à 60 W (repos à charge) pendant 150 à 250 h de travail |
+| Hébergement (VPS en France) | ~2 – 10 kWh | quelques watts imputables sur deux mois |
+| **Total** | **~50 – 120 kWh** | l'inférence en fait 80 à 95 % |
+
+Les deux dernières lignes sont des estimations d'ordre de grandeur. Un relevé
+`powermetrics` de quatre secondes (12/10/2026, poste au repos, assistant en
+attente de réponse) donne 49 à 164 mW pour le processeur, le graphique et
+l'accélérateur neuronal : le calcul est fait dans les centres de données, le
+poste local attend. Ce relevé ne couvre ni l'écran, ni la mémoire, ni le
+disque, ni les périodes de charge locale (Ollama, constructions) ; seule une
+prise mesureuse donnerait la consommation réelle. Le total équivaut à un
+radiateur de 1 kW allumé 50 à 120 heures, soit 1 à 3 % de la consommation annuelle d'un foyer
+français. L'hébergement est un coût de fonctionnement continu : à terme, il peut
+dépasser le coût de développement.
+
+**Ce qui n'est pas compté.** L'entraînement des modèles et la fabrication des
+puces, probablement plus lourds que l'usage mais inconnus et d'amortissement
+arbitraire ; les modèles locaux (Ollama), dont la consommation est comprise
+dans celle du poste lorsqu'ils tournent.
+
+**Un effet de rebond, à surveiller.** Quand le code coûte presque rien à
+produire, la tentation est d'en produire trop : un test de plus, une instance de
+plus, une abstraction de plus. L'économie d'un outil se perd si elle sert à
+faire davantage sans se demander si c'était nécessaire. Ce dépôt tente de s'en
+tenir à la règle inverse — pas d'abstraction avant la troisième répétition,
+scripts déterministes plutôt que boucles d'agent, modèles locaux plutôt que
+distants pour les traitements de masse, mémoire écrite plutôt que contexte
+relu. Ce sont des habitudes de sobriété autant que de qualité.
+
+**Refaire la mesure.** Le décompte du code se refait avec `git ls-files` et un
+comptage de lignes par extension. Celui des tokens et de l'énergie se refait
+avec `scripts/empreinte_tokens.py`, qui lit le champ `usage` des journaux de
+session, dédoublonne par message et applique les facteurs ci-dessus ; si un
+fournisseur publie ses propres facteurs, il suffit de remplacer le tableau `F`.
+Pour la puissance du poste sous macOS : `sudo powermetrics --samplers
+cpu_power,gpu_power -i 1000 -n 5` (processeur, graphique, accélérateur neuronal ;
+l'écran et le reste du système ne sont pas inclus), ou une prise mesureuse pour
+la consommation totale au mur.
+
+---
+
+## Cadre
+
+Le **code** est sous licence MIT — `LICENSE`, et rien d'autre : le fichier ne
+porte que le texte de la licence, pour que GitHub la reconnaisse au lieu
+d'afficher « Other ». Ce que MIT ne couvre pas se lit ici.
+
+**Les données ne sont pas le code.** La licence porte sur les collecteurs, le
+schéma, le constructeur de snapshot, l'API et les sites Svelte. Elle ne porte ni
+sur les données publiées ni sur le contenu éditorial :
+
+- les **données publiées** (`public/static/data/`,
+  `dashboard/static/public_api/`) sont sous **Open Database License 1.0**
+  (ODbL). Le jeu incorpore des points d'intérêt et des géocodages
+  OpenStreetMap : c'est une base dérivée, le partage à l'identique s'applique.
+  Voir le README généré à côté des données, et `config/publication_rules.json`
+  → `outputs` ;
+- la **base de travail** (`db/`) n'est pas distribuée du tout : elle contient
+  ce que le filtre écarte.
+
+Une licence ouverte ne dispense pas du RGPD. Les personnes physiques ne figurent
+sur le site qu'au titre d'une fonction publique, d'un mandat électif ou d'une
+responsabilité inscrite dans un registre public. Un droit de réponse est ouvert,
+et toute rectification est appliquée puis signalée comme telle — la donnée
+collectée étant conservée à côté de la rectification, jamais remplacée — sauf
+effacement dû, auquel cas elle est retirée.
+
+Reprendre ce code pour une autre commune suppose de **refaire son propre
+travail de conformité** : les règles de `config/publication_rules.json` sont un
+point de départ, pas une garantie transposable. Leur note de licence décrit le
+jeu de données de l'instance dont l'exemple est tiré — elle doit être relue et
+réécrite avant publication, pas recopiée.
+
+Si vous rejouez ce dispositif ailleurs : la partie difficile n'est pas
+technique. C'est de décider ce qu'il est légitime de faire dire aux données, et
+de tenir cette ligne quand un chiffre exact suggère une conclusion que rien
+n'établit.

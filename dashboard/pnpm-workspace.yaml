@@ -1,0 +1,40 @@
+# Durcissement de la chaîne d'approvisionnement. Doit être en place AVANT la
+# première installation. Le même fichier vit dans `public/` et `dashboard/` :
+# un changement se reporte dans les deux.
+
+# Refuser toute version publiée il y a moins de 7 jours (en MINUTES). La plupart
+# des versions malveillantes sont retirées en quelques heures. Ne pas baisser ce
+# seuil pour débloquer une installation : attendre, ou épingler la dernière
+# version saine.
+minimumReleaseAge: 10080
+
+# Refuser les dépendances transitives tirées d'un dépôt git ou d'une archive à
+# une URL quelconque : rien dans cet arbre n'en a besoin.
+blockExoticSubdeps: true
+
+# Refuser l'installation si un paquet perd sa provenance ou change de mode de
+# publication par rapport à sa version précédente : c'est la forme d'une
+# republication avec un jeton volé.
+trustPolicy: no-downgrade
+
+# Les scripts d'installation sont bloqués par défaut depuis pnpm 10 : c'est le
+# principal vecteur d'exécution de code à l'installation. N'ajouter un paquet
+# ici qu'après avoir lu son script.
+#
+#   esbuild: false — son postinstall télécharge en https et appelle
+#     execFileSync. Il ne sert que si le binaire précompilé de la plateforme
+#     manque, et `@esbuild/<plateforme>` le fournit.
+#
+#   @sveltejs/kit: false — en 2.15, son postinstall chargeait `svelte.config.js`
+#     et lançait `svelte-kit sync`, que `vite build` refait de toute façon.
+allowBuilds:
+  esbuild: false
+  "@sveltejs/kit": false
+
+# Versions exactes, pas de plage `^` : une plage, c'est le chemin par lequel un
+# correctif compromis arrive sans diff relu (cf. `.github/dependabot.yml`).
+saveExact: true
+savePrefix: ""
+
+# `pnpm run` échoue si node_modules a dérivé du fichier de verrouillage.
+verifyDepsBeforeRun: error

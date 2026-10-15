@@ -1,0 +1,89 @@
+# systemd — API de l'atelier (FastAPI/uvicorn).
+#
+# L'atelier est FACULTATIF : il ne sert qu'à ceux qui veulent corriger et
+# annoter à plusieurs, depuis ailleurs que la machine de collecte. Lire
+# deploy/README.md § « L'atelier, et pourquoi vous n'en avez peut-être pas
+# besoin » avant de l'installer — le mettre en ligne, c'est exposer une base de
+# travail NON filtrée.
+#
+# Installer :
+#   sudo cp deploy/atelier.service /etc/systemd/system/vigie-atelier.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now vigie-atelier
+#
+# À adapter : User, WorkingDirectory, et le chemin du venv — créé SUR LE SERVEUR,
+# jamais recopié depuis la machine de collecte.
+
+[Unit]
+Description=Vigie Civique — API de l'atelier (FastAPI/uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=vigie
+WorkingDirectory=/opt/vigie
+# Les secrets ne sont pas dans l'unité : un fichier d'unité est lisible par tous.
+# Ce fichier-là doit être en 0600 et appartenir à l'utilisateur du service.
+EnvironmentFile=/opt/vigie/.env
+# L'aperçu et la mise en ligne lancent `pnpm run build`, et pnpm écrit dans le
+# dossier personnel de qui le lance. Celui du compte de service n'existe pas ou
+# n'est pas inscriptible (`ProtectHome`) : on lui en donne un, dans ses données.
+#   install -d -o vigie -m 0750 /opt/vigie/audits/.home
+Environment=HOME=/opt/vigie/audits/.home
+# venv créé sur le serveur :
+#   python3 -m venv /opt/vigie/venv && /opt/vigie/venv/bin/pip install -r requirements.txt
+#
+# --host 127.0.0.1 : l'API n'est JAMAIS exposée directement. nginx termine le
+# TLS et proxifie. Une API en 0.0.0.0 rend la base de travail accessible à qui
+# connaît le port, quel que soit le pare-feu qu'on croit avoir.
+#
+# --proxy-headers / --forwarded-allow-ips : sans eux, l'application voit
+# 127.0.0.1 pour TOUT le monde — ses bornes de débit par adresse deviennent une
+# seule borne partagée, et son journal ne distingue personne. Seul nginx, sur
+# la boucle locale, est cru sur parole.
+ExecStart=/opt/vigie/venv/bin/uvicorn api:app --host 127.0.0.1 --port 8765 \
+    --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+RestartSec=5
+
+# Durcissement
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+UMask=0027
+# En écriture : les DONNÉES, pas le code. Avec l'arbre entier inscriptible, une
+# faille de l'application lui laissait réécrire `api.py` — donc survivre au
+# redémarrage. Le service écrit la base, les documents, les aperçus et le
+# snapshot ; `public/` parce que la publication y construit le site. Le reste
+# est lu, et appartient à un autre compte que celui du service.
+#
+# ⚠️ `config/` y est à regret : `saisies.json` s'y écrit (par un temporaire
+# renommé, donc le répertoire entier doit être inscriptible), à côté de
+# `publication_rules.json` — le filtre de publication. Tant que les saisies
+# vivent là, le service peut réécrire les règles qui le contiennent.
+ReadWritePaths=/opt/vigie/db /opt/vigie/data /opt/vigie/audits /opt/vigie/public /opt/vigie/config
+ReadWritePaths=-/opt/vigie/public-data -/opt/vigie/decisions
+# `dashboard/static` et non `dashboard/static/public_api` : « Publier » met le
+# snapshot en service par renommage (`scripts/publication.py::basculer`), et
+# renommer un répertoire demande d'écrire dans son PARENT — un point de montage
+# lui-même ne se renomme pas. Ni `dashboard/` ni `dashboard/src` : le code du
+# tableau de bord reste en lecture seule. Avant le 04/10/2026, cette ligne
+# nommait `dashboard/static/api`, qui n'est écrit par rien.
+ReadWritePaths=-/opt/vigie/dashboard/static
+# Les dossiers thématiques s'écrivent depuis l'atelier (`dossiers/<slug>.md`).
+ReadWritePaths=-/opt/vigie/dossiers
+# Avec la cible de publication « local » (config/instance.json), « Mettre en
+# ligne » écrit dans le répertoire que sert le serveur web : lui seul, pas son
+# parent ni ses voisins. Sans cette ligne, la copie échoue en lecture seule.
+#ReadWritePaths=/srv/www/macommune
+
+[Install]
+WantedBy=multi-user.target

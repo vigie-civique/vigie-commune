@@ -1,0 +1,641 @@
+"""`public_entity` — la fonction qui décide, fiche par fiche.
+
+Elle applique quatre règles dans l'ordre : niveau de confiance, rôle civique
+pour les personnes, périmètre, puis pertinence. Chacune a son motif de rejet,
+consigné dans les statistiques du snapshot pour que les exclusions se comptent
+au lieu de se deviner.
+"""
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(scope="module")
+def bps():
+    spec = importlib.util.spec_from_file_location(
+        "build_public_snapshot", ROOT / "scripts" / "build_public_snapshot.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def fiche(**kw) -> dict:
+    base = {"id": 1, "type": "business", "name": "Une entreprise",
+            "confidence": "verified", "perimetre": "C1", "commune": "Testonville"}
+    base.update(kw)
+    return base
+
+
+# ── Niveau de confiance ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("niveau", ["probable", "hypothesis", "unverified", "retracted"])
+def test_confidence_privee_rejetee(bps, niveau):
+    publiee, motifs = bps.public_entity(fiche(confidence=niveau), [], set())
+    assert publiee is None
+    assert motifs == ["private_confidence"]
+
+
+@pytest.mark.parametrize("niveau", ["verified", "confirmed"])
+def test_confidence_publique_acceptee(bps, niveau):
+    publiee, _ = bps.public_entity(fiche(confidence=niveau), [], set())
+    assert publiee is not None
+
+
+# ── Entrepreneur individuel : en activité, ou désigné par un fait public ─────
+
+def _ei(**kw):
+    return fiche(id=7, name="Jeanne Exemple", legal_form_code="1000", **kw)
+
+
+def test_un_entrepreneur_individuel_en_activite_reste_publie(bps):
+    publiee, _ = bps.public_entity(_ei(biz_status="A"), [], set())
+    assert publiee is not None and publiee["actif"] is True
+
+
+def test_un_entrepreneur_individuel_qui_a_cesse_n_est_plus_publie(bps):
+    publiee, motifs = bps.public_entity(_ei(biz_status="C"), [], set())
+    assert publiee is None and motifs == ["ei_activite_cessee"]
+
+
+def test_sauf_si_un_fait_public_le_designe(bps):
+    publiee, _ = bps.public_entity(_ei(biz_status="C"), [], set(), ids_retenus={7})
+    assert publiee is not None and publiee["actif"] is False
+
+
+def test_une_societe_qui_a_cesse_reste_publiee_et_un_registre_muet_n_est_pas_une_cessation(bps):
+    assert bps.public_entity(fiche(legal_form_code="5499", biz_status="C"), [], set())[0] is not None
+    assert bps.public_entity(_ei(), [], set())[0] is not None
+
+
+# ── Personnes : jamais sans rôle civique ─────────────────────────────────────
+
+def test_personne_sans_role_civique_rejetee(bps):
+    publiee, motifs = bps.public_entity(
+        fiche(type="person", name="Un particulier"), [], set())
+    assert publiee is None
+    assert motifs == ["person_without_public_civic_role"]
+
+
+def test_personne_avec_role_civique_publiee(bps):
+    publiee, _ = bps.public_entity(
+        fiche(id=7, type="person", name="Une élue"), [], {7})
+    assert publiee is not None
+
+
+# ── Périmètre ────────────────────────────────────────────────────────────────
+
+def test_entite_non_classee_rejetee(bps):
+    publiee, motifs = bps.public_entity(fiche(perimetre=None), [], set())
+    assert publiee is None
+    assert motifs == ["hors_fiche_perimetre_None"]
+
+
+def test_commerce_de_commune_voisine_rejete(bps):
+    publiee, motifs = bps.public_entity(fiche(perimetre="C2"), [], set())
+    assert publiee is None
+    assert "perimetre" in motifs[0]
+
+
+def test_institution_intercommunale_publiee(bps):
+    publiee, _ = bps.public_entity(
+        fiche(type="service", name="CC des Épreuves Réunies", perimetre="C2"),
+        [], set())
+    assert publiee is not None
+
+
+def test_elu_communautaire_publie(bps):
+    """Il vote le budget qui s'applique à la commune : le masquer amputerait la
+    chaîne de décision de sa moitié intercommunale."""
+    publiee, _ = bps.public_entity(
+        fiche(id=9, type="person", name="Un délégué", perimetre="C2"),
+        [], {9}, ids_conseil_communautaire={9})
+    assert publiee is not None
+
+
+# ── Flux financiers : un montant ne sort pas sans ses deux extrémités ────────
+# Les relations avaient cette règle (`endpoint_not_public`) depuis toujours, les
+# flux ne l'ont jamais eue : le filtre voisin ne regardait que les personnes
+# physiques. Un flux vers une association d'une commune limitrophe sortait donc
+# avec un lien vers une fiche que le snapshot n'écrit pas, et le build du site
+# s'arrêtait sur `404 /entite/<id> (linked from /finances)` — l'instance entière
+# impubliable à cause de trois associations.
+
+def test_flux_vers_une_entite_publiee_passe(bps):
+    assert bps.flux_extremites_publiees({"from_id": 1, "to_id": 2}, {1, 2})
+
+
+def test_flux_vers_une_entite_non_publiee_ecarte(bps):
+    assert not bps.flux_extremites_publiees({"from_id": 1, "to_id": 8405}, {1})
+
+
+def test_flux_depuis_une_entite_non_publiee_ecarte(bps):
+    """Les deux sens comptent : une subvention REÇUE d'une entité écartée
+    renverrait vers la même fiche absente."""
+    assert not bps.flux_extremites_publiees({"from_id": 8405, "to_id": 1}, {1})
+
+
+def test_une_subvention_a_une_association_voisine_est_deliee(bps):
+    """Le budget d'ICI paie une association dont le siège est à côté : c'est un
+    fait communal. L'écarter parce que le bénéficiaire n'a pas de fiche cachait
+    15 lignes sur 44 à Saillans, 21 à Lasalle."""
+    flux = {"from_id": 1, "to_id": 8405, "to_name": "Basket Club de la voisine"}
+    assert bps.statut_extremites(flux, {1}, {8405}) == "delie"
+    bps.delier_extremites(flux, {1})
+    assert flux["to_id"] is None
+    assert flux["to_name"] == "Basket Club de la voisine"      # le nom reste
+
+
+def test_un_flux_vers_une_fiche_privee_reste_ecarte(bps):
+    """Une personne physique sans rôle civique, une entité en `probable` : elles
+    ne sont pas écartées par le périmètre mais par ce qu'elles sont. Rien n'en
+    sort, pas même un nom."""
+    assert bps.statut_extremites({"from_id": 1, "to_id": 8405}, {1}, set()) == "ecarte"
+
+
+def test_un_flux_entre_deux_entites_sans_fiche_est_ecarte(bps):
+    """Délier suppose qu'une extrémité au moins soit publiée : sinon le flux ne
+    dit rien de la commune."""
+    assert bps.statut_extremites({"from_id": 900, "to_id": 8405},
+                                 {1}, {900, 8405}) == "ecarte"
+
+
+def test_un_flux_entre_deux_fiches_publiees_garde_ses_liens(bps):
+    assert bps.statut_extremites({"from_id": 1, "to_id": 2}, {1, 2}, set()) == "garde"
+
+
+def test_deux_beneficiaires_delies_de_meme_montant_restent_deux(bps):
+    """RASED et Association Brunouret, 100 € chacune la même année : sans fiche,
+    plus d'identifiant pour les distinguer — c'est leur NOM qui le fait."""
+    flux = [{"year": 2023, "amount": 100, "type": "subvention", "from_id": 1,
+             "to_id": None, "to_name": "RASED"},
+            {"year": 2023, "amount": 100, "type": "subvention", "from_id": 1,
+             "to_id": None, "to_name": "Association Brunouret"}]
+    assert len(bps.dedupliquer_flux(flux)) == 2
+
+
+def test_un_flux_delie_nest_pas_une_ligne_anonyme(bps):
+    """La règle des jumeaux vise ce qu'un collecteur n'a pas su rattacher. Un
+    flux délié porte un nom : il n'est pas de ceux-là. Sans cette distinction,
+    9 des 15 subventions rendues au public repartaient aussitôt."""
+    flux = [{"year": 2022, "amount": 2000, "type": "subvention", "from_id": 1,
+             "to_id": 7, "to_name": "Association Brunandin"},
+            {"year": 2022, "amount": 2000, "type": "subvention", "from_id": 1,
+             "to_id": None, "to_name": "Association Abric"}]
+    assert len(bps.dedupliquer_flux(flux)) == 2
+
+
+def test_un_jumeau_sans_nom_disparait_toujours(bps):
+    flux = [{"year": 2022, "amount": 500, "type": "subvention", "from_id": 1,
+             "to_id": 7, "to_name": "Le Forum"},
+            {"year": 2022, "amount": 500, "type": "subvention", "from_id": 1,
+             "to_id": None, "to_name": ""}]
+    assert [f["to_name"] for f in bps.dedupliquer_flux(flux)] == ["Le Forum"]
+
+
+def test_un_doublon_exact_reste_un_doublon(bps):
+    ligne = {"year": 2022, "amount": 500, "type": "subvention", "from_id": 1,
+             "to_id": 7, "to_name": "Le Forum"}
+    assert len(bps.dedupliquer_flux([ligne, dict(ligne)])) == 1
+
+
+def test_flux_sans_beneficiaire_identifie_reste(bps):
+    """Une extrémité vide ne prétend renvoyer nulle part : le flux se publie,
+    sans lien. L'écarter effacerait de l'argent public au motif que le
+    collecteur n'a pas su nommer qui l'a touché."""
+    assert bps.flux_extremites_publiees({"from_id": 1, "to_id": None}, {1})
+
+
+# ── Marchés : le lien tombe, la pièce reste ──────────────────────────────────
+# Un flux est écarté quand son extrémité n'a pas de fiche ; un marché non. La
+# pièce décrit un achat de la collectivité, et le nom du titulaire est public —
+# seul le renvoi vers une fiche absente est coupé. Saillans, 23/08/2026 : deux
+# titulaires C2 d'un marché intercommunal refusaient le snapshot entier.
+
+def test_titulaire_sans_fiche_perd_son_lien_pas_son_nom(bps):
+    marches = [{"id": 1, "acheteur_id": 5, "titulaire_id": 19017,
+                "titulaire_nom": "SOCIÉTÉ CALAUDIN"}]
+    assert bps.delier_renvois_morts(marches, {5}) == 1
+    assert marches[0]["titulaire_id"] is None
+    assert marches[0]["acheteur_id"] == 5
+    assert marches[0]["titulaire_nom"] == "SOCIÉTÉ CALAUDIN"
+
+
+def test_acheteur_sans_fiche_perd_son_lien_aussi(bps):
+    marches = [{"id": 1, "acheteur_id": 8405, "titulaire_id": 2}]
+    assert bps.delier_renvois_morts(marches, {2}) == 1
+    assert marches[0]["acheteur_id"] is None
+
+
+def test_marche_entierement_publie_est_laisse_intact(bps):
+    marches = [{"id": 1, "acheteur_id": 5, "titulaire_id": 2}]
+    assert bps.delier_renvois_morts(marches, {2, 5}) == 0
+    assert (marches[0]["acheteur_id"], marches[0]["titulaire_id"]) == (5, 2)
+
+
+def test_un_renvoi_absent_nest_pas_un_renvoi_mort(bps):
+    """`NULL` ne prétend renvoyer nulle part : rien à couper, rien à compter —
+    sinon le décompte des exclusions gonflerait de marchés que personne n'a
+    déliés."""
+    marches = [{"id": 1, "acheteur_id": 5, "titulaire_id": None}]
+    assert bps.delier_renvois_morts(marches, {5}) == 0
+
+
+# ── L'ordre des règles est lui-même une garantie ─────────────────────────────
+
+def test_une_personne_privee_c1_reste_privee(bps):
+    """Le bon périmètre n'ouvre aucun droit : les règles s'additionnent."""
+    publiee, _ = bps.public_entity(
+        fiche(type="person", name="Un habitant", perimetre="C1"), [], set())
+    assert publiee is None
+
+
+def test_une_piste_c1_reste_privee(bps):
+    publiee, _ = bps.public_entity(
+        fiche(perimetre="C1", confidence="hypothesis"), [], set())
+    assert publiee is None
+
+
+# ── Le bénéficiaire d'une aide n'est pas un élu ──────────────────────────────
+# Ajouté le 21/08/2026, en ouvrant la saisie manuelle et l'extraction assistée.
+# Le modèle a sorti d'un vrai PV, correctement, des aides à la rénovation de
+# façades NOMINATIVES : « Mme TARIGNAC Céleste », « M. et Mme LORAUDIN », avec le
+# numéro de rue. Ce sont des particuliers qui reçoivent de l'argent public — la
+# collecte les prend (doctrine de l'atelier), la publication ne doit pas.
+#
+# Le risque est précis : saisir un flux crée une RELATION vers le bénéficiaire,
+# et une relation est justement ce qui rend une personne publiable. Le 19/08,
+# 1 229 fiches d'entités écartées dont 80 personnes physiques ont été servies en
+# production. Ces trois tests ferment la porte par le code, pas par l'attention.
+
+def test_beneficiaire_dune_aide_nest_pas_publiable(bps):
+    """Recevoir de l'argent public n'entre PAS une personne dans l'ensemble
+    civique : sa fiche est refusée, et pour ce motif précis."""
+    publiee, motifs = bps.public_entity(
+        fiche(id=42, type="person", name="Une bénéficiaire", perimetre="C1"),
+        [], set())
+    assert publiee is None
+    assert motifs == ["person_without_public_civic_role"]
+
+
+def test_seuls_les_roles_civiques_ouvrent_la_publication(bps):
+    """Contrôle croisé sur les règles elles-mêmes : si un type de relation
+    « économique » entrait un jour dans la liste civique, toute personne payée
+    par la commune deviendrait publiable d'un coup, et silencieusement."""
+    import json
+    regles = json.loads(
+        (ROOT / "config" / "publication_rules.exemple.json").read_text(encoding="utf-8"))
+    civiques = set(regles["people"]["publish_only_with_relation_types"])
+    jamais = {"subventionné", "locataire_commune", "bail", "cession",
+              "prestataire", "titulaire", "acheteur"}
+    assert not (civiques & jamais), (
+        f"rôles non civiques dans la liste de publication : {civiques & jamais}")
+
+
+def test_un_elu_reste_publiable(bps):
+    """Le contre-test : fermer la porte ne doit pas fermer la maison. Une
+    personne entrée dans l'ensemble civique en amont reste publiée."""
+    publiee, _ = bps.public_entity(
+        fiche(id=7, type="person", name="Une élue", perimetre="C1"), [], {7})
+    assert publiee is not None
+
+
+# ── L'allowlist des sources ──────────────────────────────────────────────────
+
+def test_toute_source_de_marche_est_publiable():
+    """Une source qu'on collecte et que l'allowlist ignore est une source morte.
+
+    `events.public_sources` compare à l'IDENTIQUE, et elle a longtemps été
+    fabriquée à partir des DOMAINES de l'instance plus quelques mots-clés —
+    « BOAMP », « bodacc », « sitadel », « interieur ». Les trois libellés DECP
+    n'y figuraient sur aucune instance : 53 marchés collectés sur l'une d'elles,
+    aucun publié, et rien ne le signalait. C'est la source la plus sûre du lot,
+    la seule qui recoupe par SIREN d'acheteur.
+
+    Ce test porte sur les règles D'EXEMPLE, celles que reçoit toute nouvelle
+    instance : c'est là que le défaut naissait.
+    """
+    import json
+
+    from collectors.marches_publics import SOURCES
+
+    regles = json.loads(
+        (ROOT / "config" / "publication_rules.exemple.json").read_text(encoding="utf-8"))
+    publiables = set(regles["events"]["public_sources"])
+
+    absentes = [s for s in SOURCES if s not in publiables]
+    assert not absentes, (
+        f"sources collectées mais non publiables : {absentes}. "
+        "Le collecteur écrit ces libellés dans events.source ; l'allowlist les "
+        "compare à l'identique.")
+
+
+def test_toute_source_d_evenement_est_publiable():
+    """Le même défaut, généralisé : ce qui écrit un `event` doit être publiable.
+
+    `ccomptes` a été ajouté aux trois instances le 01/09 et OUBLIÉ dans les
+    règles d'exemple : une instance amorcée depuis ce fichier collectait les
+    rapports de chambre régionale des comptes et ne les publiait jamais. Le
+    défaut ne se voit pas — la collecte réussit, la page reste vide.
+
+    Ce test lit les constantes `SOURCE` des collecteurs qui écrivent dans
+    `events`, et exige qu'elles figurent dans l'allowlist d'exemple. Ajouter un
+    collecteur d'événements sans l'y déclarer fait donc échouer la suite, au
+    lieu de produire une source morte.
+    """
+    import json
+
+    from collectors import crc, plu
+
+    regles = json.loads(
+        (ROOT / "config" / "publication_rules.exemple.json").read_text(encoding="utf-8"))
+    publiables = set(regles["events"]["public_sources"])
+
+    # Les collecteurs qui écrivent un `event` avec leur propre libellé de source.
+    sources = {"crc": crc.SOURCE, "plu": plu.SOURCE}
+    absentes = {nom: s for nom, s in sources.items() if s not in publiables}
+    assert not absentes, (
+        f"collecteurs dont la source n'est pas publiable : {absentes}. "
+        "L'événement sera collecté et jamais publié, sans que rien ne le dise.")
+
+
+# ── Les fossiles de la base permanente des équipements ───────────────────────
+
+def test_les_lignes_bpe_fossiles_ne_sont_plus_publiees(bps, tmp_path):
+    """La BPE a déménagé de `insee_social` vers `equipements`, avec sa
+    nomenclature. Cesser de la collecter n'a pas effacé ce qui était déjà en
+    base : 502 lignes sur Lasalle, 97 % sans libellé, publiées à côté des
+    lignes propres. Les mêmes faits deux fois, dont une illisible.
+
+    L'essai porte sur la REQUÊTE de publication, pas sur son texte : il la joue
+    contre une base et compte ce qui sort.
+    """
+    import sqlite3
+
+    base = tmp_path / "essai.db"
+    conn = sqlite3.connect(base)
+    conn.execute("""CREATE TABLE insee_indicateurs (
+        insee TEXT, commune TEXT, dataset TEXT, indicateur TEXT,
+        libelle TEXT, annee TEXT, valeur REAL, dims TEXT)""")
+    conn.executemany(
+        "INSERT INTO insee_indicateurs VALUES (?,?,?,?,?,?,?,?)", [
+            ("30140", "Lasalle", "DS_BPE", "BPE_A104", None, "2025", 3.0, None),
+            ("30140", "Lasalle", "DS_BPE", "BPE_A129", None, "2025", 1.0, None),
+            ("30140", "Lasalle", "DS_RP_POPULATION", "POP", "Population",
+             "2022", 1080.0, None),
+        ])
+    conn.commit()
+    conn.row_factory = sqlite3.Row
+
+    sortis = [dict(r) for r in conn.execute(bps.INSEE_PUBLIABLES)]
+    assert [r["indicateur"] for r in sortis] == ["POP"]
+    assert all(r["dataset"] != "DS_BPE" for r in sortis)
+
+
+# ── Le caviardage des textes ──────────────────────────────────────────────────
+# Les extraits publient le TEXTE d'une délibération, pas seulement son titre :
+# le caviardage y rencontre les listes de présents, les prises de parole et les
+# votes — des élus, en exercice ou non.
+
+def _personne(base, entite, prenom: str, nom: str, fiche: str | None = None) -> int:
+    pid = entite(fiche or f"{prenom} {nom}", type_="person")
+    base.execute("INSERT INTO persons (entity_id, firstname, lastname) VALUES (?,?,?)",
+                 (pid, prenom, nom))
+    base.commit()
+    return pid
+
+
+def test_qui_a_siege_nest_pas_caviarde_dans_les_actes(bps, base, entite):
+    """🔴 Un mandat clos reste un mandat.
+
+    `ids_publics` ne connaît que les élus en exercice. Dans les extraits, les
+    conseillers des mandats précédents devenaient « un particulier » à chaque
+    prise de parole — l'un d'eux 1 370 fois sur une seule instance.
+    """
+    ancien = _personne(base, entite, "Alix", "SALESQUE")
+    seance = base.execute(
+        "INSERT INTO events (type, date, title) VALUES "
+        "('conseil_municipal', '2019-04-10', 'Conseil municipal du 10 avril 2019')").lastrowid
+    base.execute("INSERT INTO event_entities (event_id, entity_id, role) "
+                 "VALUES (?, ?, 'présent')", (seance, ancien))
+    _personne(base, entite, "Jordan", "PELAGNOL")
+    base.commit()
+
+    redige, _ = bps.compilateur_redaction(base, set())
+    assert (redige("M. SALESQUE : je propose la subvention à Jordan PELAGNOL.")
+            == "M. SALESQUE : je propose la subvention à un particulier.")
+
+
+def test_le_nom_dun_elu_partage_avec_un_particulier_ne_masque_pas_lelu(bps, base, entite):
+    """« Secrétaire de séance : un particulier » partait en ligne.
+
+    Le maire en exercice a des homonymes privés dans la base, et la forme
+    « civilité + patronyme » de l'un d'eux le remplaçait dans chaque liste de
+    présents. Une forme partagée avec un élu est ambiguë : elle n'est pas
+    masquée. Le nom complet du particulier, lui, l'est toujours.
+    """
+    maire = _personne(base, entite, "Camille", "GALAVEL")
+    _personne(base, entite, "Noa", "GALAVEL")
+    _personne(base, entite, "Camille", "GALAVEL", fiche="GALAVEL Camille")  # seconde fiche
+
+    redige, _ = bps.compilateur_redaction(base, {maire})
+    assert redige("Secrétaire de séance : M. GALAVEL") == "Secrétaire de séance : M. GALAVEL"
+    assert redige("Présents : Camille GALAVEL, maire") == "Présents : Camille GALAVEL, maire"
+    assert redige("Gérant : Noa GALAVEL") == "Gérant : un particulier"
+
+
+def test_un_mandat_tenu_rend_nommable_sans_presence_liee(bps, base, entite):
+    """Un ancien maire présidait la séance : « Sous la présidence de Monsieur un
+    particulier, Maire ». Sa présence n'était liée à aucune séance, mais la base
+    portait son mandat intercommunal."""
+    ancien = _personne(base, entite, "Sasha", "NEVOMBE")
+    epci = entite("Communauté de communes de Fictiville", type_="service")
+    base.execute("INSERT INTO relations (from_id, to_id, relation_type) "
+                 "VALUES (?, ?, 'vice_président_cc')", (ancien, epci))
+    base.commit()
+
+    redige, _ = bps.compilateur_redaction(base, set())
+    texte = "Sous la présidence de Monsieur Sasha NEVOMBE, Maire"
+    assert redige(texte) == texte
+
+
+
+def test_un_prenom_nest_pas_un_patronyme(bps, base, entite):
+    """« M. Jordan LOROMBE » devenait « un particulier GALAVEL » : un particulier
+    de la base s'appelle SACHA, et la comparaison ignore la casse."""
+    _personne(base, entite, "Lou", "SACHA")
+
+    redige, _ = bps.compilateur_redaction(base, set())
+    assert redige("DONNE pouvoir à M. Jordan LOROMBE") == "DONNE pouvoir à M. Jordan LOROMBE"
+    assert redige("Aide à M. SACHA.") == "Aide à un particulier."
+
+
+def test_un_acte_cite_ses_particuliers_mais_masque_naissance_et_domicile(bps):
+    """⚖️ Arbitré le 16/09/2026 : un particulier cité dans un acte officiel est
+    cité. Ce qui situe ou date une personne ne sort pas — domicile, date et lieu
+    de naissance —, et l'âge d'une personne publique reste : il a du sens."""
+    from collections import Counter
+    publics = {"JORDAN ZANIMET"}
+    masque = lambda t, jour="2021-05-20": bps.masquer_donnees_personnelles(t, jour, publics, Counter())
+
+    # Une personne publique : la naissance devient l'âge à la date de l'acte.
+    assert masque("Délégué : Jordan ZANIMET né le 05/03/1961 ;") == "Délégué : Jordan ZANIMET âgé de 60 ans ;"
+    # Un particulier, un agent : cité, mais sa naissance est masquée.
+    assert (masque("Madame Noa CALORLY née le 5 octobre 1961 est nommée agent")
+            == "Madame Noa CALORLY née le [date masquée] est nommée agent")
+    assert (masque("à Monsieur Maxime QUILIGNAC et né le 05/03/1961 à Testonville PRÉCISE que")
+            == "à Monsieur Maxime QUILIGNAC et né le [date et lieu masqués] PRÉCISE que")
+    # Le domicile, sous les formes relevées dans les actes.
+    assert (masque("courrier de Monsieur VORLANDIN, demeurant au 12 Grand Rue à Testville, dans lequel")
+            == "courrier de Monsieur VORLANDIN, demeurant [domicile masqué], dans lequel")
+    assert (masque("Mme CALORLY Dominique domiciliée 3, rue\ndes Lilas. Mme CALORLY souhaite")
+            == "Mme CALORLY Dominique domiciliée [domicile masqué]. Mme CALORLY souhaite")
+    assert (masque("M. Maxime QUILIGNAC, résidant à l'adresse « Domaine des Chênes – 8 Impasse des Merles » "
+                   "à Fictiville (99 000) et")
+            == "M. Maxime QUILIGNAC, résidant [domicile masqué] et")
+    assert (masque("de M. et Mme CALORLY Lou domiciliés à Mas Fictif\ncommune de Fictiville")
+            == "de M. et Mme CALORLY Lou domiciliés [domicile masqué]\ncommune de Fictiville")
+    assert masque("Référent : r.velirand@fictiville.invalid ;") == "Référent : [courriel masqué] ;"
+    assert (masque("Adjoint : Lou CALORLY — paul.dupont@test.fr — 06 39 98 53 25")
+            == "Adjoint : Lou CALORLY — [courriel masqué] — [téléphone masqué]")
+    assert (masque("M. Maxime QUILIGNAC, résidant à l'adresse « 8 Impasse des Merles » à Fictiville (99\n000) et")
+            == "M. Maxime QUILIGNAC, résidant [domicile masqué] et")
+    # Ce qui n'est pas une donnée personnelle ne bouge pas — et le nom reste.
+    for intact in ("L'association Fictiville Enduro domiciliée à Viane souhaite organiser",
+                   "les familles domiciliées sur la commune depuis six mois",
+                   "Présidente (contact-04a7f5@fictiville.invalid / 0199003112)",
+                   "Tiers-lieu, 12 rue Haute\nContact 01 99 00 31 12 - 01 99 00 12 73",
+                   "Aide façade — M. Maxime QUILIGNAC, 300 €",
+                   "il me faut la date de naissance des personnes proposées"):
+        assert masque(intact) == intact
+
+
+def test_une_adresse_sans_verbe_et_un_portable_nominatif_sont_masques(bps):
+    """Relevé le 12/10/2026 sur les extraits publiés d'une instance : des aides
+    façade écrivent « Mme FENAUDIN Lou, 14 rue des Tilleuls à Fictiville » — sans
+    « domicilié » —, et une fiche de contacts donnait portable et courriel d'agents
+    et d'une conseillère. Le nom reste (arbitré le 16/09) ; ce qui situe ou joint
+    la personne ne sort pas."""
+    from collections import Counter
+    masque = lambda t: bps.masquer_donnees_personnelles(t, "2021-05-20", set(), Counter())
+
+    assert (masque("accorder à Mme FENAUDIN Lou, 14 rue des Tilleuls à Fictiville, la somme de 350 €")
+            == "accorder à Mme FENAUDIN Lou, [domicile masqué], la somme de 350 €")
+    assert (masque("Monsieur de MARELLAC Sacha, 41 rue du Puits de Fictiville à FICTIVILLE, qui sollicite")
+            == "Monsieur de MARELLAC Sacha, [domicile masqué], qui sollicite")
+    assert (masque("Mme TARIGNAC Céleste – 27 Rue des Écoles : Monsieur le Maire fait part")
+            == "Mme TARIGNAC Céleste, [domicile masqué] : Monsieur le Maire fait part")
+    # Une initiale suffit pour un courriel nominatif ; un portable qui suit un nom
+    # est celui de la personne, et son courriel avec lui.
+    assert (masque("- Mme Ariel NEVANDIN, Cheffe de projet 06 39 98 01 43 d.galombere@fictiville.invalid = M.")
+            == "- Mme Ariel NEVANDIN, Cheffe de projet [téléphone masqué] [courriel masqué] = M.")
+    assert (masque("Alix FENANQUET, Conseillère municipale 06.39.98.65.10 a.fenanquet@fictiville.invalid Pour")
+            == "Alix FENANQUET, Conseillère municipale [téléphone masqué] [courriel masqué] Pour")
+    # Ce qui est un service ne bouge pas.
+    for intact in ("Fax : 01 99 00 58 41 contact-c09804@fictiville.invalid Fax : 01 99 00 12 93",
+                   "Tiers-lieu, 12 rue Haute\nContact 01 99 00 31 12 - 01 99 00 12 73",
+                   "La Cure » 15 rue Nevorly 30460 Lasalle Contact 01 99 00 57 93 - 01 99 00 06 60",
+                   "Aide façade — M. Maxime QUILIGNAC, 300 €"):
+        assert masque(intact) == intact
+
+
+def _pieges() -> list[tuple[str, list[str]]]:
+    lignes = (ROOT / "tests" / "fixtures" / "pieges_textes.txt").read_text(encoding="utf-8").splitlines()
+    pieges = []
+    for ligne in lignes:
+        if not ligne.strip() or ligne.startswith("#"):
+            continue
+        phrase, interdits = ligne.split(" | ")
+        pieges.append((phrase.replace("\\n", "\n"), [f.strip() for f in interdits.split(";")]))
+    return pieges
+
+
+@pytest.mark.parametrize("phrase,interdits", _pieges())
+def test_aucun_piege_ne_sort(bps, phrase, interdits):
+    """🔴 tests/fixtures/pieges_textes.txt : chaque phrase est masquée ou refusée.
+
+    Relevé par une revue externe le 05/10/2026 : le masque ne connaissait que
+    « né le DATE à LIEU », s'arrêtait à la première virgule d'une adresse, et le
+    filet cherchait les mêmes formes que lui."""
+    from collections import Counter
+    sortie, refus = bps.texte_publiable(phrase, "2021-05-20", set(), Counter())
+    assert refus or not [f for f in interdits if f in sortie], sortie
+
+
+def test_les_formes_elargies_masquent_sans_refuser_ni_deborder(bps):
+    """Le masque fait le travail, le filet n'est qu'un filet : les formes
+    courantes sortent masquées, et ce qui n'est la naissance ou le domicile de
+    personne ne bouge pas."""
+    from collections import Counter
+    publiable = lambda t, publics=frozenset(): bps.texte_publiable(t, "2021-05-20", set(publics), Counter())
+
+    assert publiable("M. Lou CALORLY, né à Testonville le 5 mars 1961, a demandé") == (
+        "M. Lou CALORLY, né le [date et lieu masqués], a demandé", None)
+    assert publiable("Délégué : Jordan ZANIMET né à Testonville le 05/03/1961 ;", {"JORDAN ZANIMET"}) == (
+        "Délégué : Jordan ZANIMET âgé de 60 ans ;", None)
+    assert publiable("Date de naissance : 05/03/1961") == ("Date de naissance : [date masquée]", None)
+    assert publiable("Monsieur Lou CALORLY, né en 1961, retraité") == (
+        "Monsieur Lou CALORLY, né en [année masquée], retraité", None)
+    assert publiable("Mme Lou SALOMBE, demeurant à Testonville, 5 rue des Lilas, sollicite") == (
+        "Mme Lou SALOMBE, demeurant [domicile masqué], sollicite", None)
+    assert publiable("M. Lou CALORLY, domicilié au lieu-dit Mas de la Combe, demande") == (
+        "M. Lou CALORLY, domicilié [domicile masqué], demande", None)
+    assert publiable("Madame Noa CALORLY née le 5 octobre 1961 est nommée agent à compter du 1er janvier 2022") == (
+        "Madame Noa CALORLY née le [date masquée] est nommée agent à compter du 1er janvier 2022", None)
+
+    for intact in ("Le projet est né à Lasalle d'une rencontre",
+                   "La communauté de communes, née en 2017 de la fusion de trois intercommunalités",
+                   "L'association domiciliée au lieu-dit Mas de la Combe organise",
+                   "La commune ne le fera qu'après le 12 mars 2022",
+                   "Monsieur le Maire propose d'acquérir la parcelle située 12 rue Haute",
+                   "les familles domiciliées sur la commune depuis six mois"):
+        assert publiable(intact) == (intact, None)
+
+
+def test_un_point_de_lordre_du_jour_ne_nomme_pas_un_particulier(bps, base, entite):
+    """🔴 L'ordre du jour d'une convocation publiait « Demande de M. X » en clair :
+    il ne passait que par le masque des naissances et des domiciles, alors que
+    rien n'y est encore délibéré. Retiré une première fois le 21/08 pour cette
+    raison, revenu avec les convocations le 01/10."""
+    from collections import Counter
+    _personne(base, entite, "Gaston", "PIEGEPART")
+    _personne(base, entite, "Lou", "SALESQUE")
+    elu = _personne(base, entite, "Jordan", "PELAGNOL")
+    redige, _ = bps.compilateur_redaction(base, {elu})
+
+    c = bps.convocation_publique(
+        {"ordre_du_jour": ["Demande de M. PIEGEPART", "Vente à Gaston PIEGEPART",
+                           "Élection de Jordan PELAGNOL", "FPIC 2026"]},
+        "2026-09-23", set(), Counter(), redige)
+    assert c["ordre_du_jour"] == ["Demande de un particulier", "Vente à un particulier",
+                                  "Élection de Jordan PELAGNOL", "FPIC 2026"]
+
+
+def test_le_tableau_des_elus_garde_les_noms_et_les_fonctions(bps):
+    """L'océrisation mêle les colonnes « Date de naissance Adresse CP Ville » sur
+    plusieurs lignes : on ne garde de chaque ligne que l'élu et sa fonction."""
+    from collections import Counter
+    texte = ("Liste des conseillers municipaux\n"
+             "élus : Date de naissance Adresse CP Ville Titre\n"
+             "05/03/1961 12 Chemin de la\n"
+             "Monsieur Jordan ZANIMET à Testonville (78) Fontaine 99000 FICTIVILLE Maire\n"
+             "Madame Andréa PELANDIN à Exempleville (26) 4, Allée des Merles 99000 FICTIVILLE 1ère adjointe\n"
+             "Le Conseil Municipal, après en avoir délibéré, APPROUVE")
+    sortie = bps.masquer_donnees_personnelles(texte, "2019-02-01", set(), Counter())
+    assert "Monsieur Jordan ZANIMET Maire" in sortie
+    assert "Madame Andréa PELANDIN 1ère adjointe" in sortie
+    for fuite in ("Testonville", "Exempleville", "Chemin", "Allée", "99000", "05/03/1961"):
+        assert fuite not in sortie, fuite
+    assert sortie.endswith("Le Conseil Municipal, après en avoir délibéré, APPROUVE")
+
+
+def test_ce_qui_na_pas_pu_etre_masque_ne_sort_pas(bps):
+    """Le filet : un tableau dont la fin ne se trouve pas n'est pas masqué, et
+    l'extrait est refusé plutôt que publié tel quel."""
+    from collections import Counter
+    texte = "élus : Date de naissance Adresse CP Ville\n" + "Madame Andréa PELANDIN 4, Allée des Merles\n" * 120
+    assert bps.texte_publiable(texte, "2019-02-01", set(), Counter()) == (None, "donnee_personnelle_non_masquee")

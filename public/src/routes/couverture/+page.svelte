@@ -1,0 +1,229 @@
+<script>
+  import { SITE_NOM } from '#lib/instance.js'
+  import Niveau from '#lib/components/Niveau.svelte'
+
+  // Rendu au build par +page.server.js.
+  export let data
+  $: c = data.couverture
+
+  const ETATS = {
+    partiel: 'Partiel',
+    incomplet: 'Incomplet',
+    absent: 'Absent',
+  }
+
+  const fmt = (d) => {
+    if (!d) return '-'
+    try { return new Date(d.slice(0, 10) + 'T00:00:00').toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' }) }
+    catch { return d }
+  }
+  const nb = (n) => (n == null ? '-' : n.toLocaleString('fr-FR'))
+
+  // Un collecteur qui n'a pas tourné depuis longtemps est une lacune en
+  // formation : elle ne se voit pas encore dans les compteurs.
+  //
+  // Le seuil est CELUI DE CHAQUE SOURCE (`ttl`, publié par le snapshot depuis
+  // `STEP_META`), et non un nombre unique : un seuil de 45 jours déclarait
+  // frais un site municipal déclaré à 3 jours — la source la plus vive était
+  // la moins couverte. `DEFAUT` ne sert qu'aux collecteurs sans rythme déclaré
+  // et aux snapshots construits avant que le `ttl` n'y figure.
+  const DEFAUT = 45
+  const age = (d) => (Date.now() - new Date(d.replace(' ', 'T')).getTime()) / 864e5
+  $: dormants = Object.entries(c?.collecteurs || {})
+    .filter(([, v]) => !v.dernier || age(v.dernier) > (v.ttl ?? DEFAUT))
+    .sort((a, b) => (a[1].dernier || '').localeCompare(b[1].dernier || ''))
+</script>
+
+<svelte:head>
+  <title>Couverture et lacunes - {SITE_NOM}</title>
+  <meta name="description" content="Ce que la collecte couvre et ce qu'elle ne couvre pas : périodes par source, fraîcheur des collecteurs, documents manquants et limites connues." />
+</svelte:head>
+
+<section>
+  <h1>Couverture et lacunes</h1>
+  <p class="chapeau">
+    Un observatoire qui n'affiche que ce qu'il sait ressemble à une boîte noire&nbsp;:
+    rien ne permet alors de distinguer « il ne s'est rien passé cette année-là » de
+    « nous n'avons pas collecté cette année-là ». Cette page donne l'inverse : les
+    limites de ce qui est publié ici.
+  </p>
+
+  {#if !c?.sources?.length}
+    <!-- Une page dont tout le propos est de dire ce qui manque ne peut pas se
+         taire quand c'est elle qui manque : « indisponible » laissait le
+         lecteur devant un site qu'il croit incomplet, sans lui dire de quoi il
+         s'agit ni quoi en faire. -->
+    <div class="vide">
+      <p>
+        <strong>Le relevé de couverture n'est pas disponible pour cette
+        publication.</strong> Il est produit à chaque mise à jour du site et
+        récapitule, source par source, la période couverte, la date du dernier
+        passage de la collecte et les documents connus mais non récupérés.
+      </p>
+      <p>
+        Les autres pages, elles, sont bien alimentées&nbsp;: ce qui manque ici,
+        c'est notre capacité à vous dire <em>ce que nous n'avons pas</em>. Tant
+        que c'est le cas, lisez les chiffres du site comme un plancher, ce qui
+        est affiché a été trouvé&nbsp;; ce qui n'est pas affiché n'a pas
+        forcément été cherché.
+      </p>
+      <p class="liens">
+        <a href="/methode">Comment les données sont collectées</a> ·
+        <a href="/repliquer">Refaire ces relevés soi-même</a> ·
+        <a href="/contact">Nous signaler un document manquant</a>
+      </p>
+    </div>
+  {:else}
+    <h2>Le point faible principal</h2>
+    <!-- Donné en premier, et non enfoui : c'est le chiffre qui affaiblit le
+         plus les affirmations du site, donc celui qu'il serait le plus
+         malhonnête de laisser découvrir au lecteur. -->
+    <Niveau type="calcul" base="les pièces publiées et leurs liens de source">
+      <b>{c.part_avec_piece} %</b> des pièces publiées
+      ({nb(c.actes_avec_piece)} sur {nb(c.actes_total)}) renvoient vers
+      <b>le document de l'acte lui-même</b>. Pour tous les autres, le lien mène à
+      la page qui le contient : le plus souvent le compte rendu entier d'une
+      séance, dans lequel il faut chercher le passage.
+    </Niveau>
+    <p class="apres">
+      « Sourcé » ne veut donc pas encore dire « vérifiable en un clic ». Chaque
+      acte porte cette indication sur sa propre ligne, dans
+      <a href="/deliberations">les délibérations</a>.
+    </p>
+
+    {#if data.totaux?.lignes?.length}
+      <h2 id="totaux">Ce que comptent les totaux du site</h2>
+      <p>
+        Une <b>pièce</b> est tout ce que le site publie, quelle qu'en soit la
+        source. Une <b>délibération</b> est une décision votée&nbsp;; une
+        <b>séance</b>, le conseil qui l'a votée. L'accueil annonce les
+        délibérations municipales&nbsp;; la page des délibérations y ajoute les
+        séances et l'intercommunalité.
+      </p>
+      <div class="tableau">
+        <table class="etroit">
+          <thead><tr><th>Pièces publiées</th><th class="r">Nombre</th></tr></thead>
+          <tbody>
+            {#each data.totaux.lignes as l}
+              <tr>
+                <td>{#if l.href}<a href={l.href}>{l.libelle}</a>{:else}{l.libelle}{/if}</td>
+                <td class="r">{nb(l.n)}</td>
+              </tr>
+            {/each}
+            <tr class="total"><td>Total des pièces publiées</td><td class="r">{nb(data.totaux.total)}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    {/if}
+
+    <h2>Période couverte, par source</h2>
+    <div class="tableau">
+      <table>
+        <thead>
+          <tr><th>Source</th><th class="r">Pièces</th><th>Période</th><th class="r">Avec la pièce</th></tr>
+        </thead>
+        <tbody>
+          {#each c.sources as s}
+            <tr>
+              <td>{s.source}</td>
+              <td class="r">{nb(s.actes)}</td>
+              <td class="periode">{fmt(s.debut)} → {fmt(s.fin)}{#if s.a_venir}{' '}
+                <span class="avenir">+ {nb(s.a_venir)} annoncé{s.a_venir > 1 ? 's' : ''} à venir, jusqu'au {fmt(s.annonce_jusqu_au)}</span>{/if}</td>
+              <td class="r">
+                {#if s.avec_document}{nb(s.avec_document)}{:else}<span class="zero">aucune</span>{/if}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      Une période qui commence tard ne signifie pas que rien n'existait avant&nbsp;:
+      elle indique le point à partir duquel la source publie, ou à partir duquel
+      nous collectons. Elle s'arrête à la date d'arrêt des données&nbsp;; les
+      événements que l'agenda annonce pour plus tard sont comptés à part.
+    </p>
+
+    <h2>Fraîcheur de la collecte</h2>
+    {#if dormants.length}
+      <p>
+        {dormants.length} collecteur{dormants.length > 1 ? 's n\'ont' : ' n\'a'} pas
+        tourné depuis plus longtemps que son rythme ne le prévoit. Les données
+        qu'il{dormants.length > 1 ? 's alimentent' : ' alimente'} peuvent être en retard sur la réalité,
+        sans que rien ne le signale ailleurs sur le site.
+      </p>
+      <ul class="dormants">
+        {#each dormants as [nom, v]}
+          <li><b>{nom}</b> : dernier passage {v.dernier ? fmt(v.dernier) : 'jamais'}
+            {#if v.ttl}<span class="rythme">(attendu tous les {v.ttl} jours)</span>{/if}
+            {#if v.statut && v.statut !== 'ok'}<span class="statut">({v.statut})</span>{/if}
+          </li>
+        {/each}
+      </ul>
+    {:else}
+      <p>Chaque collecteur a tourné dans le délai que son rythme prévoit.</p>
+    {/if}
+
+    <h2>Ce que nous ne savons pas faire</h2>
+    <ul class="lacunes">
+      {#each c.lacunes_connues || [] as l}
+        <li class={l.etat}>
+          <p class="sujet">{l.sujet} <span class="etat">{ETATS[l.etat] || l.etat}</span></p>
+          <p class="detail">{l.detail}</p>
+        </li>
+      {/each}
+    </ul>
+
+    <p class="liens">
+      <a href="/methode">Méthode et sources</a> ·
+      <a href="/contact">Signaler une erreur ou une source manquante</a>
+    </p>
+  {/if}
+</section>
+
+<style>
+  section { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem 3rem; color: var(--encre); }
+  h1 { font-size: 1.85rem; margin: 0 0 .5rem; }
+  h2 { font-size: 1.1rem; margin: 2rem 0 .6rem; }
+  .chapeau { color: var(--gris); max-width: 62ch; line-height: 1.6; margin: 0 0 1.5rem; }
+  .apres { margin: .35rem 0 0; font-size: .9rem; color: var(--gris); }
+  .apres a, .liens a { color: var(--ardoise); }
+  .note { font-size: .82rem; color: var(--gris-clair); margin: .5rem 0 0; line-height: 1.5; }
+  .muted { color: var(--gris-clair); }
+  .vide { max-width: 62ch; border-left: 3px solid var(--trait);
+          padding: .1rem 0 .1rem 1rem; margin: 1.5rem 0; }
+  .vide p { color: var(--gris); line-height: 1.6; }
+
+  /* Le tableau doit défiler dans son propre cadre : sur téléphone, c'est le
+     premier élément qui pousse la page à déborder horizontalement. */
+  .tableau { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: .88rem; min-width: 30rem; }
+  th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--trait); }
+  th { font-size: .72rem; text-transform: uppercase; letter-spacing: .02em; color: var(--gris); }
+  .r { text-align: right; font-variant-numeric: tabular-nums; }
+  table.etroit { min-width: 0; }
+  tr.total td { font-weight: 600; border-top: 2px solid var(--trait); }
+  .periode { color: var(--gris); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  /* Un événement annoncé n'est pas une période couverte : il se lit dessous. */
+  .avenir { display: block; font-size: .78rem; white-space: normal; }
+  .zero { color: var(--ambre); }
+
+  .dormants { list-style: none; padding: 0; margin: .6rem 0 0; font-size: .9rem; color: var(--gris); }
+  .dormants li { padding: .25rem 0; }
+  .dormants b { color: var(--encre); }
+  .statut { color: var(--ambre); font-size: .82rem; }
+  .rythme { color: var(--gris); font-size: .82rem; }
+
+  .lacunes { list-style: none; padding: 0; margin: .6rem 0 0; display: grid; gap: .6rem; }
+  .lacunes li { border-left: 3px solid var(--trait); padding: .6rem .9rem;
+                background: var(--papier); border-radius: 0 var(--rayon) var(--rayon) 0; }
+  .lacunes li.absent { border-left-color: var(--depense); }
+  .lacunes li.incomplet { border-left-color: var(--ambre); }
+  .lacunes li.partiel { border-left-color: var(--gris); }
+  .sujet { margin: 0 0 .2rem; font-weight: 600; display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline; }
+  .etat { font-size: .68rem; text-transform: uppercase; letter-spacing: .04em;
+          color: var(--gris); border: 1px solid var(--trait); border-radius: 99px; padding: .05rem .45rem; }
+  .detail { margin: 0; font-size: .88rem; line-height: 1.55; color: var(--gris); }
+
+  .liens { margin-top: 2rem; font-size: .88rem; }
+</style>

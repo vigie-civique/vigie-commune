@@ -1,0 +1,1007 @@
+"""
+conseils.py — Séances et délibérations : conseil municipal et conseil communautaire.
+
+Remplace la chaîne écrite pour les comptes rendus HTML d'une commune en
+particulier. Le catalogue des procès-verbaux vient du connecteur déclaré par
+l'instance ; leur lecture est faite ici, et l'analyse du texte dans
+`pv_parsers`. Aucun des trois n'a besoin de savoir de quelle commune il s'agit.
+
+Le format du document n'est pas non plus une affaire de commune : PDF, page
+HTML, traitement de texte ou texte brut sont lus de la même façon — cf.
+`texte_document.py` — et rendent le même texte à `pv_parsers`. Ce lecteur a
+longtemps refusé tout ce qui n'était pas un PDF, et une séance entière
+manquait quand la collectivité publiait son compte rendu en page web.
+
+Ce qui est publié : le TITRE de chaque délibération, sa date, son vote et le
+lien vers le procès-verbal. Le corps du texte est conservé mais reste matériau
+d'atelier.
+
+Ce qui n'est pas publié faute d'être connu : quand le document ne se laisse pas
+découper — texte suivi dont les titres ne se distinguent que par la graisse — la
+séance est enregistrée avec son texte intégral et `decoupage_delib: false`.
+Fabriquer des délibérations en devinant produirait des actes qui n'existent pas.
+
+Usage :
+  python3 -m collectors.conseils --portee commune --catalogue
+  python3 -m collectors.conseils --portee commune --depuis 2024 --commit
+  python3 -m collectors.conseils --portee epci --commit
+  python3 -m collectors.conseils --url <pdf> --date 2026-06-05 --commit
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import urllib.parse
+import urllib.request
+import shutil
+import subprocess
+import unicodedata
+from pathlib import Path
+
+import pdfplumber
+
+from .archive import archive_fetch
+from .config import (COMMUNE_NAME, COMMUNE_SIREN, EPCI_NOM, EPCI_SIREN,
+                     HEADERS, ROOT)
+from .cle_acte import a_la_colonne as _a_la_colonne_cle, cle_acte, cle_seance
+from .cm_ocr import OPTIONS_OCRMYPDF, garder_texte, texte_garde
+from .cm_parser import link_persons_to_event
+from .connecteurs import charger
+from .connecteurs.base import date_fr
+from .convocation import est_convocation, lire as lire_convocation
+from .db import transaction, upsert_entity
+from .pv_parsers import (acte_unique, deliberations, presences,
+                         reference_actes)
+from .texte_document import format_de, texte_de
+
+PDF_DIR = ROOT / "data" / "pv"
+
+# En dessous : PDF scanné sans couche texte → relève de cm_ocr, pas d'ici.
+MIN_TEXT_CHARS = 400
+
+# Ce qui change entre les deux portées : le type d'événement, l'ordre d'écriture
+# des noms dans le document, et l'intitulé de la séance. Rien d'autre.
+PORTEES = {
+    "commune": {
+        "seance": "conseil_municipal",
+        "delib": "deliberation",
+        "titre": "Conseil municipal du {date}",
+    },
+    "epci": {
+        "seance": "conseil_communautaire",
+        "delib": "deliberation_cc",
+        "titre": "Conseil communautaire du {date}",
+    },
+}
+
+# ── Les pièces d'une séance ──────────────────────────────────────────────────
+# Une séance produit jusqu'à cinq documents, et aucun ne vaut la séance : ce
+# sont ses pièces. Les libellés relevés sur les deux assemblées de Lasalle :
+# « PV du 04.03.2026 tampon », « Deliberations du 4 mars 2026 », « Convocation
+# Conseil communautaire du 4 mars 2026 », « annexe conseil municipal du 05
+# fevrier 2026 », « conseil municipal du 28 mai 2026 ordre du jour ».
+NATURES_DE_PIECE = (
+    (re.compile(r"proc[èe]s.?verbal|\bpv\b", re.I), "proces_verbal"),
+    # Le « compte rendu » est l'ancien nom du procès-verbal — la commune l'écrit
+    # encore, et il rapporte la même chose : la séance. Sans lui, « compte rendu
+    # du conseil du 27 avril 2026 » retombait sur « pièce », et la page de garde
+    # proposait au lecteur d'ouvrir « une pièce ».
+    (re.compile(r"compte.?rendu", re.I), "compte_rendu"),
+    (re.compile(r"d[ée]lib[ée]ration", re.I), "deliberations"),
+    (re.compile(r"ordre du jour", re.I), "ordre_du_jour"),
+    (re.compile(r"convocation", re.I), "convocation"),
+    (re.compile(r"annexe", re.I), "annexe"),
+)
+# Du plus probant au moins probant. Le procès-verbal rapporte la séance
+# entière ; la convocation ne fait que l'annoncer.
+RANG_DE_PIECE = ("proces_verbal", "compte_rendu", "deliberations", "annexe",
+                 "ordre_du_jour", "convocation", "piece")
+
+MOIS_FR = ("janvier", "février", "mars", "avril", "mai", "juin", "juillet",
+           "août", "septembre", "octobre", "novembre", "décembre")
+
+
+def nature_de_piece(libelle: str | None) -> str:
+    """Ce qu'une pièce est, lu dans son libellé. « piece » quand rien ne dit."""
+    for motif, nature in NATURES_DE_PIECE:
+        if motif.search(libelle or ""):
+            return nature
+    return "piece"
+
+
+def date_en_francais(iso: str | None) -> str:
+    """« 2026-06-30 » → « 30 juin 2026 ». Une date ISO est une clé, pas une
+    phrase : elle n'a rien à faire dans un titre que des habitants lisent."""
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", (iso or "").strip())
+    if not m:
+        return iso or ""
+    annee, mois, jour = m.groups()
+    return f"{'1er' if jour == '01' else int(jour)} {MOIS_FR[int(mois) - 1]} {annee}"
+
+
+def _avec_piece(pieces: list, piece: dict) -> list:
+    """Les pièces connues, plus celle-ci — l'adresse fait l'identité."""
+    gardees = [p for p in pieces if p.get("url") != piece.get("url")]
+    return sorted(gardees + [piece],
+                  key=lambda p: RANG_DE_PIECE.index(p.get("nature", "piece"))
+                  if p.get("nature") in RANG_DE_PIECE else len(RANG_DE_PIECE))
+
+
+def _url_la_plus_probante(pieces: list, defaut: str | None) -> str | None:
+    return pieces[0].get("url") if pieces else defaut
+
+# Comment le document écrit les noms des présents. Trois conventions observées,
+# et c'est une propriété du DOCUMENT, pas du moteur : elle se déclare dans
+# config/instance.json, clé `format_pv`.
+#   prenom_nom    « Alix BORAGNOL »        (défaut)
+#   nom_prenom    « BORAGNOL Alix »
+#   civilite_nom  « Mme BRUNESQUE », sans prénom
+ORDRE_NOMS_DEFAUT = {"commune": "prenom_nom", "epci": "nom_prenom"}
+
+
+def _ordre_noms(portee: str) -> str:
+    from .config import FORMAT_PV
+    return (FORMAT_PV.get(portee) or {}).get("ordre_noms",
+                                            ORDRE_NOMS_DEFAUT[portee])
+
+
+# ── Récupération ─────────────────────────────────────────────────────────────
+
+def _url_http(url: str) -> str:
+    """Ré-encode le chemin d'une URL pour urllib.
+
+    Les sites déposent des fichiers dont le nom porte des accents
+    (`Séance-du-23-juillet-2018.pdf`). urllib transmet le chemin en ASCII et
+    lève `'ascii' codec can't encode character` : vingt-et-un documents étaient
+    comptés « inaccessibles » alors qu'ils étaient bien en ligne.
+    """
+    parts = urllib.parse.urlsplit(url)
+    chemin = urllib.parse.quote(urllib.parse.unquote(parts.path), safe="/%")
+    return urllib.parse.urlunsplit(parts._replace(path=chemin))
+
+
+MIME = {"pdf": "application/pdf", "html": "text/html",
+        "office": "application/octet-stream", "texte": "text/plain"}
+
+
+def _cible_cache(url: str) -> Path:
+    nom = urllib.parse.unquote(Path(urllib.parse.urlparse(url).path).name)
+    return PDF_DIR / (re.sub(r"[^A-Za-z0-9._-]", "_", nom) or "document")
+
+
+def telecharger(url: str, source: str = "") -> tuple[bytes, str] | None:
+    """Rend le contenu d'un document et son format, ou rien.
+
+    Le format vient des OCTETS, pas de l'adresse : un fichier retiré est souvent
+    servi sous son ancienne adresse en `.pdf` par une page d'erreur, qu'on
+    enregistrerait sinon comme un procès-verbal vide.
+
+    Ce lecteur a longtemps refusé tout ce qui n'était pas un PDF. Sur la
+    première commune, le compte rendu de la séance budgétaire d'avril 2026 est
+    une page HTML sans pièce jointe : elle était cataloguée, refusée ici, et la
+    séance entière manquait — avec les huit budgets qu'elle votait.
+    """
+    try:
+        req = urllib.request.Request(_url_http(url), headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=60) as r:
+            raw = r.read()
+            ctype = r.headers.get("Content-Type", "")
+    except Exception as e:
+        print(f"  [pv][erreur] {url} → {e}")
+        return None
+    fmt = format_de(raw, ctype)
+    if fmt == "inconnu":
+        print(f"  [pv][skip] format illisible ({len(raw)} octets) : {url}")
+        return None
+    archive_fetch(source or "site", url, raw, MIME.get(fmt, "application/octet-stream"),
+                  200, doc_type=fmt, title=_cible_cache(url).name)
+    return raw, fmt
+
+
+def texte_pdf(chemin: Path) -> str:
+    try:
+        with pdfplumber.open(str(chemin)) as pdf:
+            return "\n".join((p.extract_text() or "") for p in pdf.pages)
+    except Exception as e:
+        print(f"  [pv][erreur] lecture {chemin.name} → {e}")
+        return ""
+
+
+def lire_document(doc, avec_ocr: bool = False) -> tuple[str, str, bool] | None:
+    """(texte, format, océrisé) — ou rien si le document est hors d'atteinte.
+
+    Les PDF gardent leur cache sur disque : ils sont lourds, immuables une fois
+    déposés, et la reconnaissance optique a besoin d'un fichier. Les autres
+    formats sont relus à chaque passage — une page web change, elle.
+    """
+    cache = _cible_cache(doc.url)
+    if cache.exists() and cache.stat().st_size > 0:
+        texte = texte_pdf(cache)
+        if len(texte) < MIN_TEXT_CHARS and avec_ocr:
+            texte = ocr(cache)
+            return texte, "pdf", bool(texte)
+        return texte, "pdf", False
+
+    recu = telecharger(doc.url, doc.source)
+    if recu is None:
+        return None
+    raw, fmt = recu
+    if fmt != "pdf":
+        return texte_de(raw, fmt), fmt, False
+
+    PDF_DIR.mkdir(parents=True, exist_ok=True)
+    cache.write_bytes(raw)
+    texte = texte_pdf(cache)
+    if len(texte) < MIN_TEXT_CHARS and avec_ocr:
+        texte = ocr(cache)
+        return texte, "pdf", bool(texte)
+    return texte, "pdf", False
+
+
+# ── Écriture ─────────────────────────────────────────────────────────────────
+
+def enregistrer_seance(conn, doc, portee: str, meta_sup: dict | None = None,
+                       annonce: bool = False) -> int:
+    """Événement ombrelle d'une séance. Idempotent sur (assemblée, DATE).
+
+    ⚖️ Une séance est identifiée par sa date et son assemblée, JAMAIS par le
+    document qui la rapporte. La même séance est attestée par plusieurs pièces
+    — convocation, ordre du jour, registre des délibérations, procès-verbal,
+    annexes — et l'identité par `source_url` en faisait autant de séances.
+
+    Relevé sur la base de Lasalle le 15/09/2026 : 46 dates portaient deux à
+    trois fiches, 49 de trop sur 243, et **pas une seule n'était une seconde
+    séance tenue le même jour** — c'étaient les pièces de la même. Le cas que
+    l'identité par l'URL protégeait est resté hypothétique ; celui qu'elle
+    fabriquait se lisait sur la page d'accueil, « Conseil municipal du
+    2026-06-30 » deux fois de suite, l'un pour le registre et l'autre pour le
+    procès-verbal.
+
+    Les pièces s'accumulent donc dans `metadata.pieces`, la fiche renvoie à la
+    plus probante, et les métadonnées FUSIONNENT : le procès-verbal porte les
+    présents et les pouvoirs, le registre le nombre d'actes — remplacer, c'est
+    perdre ce que la pièce précédente avait lu.
+
+    `annonce` : la pièce ANNONCE la séance (une convocation). Elle ne nomme
+    alors pas la source d'une fiche qui existe déjà — sans quoi la dernière
+    pièce lue, la moins probante, devenait celle qui la décrit.
+    """
+    p = PORTEES[portee]
+    piece = {"nature": nature_de_piece(doc.libelle),
+             "libelle": doc.libelle, "url": doc.url}
+    meta = {"libelle_source": doc.libelle, **(meta_sup or {})}
+    if portee == "epci" and EPCI_SIREN:
+        meta["siren_epci"] = EPCI_SIREN
+
+    row = conn.execute(
+        "SELECT id, source_url, metadata FROM events WHERE type=? AND date=?",
+        (p["seance"], doc.date)).fetchone()
+    if row:
+        ancien = json.loads(row["metadata"] or "{}")
+        if annonce:
+            meta.pop("libelle_source")
+        pieces = _avec_piece(ancien.get("pieces") or [], piece)
+        fusion = {**ancien, **meta, "pieces": pieces}
+        # Un portail d'actes publie la séance à son adresse à lui : elle vaut
+        # mieux que n'importe laquelle des quarante pièces déposées.
+        url = (row["source_url"] if ancien.get("depuis_portail_actes")
+               else _url_la_plus_probante(pieces, row["source_url"]))
+        conn.execute(
+            "UPDATE events SET date=?, title=?, source_url=?, metadata=?"
+            " WHERE id=?",
+            (doc.date, p["titre"].format(date=date_en_francais(doc.date)), url,
+             json.dumps(fusion, ensure_ascii=False), row["id"]))
+        _poser_cle_seance(conn, p["seance"], doc.date, row["id"])
+        return row["id"]
+    # La séance renvoie vers le portail qui la publie, jamais vers l'un de ses
+    # actes : le premier arrivé n'a pas à représenter les trente-neuf autres.
+    url_seance = (doc.acte or {}).get("portail") or doc.url if getattr(
+        doc, "acte", None) else doc.url
+    meta["pieces"] = [piece]
+    cur = conn.execute(
+        "INSERT INTO events (type,date,title,source,source_url,metadata)"
+        " VALUES (?,?,?,?,?,?)",
+        (p["seance"], doc.date,
+         p["titre"].format(date=date_en_francais(doc.date)), doc.source,
+         url_seance, json.dumps(meta, ensure_ascii=False)))
+    _poser_cle_seance(conn, p["seance"], doc.date, cur.lastrowid)
+    return cur.lastrowid
+
+
+def _poser_cle_seance(conn, type_: str, date: str | None, eid: int) -> None:
+    """La clé datée de la séance (`c-2021-03-04`), si la base a la colonne."""
+    if _a_la_colonne_cle(conn):
+        cle = cle_seance(type_, date)
+        conn.execute("UPDATE events SET cle_acte=? WHERE id=?",
+                     (cle.valeur if cle else None, eid))
+
+
+#: En dessous, un début de titre commun convient à trop d'actes d'une séance
+#: (« Création d'un emploi permanent… ») pour désigner le même.
+_TITRE_TRONQUE_MIN = 30
+
+
+def _titre_compare(titre: str | None) -> str:
+    """Un titre tel qu'on le compare d'un document à l'autre : ni accents, ni
+    casse, ni ponctuation — le recueil écrit « l'exercice », le procès-verbal
+    « l’exercice »."""
+    # Retirer les accents, PAS les caractères non ASCII : un `encode("ascii",
+    # "ignore")` avale l'apostrophe courbe et soude « d’eau » en « deau ».
+    t = "".join(c for c in unicodedata.normalize("NFKD", titre or "")
+                if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", " ", t.lower()).strip()
+
+
+def _vote_connu(vote) -> bool:
+    return isinstance(vote, dict) and any(v is not None for v in vote.values())
+
+
+def _completer(meta: dict, autre: dict) -> dict:
+    """`meta`, avec le vote et les montants de `autre` là où il n'en a pas :
+    le procès-verbal détaille souvent un vote que le recueil ne reprend pas."""
+    if not _vote_connu(meta.get("vote")) and _vote_connu(autre.get("vote")):
+        meta["vote"] = autre["vote"]
+    if not meta.get("montants") and autre.get("montants"):
+        meta["montants"] = autre["montants"]
+    return meta
+
+
+def _jumeau_de_seance(conn, type_: str, date: str | None, titre: str | None,
+                      url: str | None, numerote: bool):
+    """Le même acte, entré par l'AUTRE document de la séance.
+
+    Une collectivité publie deux fois sa séance : le recueil des délibérations,
+    qui numérote, et le procès-verbal, qui ne numérote pas. La clé de l'un est
+    `cc-2023-99`, celle de l'autre se replie sur le titre : aucune des deux ne
+    retrouve l'autre. On cherche donc, le même jour, dans un autre document,
+    l'acte qui porte le même titre et dont la numérotation est l'inverse de
+    celle qu'on tient (`numerote` : le jumeau cherché a-t-il un numéro ?).
+
+    Même titre : à la typographie près, ou l'un tronqué de l'autre — un
+    procès-verbal coupe ses titres en fin de ligne. Rien de plus lâche : deux
+    créations de poste d'une même séance se ressemblent à 75 %. Et un seul
+    candidat, sinon None : entre deux « Décision modificative » on ne devine pas.
+    """
+    mien = _titre_compare(titre)
+    if not mien or not date:
+        return None
+    trouves = []
+    for r in conn.execute(
+            "SELECT id, title, metadata FROM events"
+            " WHERE type=? AND date=? AND COALESCE(source_url,'')<>?",
+            (type_, date, url or "")).fetchall():
+        if bool(json.loads(r["metadata"] or "{}").get("numero_acte")) != numerote:
+            continue
+        court, long_ = sorted((mien, _titre_compare(r["title"])), key=len)
+        if court == long_ or (len(court) >= _TITRE_TRONQUE_MIN
+                              and long_.startswith(court)):
+            trouves.append(r)
+    return trouves[0] if len(trouves) == 1 else None
+
+
+def enregistrer_deliberation(conn, doc, portee: str, delib: dict) -> int:
+    """Une délibération = un événement.
+
+    Identité : le numéro d'acte DANS SON ANNÉE quand le document en porte un ;
+    sinon le couple (date, numéro de séance) ; sinon (date, titre). Le titre
+    seul ne peut pas servir de clé : « Questions diverses » revient à chaque
+    séance.
+
+    🔴 Un numéro d'acte n'est unique que dans l'année : une intercommunalité
+    numérote « n°41/2026 » et reprend à 1 en janvier. La clé nue faisait
+    ÉCRASER la délibération n°41 d'une année par celle d'une autre, sans un
+    message — relevé le 30/09/2026 sur la base de Lasalle, 222 délibérations
+    communautaires numérotées portant 222 numéros distincts de 1 à 227 pour
+    quatre années de séances. L'année, et non la date : un portail d'actes
+    affiche la date de télétransmission avant que la date de séance ne soit
+    lue, et le même acte doit retrouver sa fiche quand elle change.
+
+    🔴 Une séance publiée deux fois — recueil numéroté et procès-verbal — donnait
+    deux fiches par acte : relevé le 05/10/2026 à Lasalle, 35 séances sur 84 et
+    environ 210 actes en trop. Et dans l'autre ordre, à titre identique, le
+    procès-verbal ÉCRASAIT l'acte du recueil et lui retirait sa clé numérotée.
+    Quand la clé ne trouve rien, on cherche donc le jumeau (`_jumeau_de_seance`) :
+    l'acte numéroté est celui qui reste, l'autre document ne fait que lui
+    apporter le vote et les montants qu'il n'avait pas.
+    """
+    p = PORTEES[portee]
+    meta = {k: delib[k] for k in ("categorie", "tags", "vote", "montants",
+                                  "numero_seance", "numero_acte", "regime")}
+    # D'OÙ vient le titre : un objet écrit par la collectivité, ou un repli qui
+    # avoue ne pas l'avoir trouvé. Sans ce champ, un titre deviné devient
+    # indiscernable d'un objet lu, et l'instance perd ce qui la rend défendable.
+    # Seuls les régimes qui savent le dire le posent.
+    if delib.get("titre_origine"):
+        meta["titre_origine"] = delib["titre_origine"]
+    if portee == "epci":
+        meta["instance"] = EPCI_NOM
+
+    # La clé datée (`collectors/cle_acte.py`) EST cette identité, écrite une
+    # fois : on cherche d'abord par elle. Les requêtes d'avant restent en
+    # repli pour les lignes qu'aucune migration n'a encore clées — et pour
+    # celles que `scripts/migrer_cles_actes.py` a laissées vides parce qu'elles
+    # entraient en collision.
+    cle = cle_acte(p["delib"], doc.date, delib.get("numero_acte"),
+                   delib.get("numero_seance"), delib.get("titre"))
+    avec_cle = _a_la_colonne_cle(conn)
+    row = conn.execute(
+        "SELECT id FROM events WHERE type=? AND cle_acte=? ORDER BY id LIMIT 1",
+        (p["delib"], cle.valeur)).fetchone() if (avec_cle and cle) else None
+    if row is None and not delib.get("numero_acte"):
+        # Le procès-verbal arrive après le recueil : l'acte existe, numéroté.
+        # On ne le réécrit pas — on lui apporte ce qu'il ne savait pas.
+        jumeau = _jumeau_de_seance(conn, p["delib"], doc.date, delib.get("titre"),
+                                   doc.url, numerote=True)
+        if jumeau:
+            ancien = json.loads(jumeau["metadata"] or "{}")
+            complete = _completer(dict(ancien), meta)
+            if complete != ancien:
+                conn.execute("UPDATE events SET metadata=? WHERE id=?",
+                             (json.dumps(complete, ensure_ascii=False), jumeau["id"]))
+            return jumeau["id"]
+    if row is None and delib.get("numero_acte"):
+        row = conn.execute(
+            "SELECT id FROM events WHERE type=?"
+            " AND json_extract(metadata,'$.numero_acte')=?"
+            " AND substr(date, 1, 4)=?",
+            (p["delib"], delib["numero_acte"], (doc.date or "")[:4])).fetchone()
+        if row is None:
+            # Le recueil arrive après le procès-verbal : sa fiche existe, sans
+            # numéro. Elle devient l'acte numéroté, et garde son vote.
+            row = _jumeau_de_seance(conn, p["delib"], doc.date, delib.get("titre"),
+                                    doc.url, numerote=False)
+            if row:
+                _completer(meta, json.loads(row["metadata"] or "{}"))
+    elif row is None and delib.get("numero_seance"):
+        row = conn.execute(
+            "SELECT id FROM events WHERE type=? AND date=?"
+            " AND json_extract(metadata,'$.numero_seance')=?",
+            (p["delib"], doc.date, delib["numero_seance"])).fetchone()
+    elif row is None:
+        row = conn.execute(
+            "SELECT id FROM events WHERE type=? AND date=? AND title=?",
+            (p["delib"], doc.date, delib["titre"])).fetchone()
+
+    if row:
+        conn.execute(
+            "UPDATE events SET date=?, title=?, content=?, metadata=?, source=?,"
+            " source_url=? WHERE id=?",
+            (doc.date, delib["titre"], delib["texte"],
+             json.dumps(meta, ensure_ascii=False), doc.source, doc.url, row["id"]))
+        eid = row["id"]
+    else:
+        eid = conn.execute(
+            "INSERT INTO events (type,date,title,content,source,source_url,metadata)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (p["delib"], doc.date, delib["titre"], delib["texte"], doc.source,
+             doc.url, json.dumps(meta, ensure_ascii=False))).lastrowid
+    if avec_cle:
+        conn.execute("UPDATE events SET cle_acte=? WHERE id=?",
+                     (cle.valeur if cle else None, eid))
+    return eid
+
+
+def ocr(chemin: Path, langue: str = "fra") -> str:
+    """Texte d'un PDF scanné, par reconnaissance optique.
+
+    Le PDF reconnu est écrit à côté de l'original et conservé : l'OCR coûte
+    plusieurs dizaines de secondes par document, et la relecture d'un corpus ne
+    doit pas les repayer. L'original n'est jamais remplacé — c'est la pièce.
+
+    Certaines communes scannent la totalité de leurs procès-verbaux : sur l'une
+    des trois instances, 34 séances sur 48 sont des images. Sans cette étape,
+    le dispositif y catalogue des documents qu'il ne sait pas lire.
+    """
+    cible = chemin.with_suffix(".ocr.pdf")
+    # Le texte gardé d'abord (`x.ocr.txt`, cf. `cm_ocr.texte_garde`) : la passe
+    # ne rouvre plus le PDF océrisé, et une machine qui n'a que les textes lit
+    # le corpus sans avoir à océriser.
+    if (garde := texte_garde(cible)) is not None:
+        return garde
+    if cible.exists() and cible.stat().st_size > 0:
+        return garder_texte(cible, texte_pdf(cible))
+    if not shutil.which("ocrmypdf"):
+        print("  [ocr] ocrmypdf introuvable — `brew install ocrmypdf`")
+        return ""
+    langues = subprocess.run(["tesseract", "--list-langs"],
+                             capture_output=True, text=True).stdout
+    if langue not in langues:
+        print(f"  [ocr] langue tesseract « {langue} » absente")
+        return ""
+    print(f"  [ocr] {chemin.name} …", flush=True)
+    try:
+        subprocess.run(
+            ["ocrmypdf", "-l", langue, *OPTIONS_OCRMYPDF, str(chemin), str(cible)],
+            # Le délai a été doublé avec le coût : `--oversample 400` fait passer
+            # la reconnaissance d'environ une demi-seconde à une seconde par
+            # page, et le plus long procès-verbal du corpus en compte 310.
+            check=True, capture_output=True, timeout=1800)
+    except (subprocess.SubprocessError, OSError) as e:
+        print(f"  [ocr][échec] {chemin.name} → {e}")
+        return ""
+    return garder_texte(cible, texte_pdf(cible))
+
+
+# « Séance du 25 juin 2026 », dans l'en-tête d'un acte. Repli de deuxième rang :
+# la référence de contrôle de légalité vaut mieux, elle est mécanique.
+_SEANCE_DU = re.compile(r"[Ss]éance\s+du\s+([^\n,;]{6,40})")
+
+
+def date_de_seance(texte: str, doc, portee: str) -> tuple[str, str, dict]:
+    """(date, provenance, contrôle) pour un acte publié seul.
+
+    Trois provenances, par force de preuve décroissante :
+
+    `reference_actes` — la référence @ctes apposée par la préfecture au moment
+    du contrôle de légalité porte la date de l'acte. C'est un fait imprimé sur
+    la pièce, et il porte aussi le SIREN de la collectivité : on en profite pour
+    vérifier que l'acte émane bien de celle qu'on collecte.
+
+    `entete` — « Séance du … » dans le corps du document. Fiable mais rédigée.
+
+    `teletransmission` — la date que le portail affiche, en dernier recours. Ce
+    n'est PAS la date de la séance : sur le portail relevé le 24/08/2026, six
+    délibérations du 25 juin y figuraient au 30 juin et au 6 juillet. La
+    provenance est écrite dans la métadonnée pour qu'un lecteur sache toujours
+    ce qu'il regarde.
+    """
+    controle: dict = {}
+    ref = reference_actes(texte)
+    if ref:
+        attendu = EPCI_SIREN if portee == "epci" else COMMUNE_SIREN
+        if attendu and ref["siren"] != attendu:
+            # Ne pas refuser la pièce : le portail d'un EPCI publie aussi les
+            # actes de son CCAS ou d'un syndicat, qui ont leur propre SIREN.
+            # Le signaler suffit, et laisse l'arbitrage à l'atelier.
+            controle["siren_inattendu"] = ref["siren"]
+            print(f"  [acte] {ref['numero']} — SIREN {ref['siren']} au lieu de "
+                  f"{attendu} : émetteur à vérifier")
+        controle["reference_actes"] = ref["reference"]
+        return ref["date"], "reference_actes", controle
+
+    m = _SEANCE_DU.search(texte or "")
+    if m:
+        date = date_fr(m.group(1))
+        if date:
+            return date, "entete", controle
+    return doc.date, "teletransmission", controle
+
+
+# ── Une pièce de médiathèque doit attester sa date ───────────────────────────
+#
+# La date d'une pièce trouvée dans la médiathèque WordPress vient de son NOM DE
+# FICHIER, et un nom de fichier n'est pas une preuve. Relevé le 30/09/2026 sur
+# le site de l'intercommunalité du premier portage : « delibs-09.07.26.pdf »
+# contient le procès-verbal du 3 juin, et « Deliberations-du-4-mars-2026.pdf »
+# le dossier de séance du 4 mars. Le premier, cru sur son nom, a fabriqué seize
+# délibérations au 9 juillet. La pièce n'est donc lue que si la date de son nom
+# se retrouve dans son en-tête, en chiffres ou en lettres.
+
+_JOURS_EN_LETTRES = (
+    "premier", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf",
+    "dix", "onze", "douze", "treize", "quatorze", "quinze", "seize", "dix-sept",
+    "dix-huit", "dix-neuf", "vingt", "vingt et un", "vingt-deux", "vingt-trois",
+    "vingt-quatre", "vingt-cinq", "vingt-six", "vingt-sept", "vingt-huit",
+    "vingt-neuf", "trente", "trente et un")
+
+
+def date_attestee(texte: str, iso: str, portee_caracteres: int = 4000) -> bool:
+    """La date `iso` figure-t-elle dans l'en-tête du texte ?"""
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", iso or "")
+    if not m:
+        return False
+    a, mo, j = m.group(1), int(m.group(2)), int(m.group(3))
+    tete = re.sub(r"\s+", " ", texte[:portee_caracteres]).lower()
+    mois = MOIS_FR[mo - 1]
+    jours = {str(j), f"{j:02d}", _JOURS_EN_LETTRES[j - 1]} | ({"1er", "un"} if j == 1 else set())
+    formes = [rf"\b{re.escape(x)} {mois}\b" for x in jours]
+    formes += [rf"(?<!\d){j:0{n}d}\s*[/.-]\s*{mo:02d}\s*[/.-]\s*(?:{a}|{a[2:]})(?!\d)"
+               for n in (1, 2)]
+    formes += [rf"(?<!\d){j:0{n}d}\s*[/.-]\s*{mo}\s*[/.-]\s*(?:{a}|{a[2:]})(?!\d)"
+               for n in (1, 2)]
+    return any(re.search(f, tete) for f in formes)
+
+
+def _date_de_mediatheque_refusee(doc, texte: str, verbose: bool) -> bool:
+    if not (doc.meta or {}).get("depuis_mediatheque") or date_attestee(texte, doc.date):
+        return False
+    if verbose:
+        print(f"  [wp] {doc.url.rsplit('/', 1)[-1]} : la date {doc.date}, lue dans le "
+              f"nom du fichier, n'est pas dans son en-tête — pièce écartée")
+    return True
+
+
+def traiter_acte(conn, doc, portee: str, verbose: bool = True,
+                 avec_ocr: bool = False) -> dict:
+    """Enregistre une pièce qui EST une délibération, sans rien découper.
+
+    Un portail de publicité légale publie les actes un par un, avec leur numéro
+    et leur objet. Tout ce que les analyseurs de procès-verbaux cherchent à
+    deviner est ici déclaré par la collectivité — il n'y a donc pas de découpage
+    à tenter, et en tenter un serait remplacer un fait par une inférence.
+
+    La séance reste enregistrée : c'est le contenant qui rassemble les actes
+    d'un même jour, et le seul endroit où lire les présents.
+    """
+    p = PORTEES[portee]
+    lu = lire_document(doc, avec_ocr)
+    if lu is None:
+        return {"statut": "inaccessible", "delibs": 0}
+    texte, format_, ocrise = lu
+    if _date_de_mediatheque_refusee(doc, texte, verbose):
+        return {"statut": "date_non_attestee", "delibs": 0}
+
+    if len(texte) < MIN_TEXT_CHARS:
+        # Le portail donne l'objet et le numéro, mais pas le texte : enregistrer
+        # une délibération vide la ferait passer pour lue. La lacune se signale.
+        if verbose:
+            print(f"  [acte] {doc.acte.get('numero') or doc.url} — "
+                  f"pièce sans couche texte, non enregistrée")
+        return {"statut": "sans_couche_texte" if format_ == "pdf"
+                else "texte_trop_court", "delibs": 0}
+
+    date, provenance, controle = date_de_seance(texte, doc, portee)
+    doc.date = date
+
+    pres = presences(texte, _ordre_noms(portee))
+    seance_id = enregistrer_seance(
+        conn, doc, portee,
+        {"format": format_, "ocr": ocrise, "depuis_portail_actes": True,
+         **(doc.meta or {}), **pres})
+
+    delib = acte_unique(doc.acte.get("objet") or doc.libelle, texte,
+                        doc.acte.get("numero") or "")
+    eid = enregistrer_deliberation(conn, doc, portee, delib)
+    conn.execute(
+        "UPDATE events SET metadata=json_patch(metadata, ?) WHERE id=?",
+        (json.dumps({"type_acte": doc.acte.get("type") or "",
+                     "date_source": provenance,
+                     "date_teletransmission": doc.acte.get("date_teletransmission") or "",
+                     **controle}, ensure_ascii=False), eid))
+
+    # Le compte des actes d'une séance se LIT en base : la pièce en cours ne
+    # sait pas combien de sœurs elle a, et un portail qui n'affiche que la
+    # période d'affichage légal n'en connaît lui-même qu'une partie.
+    nb = conn.execute("SELECT COUNT(*) FROM events WHERE type=? AND date=?",
+                      (p["delib"], doc.date)).fetchone()[0]
+    conn.execute(
+        "UPDATE events SET metadata=json_patch(metadata, ?) WHERE id=?",
+        (json.dumps({"nb_deliberations": nb}, ensure_ascii=False), seance_id))
+
+    link_persons_to_event(conn, seance_id, pres["presents"], "présent")
+    link_persons_to_event(conn, seance_id, pres["absents"], "absent")
+    link_persons_to_event(conn, eid, pres["presents"], "présent")
+
+    if verbose:
+        print(f"  [acte] {doc.date} — {delib['numero_acte'] or 'sans numéro'} "
+              f"({provenance}), {len(pres['presents'])} présents")
+    return {"statut": "ok", "delibs": 1}
+
+
+#: Ce qui pointe vers un événement sans suppression en cascade (db/schema.sql).
+_REFERENCES_EVENEMENT = (("financial_flows", "event_id"), ("marches_publics", "event_id"),
+                         ("approbations_projets", "event_id"),
+                         ("budget_annexe", "source_event_id"))
+
+
+def _a_la_colonne(conn, table: str, colonne: str) -> bool:
+    return colonne in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def retirer_fiches_de_la_piece(conn, doc, portee: str) -> int:
+    """Les « délibérations » qu'une convocation avait fabriquées (avant le
+    01/10/2026, elle était lue comme un procès-verbal).
+
+    Seules partent les fiches de collecte nées de CETTE pièce, sans décision de
+    l'atelier ni ligne qui s'y rattache : une fiche qu'un humain a regardée ou
+    qu'un flux cite n'est pas effacée en silence, elle reste et se voit.
+    """
+    p = PORTEES[portee]
+    gardes = "".join(f" AND NOT EXISTS (SELECT 1 FROM {t} WHERE {c} = e.id)"
+                     for t, c in _REFERENCES_EVENEMENT if _a_la_colonne(conn, t, c))
+    ids = [r[0] for r in conn.execute(
+        "SELECT e.id FROM events e WHERE e.type = ? AND e.source_url = ?"
+        " AND COALESCE(e.origine, '') != 'atelier'"
+        " AND NOT EXISTS (SELECT 1 FROM annotations a"
+        "                 WHERE a.object_type = 'deliberation' AND a.object_id = e.id)"
+        + gardes, (p["delib"], doc.url))]
+    for i in ids:
+        conn.execute("DELETE FROM event_entities WHERE event_id = ?", (i,))
+        conn.execute("DELETE FROM events WHERE id = ?", (i,))
+    return len(ids)
+
+
+def traiter_convocation(conn, doc, portee: str, texte: str, verbose: bool = True) -> dict:
+    """Une convocation ANNONCE la séance : son ordre du jour, son heure, son
+    lieu entrent dans la fiche de séance, et rien d'autre. Cf. convocation.py."""
+    lu = lire_convocation(texte)
+    enregistrer_seance(conn, doc, portee, {"convocation": {**lu, "url": doc.url}},
+                       annonce=True)
+    retirees = retirer_fiches_de_la_piece(conn, doc, portee)
+    if verbose:
+        print(f"  [convocation] {doc.date} — {len(lu.get('ordre_du_jour', []))} point(s) "
+              "à l'ordre du jour" + (f", {retirees} fiche(s) fabriquée(s) retirée(s)"
+                                     if retirees else ""))
+    return {"statut": "convocation", "delibs": 0, "retirees": retirees}
+
+
+def traiter(conn, doc, portee: str, verbose: bool = True,
+            avec_ocr: bool = False) -> dict:
+    """Télécharge, lit et enregistre un procès-verbal, quel que soit son format."""
+    if getattr(doc, "acte", None):
+        return traiter_acte(conn, doc, portee, verbose, avec_ocr)
+    p = PORTEES[portee]
+    lu = lire_document(doc, avec_ocr)
+    if lu is None:
+        return {"statut": "inaccessible", "delibs": 0}
+    texte, format_, ocrise = lu
+    if _date_de_mediatheque_refusee(doc, texte, verbose):
+        return {"statut": "date_non_attestee", "delibs": 0}
+
+    # Une convocation n'est pas un procès-verbal : elle annonce, elle ne
+    # rapporte rien. Lue comme un PV, elle fabriquait des délibérations avec
+    # ses lignes en capitales et écrasait les présents du vrai PV.
+    if est_convocation(nature_de_piece(doc.libelle), texte):
+        return traiter_convocation(conn, doc, portee, texte, verbose)
+
+    if len(texte) < MIN_TEXT_CHARS:
+        # Sans reconnaissance optique, le signaler vaut mieux que produire une
+        # séance vide qui passerait pour lue. Une page web trop courte, elle,
+        # n'est pas un défaut de lecture : c'est un ordre du jour, ou une page
+        # qui annonce la séance sans la rapporter.
+        enregistrer_seance(conn, doc, portee, {"format": format_})
+        return {"statut": "sans_couche_texte" if format_ == "pdf" else "texte_trop_court",
+                "delibs": 0}
+
+    # Seul un PDF a des pages, donc un en-tête de page. Cf. `_sans_entetes`.
+    delibs = deliberations(texte, pagine=(format_ == "pdf"))
+    pres = presences(texte, _ordre_noms(portee))
+    seance_id = enregistrer_seance(
+        conn, doc, portee,
+        {"nb_deliberations": len(delibs), "ocr": ocrise, "format": format_,
+         **(doc.meta or {}), **pres})
+
+    if not delibs:
+        conn.execute(
+            "UPDATE events SET content=?, metadata=json_patch(metadata, ?)"
+            " WHERE id=?",
+            (texte, json.dumps({"decoupage_delib": False}, ensure_ascii=False),
+             seance_id))
+
+    link_persons_to_event(conn, seance_id, pres["presents"], "présent")
+    link_persons_to_event(conn, seance_id, pres["absents"], "absent")
+    for d in delibs:
+        eid = enregistrer_deliberation(conn, doc, portee, d)
+        link_persons_to_event(conn, eid, pres["presents"], "présent")
+
+    if verbose:
+        regime = delibs[0]["regime"] if delibs else "non découpé"
+        print(f"  [pv] {doc.date} — {len(delibs)} délibérations ({regime}), "
+              f"{len(pres['presents'])} présents, {len(pres['pouvoirs'])} pouvoirs")
+    return {"statut": "ok", "delibs": len(delibs)}
+
+
+# ── Point d'entrée ───────────────────────────────────────────────────────────
+
+# Au-delà, les pièces sans réponse ne sont plus quelques liens morts du site :
+# c'est la source qui a lâché en cours de collecte.
+PART_MUETTE_TOLEREE = 0.20
+
+def complement_mediatheque(portee: str, documents: list) -> list:
+    """Les pièces déposées dans la médiathèque WordPress que la page n'a pas liées.
+
+    Déclaré par portée (`pages.<portée>.mediatheque`), jamais deviné : la
+    médiathèque est une propriété du SITE, pas du connecteur qui en lit les
+    pages — l'intercommunalité du premier portage est un WordPress lu en HTML.
+    """
+    from .config import COMMUNE_URL, EPCI_URL, PAGES
+    if not (PAGES.get(portee) or {}).get("mediatheque"):
+        return []
+    from .connecteurs.wordpress_rest import catalogue_mediatheque
+    base = COMMUNE_URL if portee == "commune" else EPCI_URL
+    ajout = catalogue_mediatheque(base, {d.url for d in documents})
+    print(f"  [wp] médiathèque : {len(ajout)} pièce(s) que la page ne liait pas"
+          + (f", dont {sum(1 for d in ajout if d.acte)} acte(s) publiés seuls"
+             if ajout else ""))
+    return ajout
+
+
+def collecter(portee: str = "commune", depuis: str | None = None,
+              limit: int = 0, commit: bool = True,
+              catalogue_seul: bool = False, avec_ocr: bool = False) -> None:
+    instance = COMMUNE_NAME if portee == "commune" else (EPCI_NOM or "EPCI")
+    print(f"\n[conseils] {instance} — catalogue des procès-verbaux")
+
+    documents = charger(portee=portee).catalogue_pv(portee)
+    documents += complement_mediatheque(portee, documents)
+    documents.sort(key=lambda d: d.date, reverse=True)
+    print(f"  {len(documents)} procès-verbaux catalogués"
+          + (f" ({documents[-1].date} → {documents[0].date})" if documents else ""))
+    if depuis:
+        documents = [d for d in documents if d.date >= depuis]
+        print(f"  {len(documents)} depuis {depuis}")
+    if limit:
+        documents = documents[:limit]
+
+    if not commit:
+        for d in documents[:20]:
+            print(f"    {d.date}  {d.url.split('/')[-1]}")
+        print("  [dry-run] rien écrit")
+        return
+
+    if portee == "epci" and EPCI_NOM:
+        with transaction() as conn:
+            upsert_entity(conn, type="service", name=EPCI_NOM,
+                          confidence="verified")
+
+    resume = {"ok": 0, "sans_couche_texte": 0, "inaccessible": 0, "delibs": 0}
+    # Une transaction PAR document, et non une seule pour tout le corpus : lire
+    # deux cents PDF prend une vingtaine de minutes, pendant lesquelles une
+    # transaction unique garde le verrou d'écriture et fait échouer tout autre
+    # collecteur sur « database is locked » — huit étapes perdues d'un coup lors
+    # du premier portage.
+    for doc in documents:
+        with transaction() as conn:
+            if catalogue_seul:
+                enregistrer_seance(conn, doc, portee)
+                resume["ok"] += 1
+                continue
+            r = traiter(conn, doc, portee, avec_ocr=avec_ocr)
+            # `.get` et non `[]` : `traiter` rend aussi « texte_trop_court »,
+            # absent du résumé — une page web courte faisait tomber la collecte
+            # entière sur un KeyError, après des dizaines de documents lus.
+            resume[r["statut"]] = resume.get(r["statut"], 0) + 1
+            resume["delibs"] += r["delibs"]
+
+    reste = resume["sans_couche_texte"]
+    print(f"\n[conseils] {resume['ok']} documents lus, {resume['delibs']} "
+          f"délibérations, {reste} sans couche texte"
+          + ("" if avec_ocr else " (relancer avec --ocr)")
+          + f", {resume['inaccessible']} inaccessibles"
+          + (f", {resume['date_non_attestee']} pièce(s) de médiathèque écartée(s) : "
+             f"date du nom de fichier absente du texte"
+             if resume.get("date_non_attestee") else ""))
+
+    # Une pièce retirée du site est une lacune connue ; un site qui ne répond
+    # plus, non. Aucune réponse du tout, ou plus d'une pièce sur cinq sans
+    # réponse : la source a été interrompue, et le step ne se dit pas « ok ».
+    # Après le traitement, jamais avant — ce qui a été lu est en base.
+    muets = resume["inaccessible"]
+    tentes = sum(n for statut, n in resume.items() if statut != "delibs")
+    if muets and (muets == tentes or muets > PART_MUETTE_TOLEREE * tentes):
+        from .erreurs import SourceInterrompue
+        raise SourceInterrompue(
+            f"{muets} procès-verbal(aux) sur {tentes} n'ont pas répondu — le "
+            f"site n'a pas été lu en entier, ce n'est pas qu'il n'a rien publié. "
+            f"Relancer le step reprendra ce qui manque.")
+
+
+def collecter_archives(portee: str = "commune", limit: int = 0,
+                       commit: bool = True, avec_ocr: bool = False) -> None:
+    """Les séances que le site ne sert plus, reprises dans l'archive du web.
+
+    L'archive ne COMPLÈTE pas le site, elle le rattrape : une date déjà tenue
+    par une séance en base n'est pas retraitée. Deux raisons. La pièce servie
+    par la commune fait foi sur une capture — elle peut avoir été corrigée
+    depuis. Et l'identité d'une séance porte sur l'adresse du document : la
+    même séance récupérée par deux chemins ferait deux séances, donc deux jeux
+    de délibérations.
+    """
+    from .erreurs import SourceInterrompue
+    from .wayback import catalogue_archive
+
+    instance = COMMUNE_NAME if portee == "commune" else (EPCI_NOM or "EPCI")
+    print(f"\n[conseils] {instance} — procès-verbaux archivés (web.archive.org)")
+
+    # Ce que l'archive n'a pas capturé et ce qu'on n'a pas pu lire donnent le
+    # même zéro. Le premier est un fait sur la commune — un site jamais refondu
+    # n'a rien perdu ; le second est une panne, et l'annoncer comme un résultat
+    # est d'autant plus trompeur que le zéro est plausible (25/08/2026, Brassac).
+    incidents: list[str] = []
+    documents = catalogue_archive(portee, incidents=incidents)
+    if not documents:
+        if incidents:
+            raise SourceInterrompue(
+                f"{len(incidents)} instantané(s) n'ont pas répondu et aucun "
+                f"procès-verbal n'a été catalogué — l'archive n'a pas été lue, "
+                f"ce n'est pas qu'elle est vide. Relancer le step.")
+        print("  aucun procès-verbal archivé trouvé")
+        return
+    print(f"  {len(documents)} procès-verbaux archivés "
+          f"({documents[-1].date} → {documents[0].date})")
+
+    p = PORTEES[portee]
+    with transaction() as conn:
+        tenues = {r["date"] for r in conn.execute(
+            "SELECT DISTINCT date FROM events WHERE type=?", (p["seance"],))}
+    manquants = [d for d in documents if d.date not in tenues]
+    print(f"  {len(tenues & {d.date for d in documents})} déjà en base, "
+          f"{len(manquants)} à reprendre")
+    if limit:
+        manquants = manquants[:limit]
+
+    if not commit:
+        for d in manquants[:20]:
+            print(f"    {d.date}  {d.libelle}")
+        print("  [dry-run] rien écrit")
+        return
+
+    resume: dict[str, int] = {"delibs": 0}
+    for doc in manquants:
+        with transaction() as conn:
+            r = traiter(conn, doc, portee, avec_ocr=avec_ocr)
+            resume[r["statut"]] = resume.get(r["statut"], 0) + 1
+            resume["delibs"] += r["delibs"]
+
+    print(f"\n[conseils] {resume.get('ok', 0)} séances reprises de l'archive, "
+          f"{resume['delibs']} délibérations, "
+          f"{resume.get('sans_couche_texte', 0)} sans couche texte"
+          + ("" if avec_ocr else " (relancer avec --ocr)")
+          + f", {resume.get('inaccessible', 0)} inaccessibles")
+
+    if incidents:
+        # Après le traitement, jamais avant : les séances lues sont en base et
+        # l'exception ne les défait pas. Elle refuse seulement d'appeler « ok »
+        # un passage qui n'a pas tout vu — la reprise est incrémentale, une date
+        # déjà tenue par une séance n'est pas retraitée.
+        raise SourceInterrompue(
+            f"{len(incidents)} instantané(s) n'ont pas répondu : le catalogue "
+            f"est partiel, d'autres séances dorment peut-être dans l'archive. "
+            f"Relancer le step reprendra ce qui manque.")
+
+
+def import_pv_archives() -> None:
+    """Entrée appelée par run_all (step `cm_archive`)."""
+    collecter_archives("commune")
+
+
+def import_conseil_municipal() -> None:
+    """Entrée appelée par run_all (step `cm`)."""
+    collecter("commune")
+
+
+def import_conseil_communautaire() -> None:
+    """Entrée appelée par run_all (step `cc_epci`)."""
+    collecter("epci")
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="Séances et délibérations")
+    ap.add_argument("--portee", choices=["commune", "epci"], default="commune")
+    ap.add_argument("--archives", action="store_true",
+                    help="reprendre dans l'archive du web les séances que le "
+                         "site ne sert plus")
+    ap.add_argument("--depuis", help="AAAA ou AAAA-MM-JJ")
+    ap.add_argument("--limit", "-n", type=int, default=0)
+    ap.add_argument("--catalogue", action="store_true",
+                    help="enregistrer les séances sans lire les PDF")
+    ap.add_argument("--commit", action="store_true", help="écrire en base")
+    ap.add_argument("--ocr", action="store_true",
+                    help="reconnaissance optique des PDF scannés (ocrmypdf)")
+    ap.add_argument("--url", help="traiter un seul document (URL du PDF)")
+    ap.add_argument("--date", help="date du document passé par --url")
+    args = ap.parse_args()
+
+    if args.url:
+        if not args.date:
+            ap.error("--url exige --date")
+        from .connecteurs.base import DocumentPublie
+        from .wayback import document_archive
+        # Une adresse d'archive n'est pas sa propre source : l'éditeur est la
+        # commune, et c'est son domaine que l'allowlist de publication connaît.
+        doc = document_archive(args.url, args.date) or DocumentPublie(
+            date=args.date, url=args.url, libelle=args.date,
+            source=urllib.parse.urlparse(args.url).netloc)
+        if not args.commit:
+            raise SystemExit("  [dry-run] rien écrit")
+        with transaction() as conn:
+            print(traiter(conn, doc, args.portee, avec_ocr=args.ocr))
+    elif args.archives:
+        collecter_archives(args.portee, args.limit, args.commit, avec_ocr=args.ocr)
+    else:
+        depuis = args.depuis
+        if depuis and len(depuis) == 4:
+            depuis = f"{depuis}-01-01"
+        collecter(args.portee, depuis, args.limit, args.commit, args.catalogue,
+                  avec_ocr=args.ocr)

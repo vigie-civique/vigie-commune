@@ -1,0 +1,83 @@
+"""Fixtures communes.
+
+Deux partis pris, qui expliquent la forme de ces tests.
+
+**La base n'est jamais simulée.** Elle est créée depuis `db/schema.sql`, le
+même fichier que celui d'une instance réelle. Une base simulée aurait les
+colonnes qu'on croit, pas celles qui existent — c'est précisément ce qui a
+laissé `build_rag_index` interroger `events.entity_id`, colonne inexistante,
+et n'indexer aucun acte pendant des mois sans que rien ne le signale.
+
+**L'instance est factice mais complète.** `tests/instance_test.json` décrit une
+commune qui n'existe pas, pour qu'un dépôt fraîchement cloné puisse lancer sa
+suite sans configurer de périmètre, et pour qu'un test en échec ne fasse jamais
+douter d'une vraie collecte.
+"""
+from __future__ import annotations
+
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+# Doit être posé AVANT tout import de collectors.config, qui lit ces variables
+# au chargement du module.
+os.environ.setdefault("VIGIE_INSTANCE",
+                      str(Path(__file__).parent / "instance_test.json"))
+os.environ.setdefault("VIGIE_RULES",
+                      str(ROOT / "config" / "publication_rules.exemple.json"))
+# Même règle pour `api_auth`, qui refuse de se charger sans secret de session :
+# un service incapable d'authentifier quiconque doit échouer au lancement, pas à
+# la première connexion. La suite lui en donne un jetable — sans quoi elle ne
+# passe QUE sur une machine où traîne un `.env`, celle de son auteur, et échoue
+# partout ailleurs sur un défaut qui n'est pas dans le code testé.
+os.environ.setdefault("JWT_SECRET", "secret-de-test-sans-valeur-32-octets")
+
+
+@pytest.fixture(autouse=True)
+def _reseau_relache():
+    """La garde réseau des collecteurs (`collectors/reseau.py`) se pose sur le
+    PROCESSUS : un test qui lance un point d'entrée de collecte la laisserait
+    aux suivants, qui parlent à des serveurs locaux — l'aperçu ne démarrait plus."""
+    yield
+    from collectors import reseau
+    reseau.relacher()
+
+
+@pytest.fixture(scope="session")
+def schema_sql() -> str:
+    return (ROOT / "db" / "schema.sql").read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def base(tmp_path, schema_sql) -> sqlite3.Connection:
+    """Une base vide au schéma réel, jetable."""
+    conn = sqlite3.connect(tmp_path / "test.db")
+    conn.executescript(schema_sql)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    yield conn
+    conn.close()
+
+
+@pytest.fixture
+def entite(base):
+    """Fabrique une entité et renvoie son identifiant.
+
+    Les identifiants ne sont jamais écrits en dur dans les tests : c'est le
+    défaut que le dispositif combat (`XXX_ID = 63`), il n'a pas à être réintroduit
+    ici.
+    """
+    def _creer(nom: str, type_: str = "business", commune: str | None = None,
+               perimetre: str | None = None, confidence: str = "verified") -> int:
+        cur = base.execute(
+            "INSERT INTO entities (type, name, commune, perimetre, confidence) "
+            "VALUES (?,?,?,?,?)", (type_, nom, commune, perimetre, confidence))
+        base.commit()
+        return cur.lastrowid
+    return _creer

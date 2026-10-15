@@ -1,0 +1,416 @@
+name: contrôles
+
+# Ce que cette CI vérifie, et pourquoi elle est courte : les trois fonctions qui
+# décident ce qui sort du dispositif — le filtre de publication, le classement
+# de périmètre, et la liste des fichiers distribués. Chacune a laissé passer un
+# défaut réel en août 2026, aucune n'était couverte.
+#
+# Elle ne collecte rien : pas de réseau, pas de clé, pas d'Ollama. Les tests
+# tournent sur une instance factice et une base construite depuis db/schema.sql.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # La borne basse est celle qu'on annonce dans pyproject ; la haute est
+        # proche de la machine de développement. Entre les deux, c'est vérifié.
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Dépendances de test
+        # Pas requirements.txt : la suite ne doit dépendre ni des collecteurs ni
+        # de l'API. Si un test se met à réclamer requests, c'est qu'il sort sur
+        # le réseau, et il ne devrait pas. Les tests qui s'adressent à l'API font
+        # exception et sont sautés ici — cf. le job `tests-deps`, qui les joue.
+        run: pip install pytest
+      - name: Tests
+        run: python -m pytest -ra
+
+  tests-deps:
+    # Le job précédent saute ce qui exige l'API ou les collecteurs. Celui-ci
+    # installe tout et rejoue la suite ENTIÈRE : sans lui, un fichier sauté
+    # partout serait un contrôle mort, et c'est justement là que vit le verrou
+    # d'origine — l'interface grise ce qu'elle interdit, mais elle ne protège
+    # que celui qui l'utilise. Rien ne sort sur le réseau pour autant : le
+    # client de test de FastAPI appelle l'application dans le même processus.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Dépendances
+        run: pip install -r requirements.txt pytest
+      - name: Suite entière
+        # Un test SAUTÉ ici est un défaut, pas une information : tout est
+        # installé, donc un skip dénonce un paquet absent de requirements.txt.
+        # Deux collecteurs ont vécu des mois dans cet angle mort.
+        run: |
+          python -m pytest -ra | tee resultat.txt
+          statut=${PIPESTATUS[0]}
+          if [ "$statut" -ne 0 ]; then exit "$statut"; fi
+          if grep -q '^SKIPPED' resultat.txt; then
+            echo "::error::un test sauté alors que les dépendances sont installées"
+            exit 1
+          fi
+
+  windows:
+    # L'installateur vise Windows, et rien ne le vérifiait : `import fcntl` dans
+    # scripts/publication.py empêchait l'API de se charger, donc l'atelier de
+    # démarrer. Ce job installe ce que l'installateur installe et charge ce que
+    # le lanceur charge. Sur 3.12 ET 3.13 : `amorcage.ps1` cherche 3.13 d'abord.
+    # `--only-binary` : un poste Windows n'a pas de compilateur. Une dépendance
+    # sans roue pour l'une de ces versions (numpy 1.26 n'en avait pas en 3.13)
+    # doit échouer ici, pas chez la personne qui installe.
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Dépendances
+        run: "pip install --only-binary=:all: -r requirements.txt pytest"
+      - name: L'API et les collecteurs se chargent
+        env:
+          VIGIE_INSTANCE: tests/instance_test.json
+          VIGIE_RULES: config/publication_rules.exemple.json
+          JWT_SECRET: secret-de-ci-sans-valeur-32-octets-au-moins
+          PYTHONUTF8: "1"
+        run: python -c "import api, collectors.run_all"
+      - name: Le verrou de fichier
+        env:
+          PYTHONUTF8: "1"
+        run: python -m pytest -ra tests/test_verrou.py
+
+  generique:
+    # Séparé des tests : ce contrôle est l'admission du kit. Le voir échouer
+    # seul dit immédiatement qu'une particularité locale est entrée dans le
+    # moteur, sans avoir à lire un rapport de suite.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Le moteur ne nomme aucune commune
+        env:
+          VIGIE_INSTANCE: tests/instance_test.json
+        run: python scripts/verifier_generique.py
+
+  kit:
+    # Fabrique l'archive distribuable sur un dépôt sans instance ni base : c'est
+    # l'état d'un clone public. Une archive qui ne se construit pas là ne se
+    # construira pas chez celui qui la reprend.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: L'archive se construit et ne contient rien d'interdit
+        env:
+          VIGIE_INSTANCE: tests/instance_test.json
+        run: python scripts/build_kit.py
+
+  site:
+    # La chaîne complète sur une commune qui n'existe pas : base vierge au
+    # schéma réel, snapshot, contrôle d'étanchéité, build. Elle ne publie rien,
+    # elle vérifie que rien ne casse entre la base et le HTML — c'est le
+    # parcours qu'un dépôt fraîchement cloné doit pouvoir suivre.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          # La version vient du champ `packageManager` du paquet.
+          package_json_file: public/package.json
+      - uses: actions/setup-node@v4
+        with:
+          # 22 et non 20 : le contrôle du dossier hors-ligne pilote Chrome par
+          # CDP, et `WebSocket` n'est global qu'à partir de Node 22.
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: public/pnpm-lock.yaml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Base d'épreuve
+        # Depuis le 03/10/2026 : des actes d'assemblée avec leur texte, un
+        # dossier d'épreuve retenu (tests/fixtures/dossiers/) qui les cite, et
+        # les règles d'exemple complétées des domaines de l'instance factice
+        # (db/ci.regles.json) — comme `init_instance` le fait pour une vraie.
+        # Sans elles, aucun acte ne sortait et le texte des actes, les liens
+        # et les retours n'étaient éprouvés nulle part.
+        env:
+          VIGIE_DB: db/ci.db
+          VIGIE_CI_DOSSIERS: "1"
+        run: python tests/amorcer_base_ci.py
+      - name: Publication en deux temps — l'aperçu ne publie rien
+        # Le flux tel qu'un admin le vit depuis l'atelier, sur le vrai
+        # générateur et le vrai contrôleur. La suite pytest éprouve
+        # l'orchestration sur des répertoires jetables ; ici on vérifie que
+        # l'assemblage tient sur une vraie base — et surtout que générer un
+        # aperçu ne touche pas au répertoire publié.
+        env:
+          VIGIE_INSTANCE: tests/instance_test.json
+          VIGIE_RULES: db/ci.regles.json
+          VIGIE_DB: db/ci.db
+        run: |
+          python - <<'PY'
+          import sys
+          from scripts import publication as pub
+
+          apercu = pub.generer_apercu(auteur="ci")
+          assert apercu["controle"]["ok"], apercu["controle"]["rapport"]
+          assert not (pub.PUBLIE / "stats.json").exists(), \
+              "générer un aperçu a écrit dans le répertoire publié"
+          assert pub.etat_publication()["etape"] == "pret_a_publier"
+
+          try:
+              pub.publier(auteur="ci", role="validator")
+              sys.exit("un non-admin a pu publier")
+          except pub.PublicationRefusee:
+              pass
+
+          publie = pub.publier(auteur="ci", role="admin")
+
+          # « promu_localement », et non « publié » : entre les répertoires
+          # servis et le site en ligne il y a un build et un déploiement que
+          # l'atelier ne fait pas. Le dernier état se CONSTATE, il ne se déduit
+          # pas — et la CI n'a pas de site à interroger.
+          etat = pub.etat_publication()
+          assert etat["etape"] == "promu_localement", etat["etape"]
+          assert etat["etape_libelle"]
+
+          # La mise en service est atomique : chaque emplacement est construit à
+          # côté, contrôlé, puis renommé. Ce qui est servi porte donc toujours
+          # une version entière, et déclare laquelle.
+          assert publie["empreinte"] == pub.empreinte(pub.PUBLIE), \
+              "le répertoire servi ne porte pas la version annoncée"
+          assert (pub.PUBLIE / "version.json").is_file(), \
+              "le répertoire servi ne déclare pas ce qu'il sert"
+
+          # Et l'on peut revenir en arrière — un contrôle vert dit qu'une
+          # version est étanche, pas qu'elle est bonne. Il faut deux
+          # publications pour cela : à la première, il n'y a pas d'avant.
+          try:
+              pub.revenir_a_la_version_precedente(pub.PUBLIE)
+              sys.exit("il n'y avait pourtant aucune version précédente")
+          except pub.PublicationRefusee:
+              pass
+
+          pub.publier(auteur="ci", role="admin")
+          repris = pub.revenir_a_la_version_precedente(pub.PUBLIE)
+          assert (pub.PUBLIE / "stats.json").is_file(), \
+              "le retour arrière a laissé le répertoire servi vide"
+          assert repris["empreinte"] == publie["empreinte"], \
+              "la version remise en service n'est pas celle d'avant"
+          print("aperçu → contrôle → promotion → retour arrière : le flux tient.")
+          PY
+
+      - name: Snapshot et contrôle d'étanchéité
+        env:
+          VIGIE_INSTANCE: tests/instance_test.json
+          VIGIE_RULES: db/ci.regles.json
+          VIGIE_DB: db/ci.db
+        run: |
+          python scripts/build_public_snapshot.py
+          python scripts/verify_snapshot.py public/static/data
+          # Le graphe des liens, de bout en bout : des actes avec leur texte,
+          # un dossier dont les citations sont reliées, des retours, et le
+          # bandeau d'un acte cité qui a changé depuis la relecture.
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          d = Path("public/static/data")
+          s = json.loads((d / "stats.json").read_text())
+          assert s["extraits_actes"] >= 6, f"textes d'actes : {s['extraits_actes']}"
+          [dossier] = json.loads((d / "dossiers.json").read_text())["dossiers"]
+          assert "/deliberations/2021#c-2021-41" in dossier["texte"], "citation non reliée"
+          assert dossier.get("perime", {}).get("elements"), "la péremption ne se voit pas"
+          liens = json.loads((d / "liens.json").read_text())
+          assert liens["actes"].get("c-2021-41"), "aucun retour vers l'acte cité"
+          assert json.loads((d / "lacunes.json").read_text())["total"] >= 2
+          print("graphe des liens :", s["graphe"])
+          # Un marché lu dans un procès-verbal et déposé à l'atelier : il est
+          # COMPTÉ en attente, et il n'est PAS publié (extraction ≠ publication).
+          x = json.loads((d / "couverture.json").read_text())["extraits"]["marches"]
+          assert x["en_attente"]["commune"] == 1, x
+          assert json.loads((d / "marches.json").read_text())["marches"] == [], \
+              "une ligne extraite est publiée sans avoir été relue"
+          PY
+      - name: Build
+        working-directory: public
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+          # Les ancres datées et les retours sont dans le HTML prérendu.
+          grep -q 'id="c-2021-41"' build/deliberations/2021.html
+          grep -q 'Cité dans' build/deliberations/2021.html
+          grep -q 'Un élément cité a changé' build/dossiers/eau.html
+          # Chaque séance a sa page, relue ou non ; la séance relue mène à sa
+          # feuille, et l'accueil mène à la page de séance (lot 6).
+          grep -q 'Mise en clair' build/conseils/2021-04-14_conseil-municipal.html
+          grep -q 'Pas encore mise en clair' build/conseils/2025-04-02_conseil-communautaire.html
+          grep -q 'href="/conseils/2021-04-14_conseil-municipal"' build/deliberations/2021.html
+          # Un zéro de marchés dit pourquoi : ici, une attribution lue dans un
+          # procès-verbal attend sa relecture (lot 4 b), et le nombre est donné.
+          grep -q 'attend sa' build/marches.html
+          grep -q 'attend sa' build/index.html
+          # Chaque résultat de recherche mène à une page qui l'affiche : avant
+          # le 04/10/2026, ≈ 1 400 résultats de Lasalle visaient une ancre
+          # absente de /deliberations/<année>, ou une année sans page.
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+          b = Path("build")
+          index = json.loads((b / "data" / "recherche_index.json").read_text())["index"]
+          fautes = []
+          for e in index:
+              u = e.get("u")
+              if not u or u.startswith("http"):
+                  continue
+              chemin, _, ancre = u.partition("#")
+              page = next((p for p in (b / (chemin.strip("/") + ".html"),
+                                       b / chemin.strip("/"), b / chemin.strip("/") / "index.html")
+                           if p.is_file()), None)
+              if page is None:
+                  fautes.append(f"{u} : aucune page")
+              elif ancre and f'id="{ancre}"' not in page.read_text(errors="replace"):
+                  fautes.append(f"{u} : ancre absente")
+          assert not fautes, "\n".join(fautes)
+          print(f"recherche : {len(index)} entrées, toutes mènent à ce qu'elles annoncent")
+          PY
+
+      - name: Le dossier hors-ligne s'ouvre comme un lecteur l'ouvre
+        # Le contrôle qui manquait. Les deux défauts qu'il cherche — des liens
+        # internes qui tombent sur une liste de fichiers, un sélecteur
+        # d'exercice inerte — ne naissent que dans le navigateur du lecteur :
+        # ils ont traversé quatre dossiers livrés entre le 03 et le 11/09/2026
+        # pendant que tous les contrôles de texte restaient verts.
+        #
+        # Le build est REFAIT avec VIGIE_HORS_LIGNE=1 : c'est l'artefact remis
+        # qu'on éprouve, pas le site en ligne, et ils ne s'écrivent pas pareil.
+        # Chrome est préinstallé sur ubuntu-24.04.
+        #
+        # La mise en forme d'archive (chemins relatifs, LISEZ-MOI, lanceurs)
+        # vit dans le dépôt du portail, absent d'ici : la condition `file://`
+        # n'est donc pas éprouvée par cette CI, et le contrôle le dit. Elle
+        # l'est sur le portail, après chaque `prepare_offline_export`.
+        working-directory: public
+        env:
+          VIGIE_HORS_LIGNE: "1"
+          VIGIE_BUILD_DIR: build-hors-ligne
+        run: |
+          pnpm exec vite build
+          CHROME_PATH="$(command -v google-chrome || command -v chromium)" \
+            node scripts/verifier_hors_ligne.mjs build-hors-ligne
+
+  atelier:
+    # L'atelier n'était construit par aucun job : seul l'audit des dépendances le voyait.
+    # Une faute de syntaxe dans un composant, ou une couleur écrite en dur (le
+    # build commence par `verifier_couleurs.mjs`, qui sort en 1), n'apparaissait
+    # qu'au déploiement sur le serveur — là où le script revient en arrière.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          # La version vient du champ `packageManager` du paquet.
+          package_json_file: dashboard/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: dashboard/pnpm-lock.yaml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Libellés de l'instance factice
+        # `src/lib/instance.js` n'est pas versionné : il se dérive de
+        # l'instance, comme à l'installation (deploy/README.md, étape d).
+        env:
+          VIGIE_INSTANCE: tests/instance_test.json
+        run: python scripts/generer_libelles.py
+      - name: Build
+        working-directory: dashboard
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+          test -s dist/index.html
+
+  nginx:
+    # Le modèle de configuration du site public (cibles `rsync` et `local`) :
+    # nginx le charge-t-il ? Un modèle qu'on recopie sur un serveur sans l'avoir
+    # jamais donné à nginx casse le jour de l'installation. La version est celle
+    # de Debian 12, où `listen … http2` n'est pas encore déprécié.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: nginx -t
+        run: |
+          mkdir -p /tmp/tls
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj "/CN=commune.example.org" \
+            -keyout /tmp/tls/privkey.pem -out /tmp/tls/fullchain.pem 2>/dev/null
+          chmod 644 /tmp/tls/*.pem
+          docker run --rm \
+            -v "$PWD/deploy/nginx-site.conf:/etc/nginx/conf.d/site.conf:ro" \
+            -v "$PWD/deploy/nginx-site-entetes.conf:/etc/nginx/snippets/vigie-site-entetes.conf:ro" \
+            -v /tmp/tls:/etc/letsencrypt/live/commune.example.org:ro \
+            nginx:1.22-alpine nginx -t
+          # Chaque règle de `_redirects` a son `location` dans le modèle.
+          grep -vE '^\s*(#|$)' public/static/_redirects | while read -r de vers code; do
+            grep -qF "location = $de " deploy/nginx-site.conf \
+              || { echo "✖ $de (→ $vers) n'est pas traduite dans deploy/nginx-site.conf"; exit 1; }
+          done
+
+  dependances:
+    # Les vulnérabilités CONNUES de ce que le dispositif installe. Depuis que
+    # l'atelier se met en ligne (lot E, 02/10/2026), la couche HTTP est exposée :
+    # le premier audit a trouvé cinq avis sur Starlette, corrigés en relevant
+    # les versions épinglées. Ce job les empêche de revenir sans qu'on le voie.
+    #
+    # Les paquets de PRODUCTION seulement côté JavaScript : les deux sites sont
+    # statiques, les outils de build ne sont pas servis.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: pnpm/action-setup@v4
+        with:
+          # La version vient du champ `packageManager` du paquet.
+          package_json_file: public/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Python
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt --no-deps --progress-spinner off
+      - name: Atelier
+        working-directory: dashboard
+        run: pnpm audit --prod
+      - name: Site public
+        working-directory: public
+        run: pnpm audit --prod

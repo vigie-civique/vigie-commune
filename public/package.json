@@ -1,0 +1,33 @@
+{
+  "name": "vigie-civique-public",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#lib": "./src/lib",
+    "#lib/*": "./src/lib/*"
+  },
+  "packageManager": "pnpm@12.8.2",
+  "scripts": {
+    "dev": "vite dev --port 5174",
+    "build": "node scripts/verifier_markdown.mjs && vite build && node scripts/verifier_build.mjs",
+    "preview": "vite preview --port 5174",
+    "verifier": "node scripts/verifier_build.mjs",
+    "verifier-hors-ligne": "node scripts/verifier_hors_ligne.mjs"
+  },
+  "dependencies": {
+    "d3": "^7.9.0",
+    "leaflet": "^1.9.4",
+    "leaflet.markercluster": "^1.5.3",
+    "marked": "18.1.0",
+    "pmtiles": "^4.5.0",
+    "protomaps-leaflet": "^5.1.0"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "4.0.0",
+    "@sveltejs/kit": "3.0.1",
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "svelte": "5.57.2",
+    "vite": "8.3.4"
+  }
+}

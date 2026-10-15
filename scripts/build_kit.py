@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""Fabrique une archive du dispositif, et contrôle ce qu'elle contiendrait.
+
+Le kit est ce dépôt lui-même, moins ce qui appartient à une instance : sa
+configuration, ses données, sa base. Le contrôle de généricité
+(`verifier_generique.py`) est passé AVANT l'empaquetage — un kit qui nomme une
+commune n'est pas un kit.
+
+À quoi elle sert, maintenant que le code est publié : à emporter le dispositif
+là où un dépôt distant n'est pas commode — une machine sans réseau, un transfert
+par clé, un envoi à quelqu'un qui n'utilise pas git. Ce n'est plus le canal de
+distribution, c'est un utilitaire.
+
+Son autre usage, le plus important, est d'être un CONTRÔLE : elle refuse de se
+construire si un nom de personne, un secret, un chemin personnel ou un fichier
+binaire non identifié s'est glissé dans ce qui serait distribué. À ce titre elle
+tourne en intégration continue, même quand personne n'a besoin de l'archive.
+
+L'archive n'est PAS versionnée : elle l'a été jusqu'au 15/08/2026, copie du
+dépôt à l'intérieur du dépôt, qui dérivait de HEAD à chaque commit.
+
+Elle porte son empreinte SHA-256 à côté d'elle : un fichier transmis doit
+pouvoir être vérifié.
+
+    python3 scripts/build_kit.py [--source ~/Claude/vigie-civique]
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tarfile
+from datetime import date
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DEST = ROOT / "public" / "static" / "kit"
+
+# Motifs qui ne doivent JAMAIS entrer dans une archive publique. Le dépôt réduit
+# en est exempt, mais il est reconstruit à la main : le contrôle porte sur ce
+# qu'on est sur le point de distribuer, pas sur ce qu'on croit avoir copié.
+INTERDITS = [
+    (r"/Users/[a-z]", "chemin absolu d'une machine personnelle"),
+    (r"sk-ant-|ghp_|glpat-", "jeton d'API"),
+    (r"BEGIN (RSA |OPENSSH )?PRIVATE KEY", "clé privée"),
+]
+# Les identifiants personnels de qui construit le kit (préfixes d'adresses,
+# noms de compte) : pour la même raison que les patronymes ci-dessous, ils ne
+# s'écrivent pas ici. Une expression régulière dans VIGIE_MOTIFS_PERSONNELS,
+# posée sur la machine qui construit.
+if os.environ.get("VIGIE_MOTIFS_PERSONNELS"):
+    INTERDITS.append((os.environ["VIGIE_MOTIFS_PERSONNELS"], "identifiant personnel"))
+
+# Un kit est du code : il ne doit nommer personne. La liste des patronymes à
+# refuser ne peut donc pas être écrite ici — elle nommerait précisément les
+# personnes qu'elle protège, dans un fichier destiné à la publication. Elle est
+# lue dans la base de l'instance, ce qui la rend en outre valable pour
+# n'importe quelle commune plutôt que pour une seule.
+def patronymes() -> set[str]:
+    """Noms de famille présents dans la base de l'instance, s'il y en a une."""
+    try:
+        sys.path.insert(0, str(ROOT))
+        from collectors.config import DB_PATH
+        import sqlite3
+        if not DB_PATH.exists():
+            return set()
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        # Mots français courants qui sont aussi des patronymes : les compter
+        # ferait échouer l'archive sur une phrase ordinaire écrite en capitales.
+        COURANTS = {"SANS", "AVEC", "POUR", "DANS", "TOUT", "TOUS", "PLUS",
+                    "MOINS", "AUTRE", "AUTRES", "MEME", "MÊME", "PETIT",
+                    "GRAND", "BLANC", "NOIR", "JEUNE", "LEGAL", "ROYAL",
+                    "CÔTÉ", "COTE", "EVEN", "MARTIN", "ROND", "PONT", "MONT",
+                    "BOIS", "CHAMP", "PLACE", "RUE", "VILLE", "PONS"}
+        noms = {r[0].strip().upper() for r in
+                conn.execute("SELECT lastname FROM persons WHERE lastname IS NOT NULL")
+                if r[0] and len(r[0].strip()) > 3}
+        noms -= COURANTS
+        conn.close()
+        return noms
+    except Exception as e:
+        print(f"  [avertissement] patronymes non vérifiés : {e}", file=sys.stderr)
+        return set()
+
+# Fichiers d'INSTANCE : ils décrivent une commune précise et n'ont rien à faire
+# dans un kit. `instance.js` est de toute façon régénéré au premier build. Ce
+# filet est redondant avec .gitignore — c'est voulu : deux règles indépendantes
+# valent mieux qu'une, et un fichier peut avoir été versionné par erreur.
+EXCLUS_FICHIERS = {"instance.json", "instance.js", "seed_local.json",
+                   "profils_locaux.json", "publication_rules.json"}
+# Répertoires versionnés qui n'ont pas à entrer dans l'archive. `public/static/kit`
+# contient l'archive précédente : l'y remettre la ferait grossir à chaque
+# publication et distribuerait une version périmée du dépôt à l'intérieur de la
+# version courante.
+EXCLUS_CHEMINS = ("public/static/kit/",)
+
+# ── Les seuls binaires admis ─────────────────────────────────────────────────
+# Décision explicite du 06/10/2026 (Julien) : les icônes du site public. Un
+# navigateur qui ne lit pas une icône SVG, et l'écran d'accueil d'un téléphone,
+# demandent du PNG. La liste est CLOSE et nomme chaque fichier : une extension
+# admise en bloc rouvrirait la porte que ce contrôle tient fermée. Y ajouter
+# une image est un geste, relu comme tel.
+IMAGES_ADMISES = {
+    "public/static/favicon-32.png",
+    "public/static/favicon-demonstration-32.png",
+    "public/static/apple-touch-icon.png",
+    "public/static/apple-touch-icon-demonstration.png",
+}
+IMAGE_POIDS_MAX = 64 * 1024
+# Les morceaux d'un PNG qui ne portent que de l'image. Tout autre est refusé :
+# tEXt, iTXt, zTXt, eXIf, iCCP… transportent du texte libre — un auteur, un
+# logiciel, un chemin de fichier — que personne ne relirait.
+MORCEAUX_PNG_ADMIS = {b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"gAMA",
+                      b"sRGB", b"pHYs", b"cHRM", b"bKGD", b"sBIT"}
+
+
+def refus_image(octets: bytes) -> str | None:
+    """Pourquoi cette image ne peut pas entrer dans l'archive — ou None.
+
+    Une image admise n'échappe pas au contrôle : elle en passe un autre. On ne
+    peut pas y chercher un patronyme, donc on exige qu'elle ne puisse pas en
+    porter : un PNG, léger, fait des seuls morceaux d'image, et rien après.
+    """
+    if len(octets) > IMAGE_POIDS_MAX:
+        return f"{len(octets)} octets, plus que les {IMAGE_POIDS_MAX} admis"
+    if not octets.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "ce n'est pas un PNG"
+    i = 8
+    while i < len(octets):
+        if i + 12 > len(octets):
+            return "PNG tronqué"
+        taille = int.from_bytes(octets[i:i + 4], "big")
+        genre = octets[i + 4:i + 8]
+        if genre not in MORCEAUX_PNG_ADMIS:
+            return f"morceau {genre.decode('latin-1')!r} — peut porter du texte libre"
+        i += 12 + taille
+        if genre == b"IEND":
+            break
+    else:
+        return "PNG sans fin (IEND absent)"
+    if i != len(octets):
+        return "des octets suivent la fin de l'image"
+    return None
+
+
+def fichiers(source: Path) -> list[Path]:
+    """Ce que le dépôt VERSIONNE, moins les fichiers d'instance.
+
+    La liste vient de `git ls-files` et non d'un parcours du disque. C'est la
+    seule source qui ne se désynchronise pas de `.gitignore` : une énumération
+    manuelle de suffixes a laissé passer, le 14/08/2026, trois sauvegardes de
+    base nommées `<insee>.db.avant-<date>` — 175 Mo de données nominatives —
+    parce que le test portait sur `.db` en fin de nom. Ce qui n'est pas
+    versionné n'est pas distribué : la règle est unique et vérifiable.
+    """
+    try:
+        sortie = subprocess.run(
+            ["git", "-C", str(source), "ls-files", "-z"],
+            capture_output=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise SystemExit(
+            f"✖ {source} n'est pas un dépôt git exploitable : {e}\n"
+            "  Le kit se construit à partir des fichiers versionnés. Sans git,\n"
+            "  il faudrait réénumérer à la main ce qu'il ne faut pas distribuer\n"
+            "  — c'est précisément ce qui a laissé fuir des bases."
+        )
+
+    out = []
+    for rel in sortie.decode().split("\0"):
+        if not rel:
+            continue
+        if rel.startswith(EXCLUS_CHEMINS) or Path(rel).name in EXCLUS_FICHIERS:
+            continue
+        p = source / rel
+        if p.is_file():      # un fichier supprimé mais encore indexé
+            out.append(p)
+    return sorted(out)
+
+
+def verifier(source: Path, liste: list[Path]) -> list[str]:
+    """Refuse de fabriquer une archive qui contient ce qu'elle ne doit pas."""
+    problemes = []
+    noms_interdits = patronymes()
+    if noms_interdits:
+        print(f"  ({len(noms_interdits)} patronymes lus dans la base de "
+              "l'instance et refusés dans l'archive)")
+    for f in liste:
+        rel = f.relative_to(source)
+        try:
+            octets = f.read_bytes()
+            if rel.as_posix() in IMAGES_ADMISES:
+                raison = refus_image(octets)
+                if raison:
+                    problemes.append(f"{rel} — image refusée : {raison}")
+                continue
+            # L'octet nul est le marqueur de binaire, et il est décodable en
+            # UTF-8 : s'en remettre au seul échec de décodage laissait passer
+            # tout format qui n'a pas de séquence invalide. Aucun fichier source
+            # n'en contient.
+            if b"\x00" in octets:
+                raise ValueError("octet nul — fichier binaire")
+            texte = octets.decode("utf-8")
+        except (UnicodeDecodeError, ValueError, OSError) as e:
+            # Un fichier qu'on ne sait pas lire est un fichier qu'on ne sait pas
+            # contrôler. Passer son chemin revenait à distribuer sans regarder :
+            # une base SQLite est illisible en UTF-8, et c'est exactement ce que
+            # ce contrôle est censé arrêter. Les seuls binaires que le dépôt
+            # versionne sont nommés dans IMAGES_ADMISES ; tout autre demande
+            # une décision explicite plutôt qu'un silence.
+            problemes.append(f"{rel} — contenu non contrôlable ({type(e).__name__})")
+            continue
+
+        for motif, quoi in INTERDITS:
+            # Les motifs de DÉTECTION (le code qui bloque les chemins locaux)
+            # contiennent légitimement ces chaînes. On ne les compte que hors
+            # commentaire et hors expression régulière déclarée.
+            for ligne in texte.splitlines():
+                nu = ligne.strip()
+                if nu.startswith("#") or nu.startswith("//") or nu.startswith("*"):
+                    continue
+                if re.search(r'r["\']', nu):
+                    continue
+                if re.search(motif, nu, re.I):
+                    problemes.append(f"{rel} — {quoi} : {nu[:80]}")
+
+        for nom in noms_interdits:
+            for m in re.finditer(rf"\b{re.escape(nom)}\b", texte):
+                # Un identifiant de programme (PAGES, EVEN…) s'écrit en
+                # capitales comme un patronyme. Ce qui les distingue, c'est
+                # le voisinage : un nom de personne est précédé d'un prénom ou
+                # d'une civilité, un identifiant est collé à du code.
+                avant = texte[max(0, m.start() - 30):m.start()]
+                apres = texte[m.end():m.end() + 2]
+                if re.search(r"[=.(\[]\s*$", avant) or apres.startswith(("(", "=", "[", ".")):
+                    continue
+                if not re.search(r"(?:M\.|Mme|Madame|Monsieur|[A-ZÉÈ][a-zà-ÿ]+)\s+$", avant):
+                    continue
+                problemes.append(f"{rel} — nom de personne : {nom}")
+                break
+    return problemes
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--source", default=str(ROOT),
+                    help="dépôt à empaqueter (défaut : ce dépôt)")
+    args = ap.parse_args()
+
+    source = Path(args.source).expanduser().resolve()
+    if not source.is_dir():
+        print(f"✖ dépôt réduit introuvable : {source}", file=sys.stderr)
+        return 1
+
+    if source == ROOT:
+        import subprocess as _sp
+        controle = _sp.run([sys.executable, str(ROOT / "scripts" / "verifier_generique.py")],
+                           capture_output=True, text=True)
+        if controle.returncode != 0:
+            print("✖ archive REFUSÉE — le moteur nomme une commune :\n",
+                  file=sys.stderr)
+            print(controle.stdout, file=sys.stderr)
+            return 1
+        print("0/3 — contrôle de généricité : aucune particularité locale")
+
+    liste = fichiers(source)
+    print(f"1/3 — {len(liste)} fichiers retenus depuis {source}")
+
+    problemes = verifier(source, liste)
+    if problemes:
+        print(f"\n✖ archive REFUSÉE — {len(problemes)} problème(s) :\n", file=sys.stderr)
+        for p in problemes[:20]:
+            print("   " + p, file=sys.stderr)
+        return 1
+    print("2/3 — contrôle du contenu : aucun nom de personne, aucun secret, "
+          "aucun chemin personnel")
+
+    DEST.mkdir(parents=True, exist_ok=True)
+    archive = DEST / "vigie-civique.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for f in liste:
+            tar.add(f, arcname=str(Path("vigie-civique") / f.relative_to(source)))
+
+    octets = archive.read_bytes()
+    empreinte = hashlib.sha256(octets).hexdigest()
+
+    # Version = date de publication. Le dépôt réduit n'a pas d'historique
+    # partagé : un numéro de version suggérerait une continuité qui n'existe pas.
+    (DEST / "kit.json").write_text(json.dumps({
+        "fichier": archive.name,
+        "date": date.today().isoformat(),
+        "taille_octets": len(octets),
+        "sha256": empreinte,
+        "fichiers": len(liste),
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    print(f"3/3 — {archive.relative_to(ROOT)} "
+          f"({len(octets) / 1024:.0f} Ko, sha256 {empreinte[:16]}…)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

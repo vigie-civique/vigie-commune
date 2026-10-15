@@ -1,0 +1,157 @@
+<script>
+  import { COMMUNE_DE, EPCI, EPCI_COURT, SITE_NOM } from '#lib/instance.js'
+  import Icon from '#lib/components/Icon.svelte'
+
+  // Hub « Qui décide ? » — la gouvernance et les liens documentés entre acteurs.
+  // « Réseaux de pouvoir » promettait plus que les données ne montrent (mandats,
+  // subventions, commissions) : même motif que l'abandon de « Graphe
+  // d'influence » ci-dessous (audit du 24/09/2026).
+  // Modèle LittleSis / SF Government Graph : le pouvoir se lit en relations.
+  // Chaque carte annonce depuis le 11/08/2026 le volume qu'elle couvre.
+  export let data
+
+  const nombre = (n) => (n == null ? '-' : n.toLocaleString('fr-FR'))
+  const jour = (d) => (d ? new Date(d).toLocaleDateString('fr-FR') : '')
+  $: hatvp = data.hatvp || []
+  $: justice = data.justice || []
+
+  $: cartes = [
+    { icone: 'elections', titre: 'Les élections', href: '/elections',
+      sub: "Participation, voix et sièges : d'où vient le mandat de ceux qui décident.",
+      valeur: nombre(data.communes), unite: 'communes · municipales 2026' },
+    { icone: 'conseil', titre: 'Les conseils municipaux', href: '/elus',
+      sub: `Maires, adjoints, conseillers et commissions ${COMMUNE_DE} et des communes de l'intercommunalité.`,
+      valeur: nombre(data.elus), unite: 'élus en fonction' },
+    { icone: 'intercommunalite', titre: `L'intercommunalité (${EPCI_COURT})`, href: '/com-com',
+      sub: `Délégués ${COMMUNE_DE}, compétences, délibérations communautaires.`,
+      valeur: nombre(data.deliberationsInterco), unite: 'actes votés par la CC' },
+    { icone: 'conseil', titre: 'Les conseils en clair', href: '/conseils',
+      sub: 'Chaque séance relue en trois feuilles : ce qui était annoncé, ce qui a été décidé, ce que les documents ont de faux.',
+      // Zéro dit quelque chose ici : aucune séance n'est encore relue.
+      valeur: nombre(data.seancesRelues), unite: data.seancesRelues > 1 ? 'séances relues' : 'séance relue' },
+    { icone: 'document', titre: 'Délibérations & décisions', href: '/deliberations',
+      sub: 'La chronologie des votes du conseil municipal.',
+      valeur: nombre(data.deliberations), unite: 'actes du conseil municipal' },
+    // « Graphe d'influence » faisait franchir au lecteur une étape que les
+    // données ne permettent pas : une relation documentée n'établit pas une
+    // influence. Le titre dit maintenant ce que la page montre réellement.
+    { icone: 'graphe', titre: 'Les liens entre acteurs', href: '/graphe',
+      sub: 'Qui est lié à qui, relations vérifiées uniquement.',
+      valeur: nombre(data.relations), unite: 'liens vérifiés' },
+    { icone: 'recherche', titre: 'Élus et structures subventionnées', href: '/elus-et-structures',
+      sub: "Quand un élu dirige une structure qui reçoit de l'argent public : les déports constatés.",
+      // « cas » + compteur se lit comme un score. « Situations documentées »
+      // dit la même chose sans compter des points.
+      valeur: nombre(data.conflits), unite: 'situations documentées' },
+  ]
+</script>
+
+<svelte:head>
+  <title>Qui décide ? - {SITE_NOM}</title>
+  <meta name="description" content="La gouvernance {COMMUNE_DE} : élus, intercommunalité, délibérations et liens documentés entre acteurs." />
+</svelte:head>
+
+<section class="hub">
+  <header class="intro">
+    <Icon name="decide" size={28} />
+    <div>
+      <h1>Qui décide&nbsp;?</h1>
+      <p>La gouvernance locale et les liens documentés entre acteurs. Qui détient les mandats,
+         qui vote quoi, et quels liens les actes publics établissent entre eux.</p>
+    </div>
+  </header>
+
+  <div class="grid">
+    {#each cartes as c}
+      <a class="card" href={c.href}>
+        <span class="titre"><Icon name={c.icone} size={17} />{c.titre}</span>
+        <p>{c.sub}</p>
+        <span class="fig">
+          {#if c.valeur}<b>{c.valeur}</b>{/if}{c.unite}
+        </span>
+      </a>
+    {/each}
+  </div>
+
+  <h2>Transparence et contentieux</h2>
+  <div class="bloc">
+    <h3>Déclarations d'intérêts</h3>
+    {#if hatvp.length}
+      <p class="dit">La Haute Autorité pour la transparence de la vie publique
+        recense ici {hatvp.length} responsable(s) soumis à l'obligation de
+        déclaration.</p>
+      <ul>
+        {#each hatvp as d}
+          <li>
+            <b>{d.prenom} {d.nom}</b> : {d.qualite}.
+            Déclaration {d.type_document === 'dsp' ? 'de situation patrimoniale' : "d'intérêts"} :
+            <i>{d.statut}</i>{#if d.date_publication}{' '} (publiée le {jour(d.date_publication)}){/if}.
+            {#if d.url}<a href={d.url} rel="noopener">dossier à la HATVP ↗</a>{/if}
+          </li>
+        {/each}
+      </ul>
+    {:else}
+      <p class="dit">Aucun responsable public n'est ici soumis à l'obligation de
+        déclarer ses intérêts à la Haute Autorité : le seuil est de
+        20 000 habitants pour les communes comme pour les intercommunalités.
+        <b>Une liste vide ne signale donc aucun manquement</b> : elle dit que la
+        loi n'exige rien à cette échelle.</p>
+    {/if}
+
+    <h3>Décisions de justice administrative</h3>
+    {#if justice.length}
+      <ul>
+        {#each justice as d}
+          <li>
+            {jour(d.date_dec)} : {d.juridiction}, n° {d.numero}
+            {#if d.type_recours}<span class="muted">({d.type_recours})</span>{/if}
+            {#if d.url}· <a href={d.url} rel="noopener">texte intégral ↗</a>{/if}
+          </li>
+        {/each}
+      </ul>
+    {:else}
+      <p class="dit">Aucune décision citant la commune n'a été relevée dans les
+        publications récentes du fonds JADE (juridictions administratives).</p>
+    {/if}
+  </div>
+</section>
+
+<style>
+  h2 { margin: 2.4rem 0 .4rem; font-size: 1.25rem; }
+  h3 { margin: 1.2rem 0 .3rem; font-size: 1rem; }
+  .bloc { background: var(--blanc); border: 1px solid var(--trait);
+          border-radius: var(--rayon); padding: 1rem 1.2rem; }
+  .bloc ul { margin: .3rem 0 .6rem; padding-left: 1.1rem; font-size: .9rem; line-height: 1.7; }
+  .dit { font-size: .9rem; color: var(--gris); max-width: 74ch; margin: .2rem 0 .5rem; }
+  .dit b { color: var(--encre); }
+  .muted { color: var(--gris); }
+
+  .hub { max-width: 1080px; margin: 0 auto; padding: 2.2rem 1.4rem 3.5rem; }
+  .intro { display: flex; gap: .8rem; align-items: flex-start; margin-bottom: 1.4rem; }
+  .intro :global(.icon) { color: var(--ardoise); margin-top: .35rem; }
+  .intro h1 { font-size: 1.9rem; margin: 0 0 .3rem; }
+  .intro p { color: var(--gris); max-width: 62ch; margin: 0; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: .9rem; }
+  .card {
+    display: flex; flex-direction: column; gap: .35rem;
+    background: var(--blanc); border: 1px solid var(--trait); border-radius: var(--rayon);
+    padding: 1rem 1.1rem; color: inherit; transition: border-color .15s, box-shadow .15s;
+  }
+  .card:hover { border-color: var(--ardoise); box-shadow: var(--ombre); text-decoration: none; }
+  .titre {
+    display: flex; align-items: center; gap: .5rem;
+    font-family: var(--display); font-size: 1.05rem; font-weight: 600; color: var(--encre);
+  }
+  .titre :global(.icon) { color: var(--ardoise); }
+  .card p { font-size: .87rem; color: var(--gris); margin: 0; }
+  .fig {
+    margin-top: auto; padding-top: .6rem; border-top: 1px solid var(--trait-pale);
+    font-family: var(--data); font-size: .74rem; color: var(--gris);
+    font-variant-numeric: tabular-nums;
+  }
+  .fig b {
+    font-family: var(--display); font-size: 1.2rem; color: var(--encre);
+    margin-right: .35rem; font-weight: 600;
+  }
+</style>

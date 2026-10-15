@@ -1,0 +1,513 @@
+<script>
+  import { lienSur } from '#lib/liens.js'
+  // Revue & annotation des données importées (délibs / flux / marchés).
+  // Le manque central pointé par CARTE_PRODUIT §4 : ces données étaient
+  // collectées mais ni éditables ni validables côté atelier.
+  import { api } from '#lib/api.js'
+  import { heureLocale } from '#lib/heure.js'
+  import { currentUser } from '#lib/stores/auth.js'
+  import { auMoins } from '#lib/roles.js'
+  import { VERDICTS, VERDICT } from '#lib/axes.js'
+
+  const TABS = [
+    { key: 'deliberation', label: 'Délibérations' },
+    { key: 'flow',         label: 'Flux financiers' },
+    { key: 'marche',       label: 'Marchés publics' },
+  ]
+  // Le verdict, lu par la publication : « Écarté » retire la ligne du site.
+  // L'ancien « À revoir » désignait en fait l'absence de décision — il est
+  // devenu « Jamais relu » ; « À revoir » veut dire désormais qu'on y reviendra.
+  const STATUSES = [{ key: '', label: 'Tous' },
+                    ...VERDICTS.map(v => ({ key: v.cle, label: v.libelle }))]
+  const CONFIDENCES = ['', 'verified', 'confirmed', 'probable', 'hypothesis']
+
+  // Filtrer par origine n'est pas du confort : c'est ce qui rend l'arbitrage
+  // faisable. Sur 9 264 actes, 4 934 seulement sont rectifiables — les autres
+  // viennent d'une administration et ne se réécrivent pas. Et « non classé »
+  // est la liste qu'il faut regarder pour déclarer les sources manquantes,
+  // sans quoi ces lignes restent invisibles ET non corrigeables.
+  const ORIGINES = [
+    { key: '',               label: 'Toutes origines' },
+    { key: 'verbatim',       label: 'Lu dans un document' },
+    { key: 'institutionnel', label: 'Source institutionnelle' },
+    { key: 'atelier',        label: 'Saisi à la main' },
+    { key: 'non-classe',     label: 'Non classé' },
+  ]
+
+  let tab = 'deliberation'
+  let statusFilter = ''
+  let origineFilter = ''
+  let items = []
+  let loading = false
+  let error = ''
+  let avis = ''              // une correction PROPOSÉE (compte contributeur)
+  let selected = null        // item en cours d'annotation
+  let draft = { review_status: 'jamais_relu', confidence: '', note: '' }
+  let saving = false
+  let conflit = null         // 409 : quelqu'un a annoté la ligne entre-temps
+  // Valider, rejeter, poser la fiabilité : trancher. Le contributeur note et corrige.
+  $: tranche = auMoins($currentUser, 'validator')
+
+  // ─── Corrections ───────────────────────────────────────────────────────────
+  // Annoter « rejeté » fait disparaître la donnée ; le plus souvent il faut la
+  // rectifier — un montant OCR aberrant, une date, un statut de cession. La
+  // correction n'écrase pas la ligne source : elle est appliquée à la
+  // publication, et le site affiche « rectifié ».
+  const LIBELLES_CHAMPS = {
+    date: 'Date', title: 'Titre', source_url: 'URL source', montant: 'Montant',
+    year: 'Année', amount: 'Montant', description: 'Libellé',
+    statut: 'Statut', type_norm: 'Type normalisé',
+    date_notif: 'Date de notification', objet: 'Objet',
+    titulaire_nom: 'Titulaire', acheteur_nom: 'Acheteur',
+  }
+  let champsParType = {}     // {type: {champ: genre}}
+  let statutsFlux = []
+  let corrections = {}       // brouillon des corrections de la ligne courante
+
+  $: champsDuType = Object.entries(champsParType[tab] || {})
+  // Valeur d'origine du champ, telle que la donnée source la porte.
+  const valeurSource = (it, champ) => it?.[champ] ?? ''
+
+  // ─── Origine ───────────────────────────────────────────────────────────────
+  // Une donnée structurée par une administration (OFGL, BOAMP, BODACC, DECP…)
+  // ne se réécrit pas à la main : le montant est celui qu'elle publie. Ce qui
+  // vient d'une lecture — PDF, page web, OCR — le peut, parce que le chiffre y
+  // est notre interprétation d'une phrase. L'API refuse de toute façon ; ce qui
+  // suit évite d'offrir un champ dont on saura ensuite qu'il sera rejeté.
+  const LIBELLE_ORIGINE = {
+    institutionnel: 'source institutionnelle',
+    verbatim: 'lu dans un document',
+    atelier: 'saisi à la main',
+  }
+  $: rectifiable = selected
+      && ['verbatim', 'atelier'].includes(selected.origine)
+
+  async function load() {
+    loading = true; error = ''; selected = null
+    try {
+      items = await api.donnees(tab, statusFilter, 300, origineFilter)
+    } catch (e) {
+      error = e.message || 'Erreur de chargement'
+      items = []
+    } finally {
+      loading = false
+    }
+  }
+
+  function pick(it) {
+    conflit = null
+    selected = it
+    draft = {
+      review_status: it.annotation?.review_status || 'jamais_relu',
+      confidence:    it.annotation?.confidence || '',
+      note:          it.annotation?.note || '',
+    }
+    corrections = { ...(it.annotation?.corrections || {}) }
+  }
+
+  async function save() {
+    if (!selected) return
+    saving = true; error = ''
+    try {
+      // Un champ vidé est envoyé quand même : côté API, une valeur vide
+      // ANNULE la correction et rend la donnée d'origine. Ne pas l'envoyer
+      // laisserait la correction précédente en place.
+      const aEnvoyer = {}
+      for (const [champ] of champsDuType) {
+        const v = corrections[champ]
+        if (v !== undefined) aEnvoyer[champ] = v === '' ? null : v
+      }
+      // `lu_le` : la revue telle qu'affichée. Si quelqu'un a annoté la ligne
+      // depuis, l'API refuse au lieu d'écraser sa note.
+      const res = await api.annotate(tab, selected.id, {
+        ...draft, corrections: aEnvoyer,
+        lu_le: selected.annotation?.reviewed_at ?? null,
+      })
+      conflit = null
+      // Compte contributeur : la correction n'est pas posée, elle est PROPOSÉE.
+      // Les champs reviennent à ce qui est en place — le dire, sans quoi la
+      // valeur saisie disparaît de l'écran sans explication.
+      avis = res.propose
+        ? "Correction proposée : un validateur doit l'accepter avant qu'elle soit appliquée."
+        : ''
+      corrections = { ...(res.corrections || {}) }
+      selected.annotation = {
+        ...selected.annotation,
+        review_status: res.review_status,
+        confidence: draft.confidence || null,
+        note: draft.note,
+        corrections: res.corrections || {},
+        reviewed_by: res.reviewed_by,
+        reviewed_at: res.reviewed_at,
+      }
+      items = items   // trigger reactivity
+      if (statusFilter && res.review_status !== statusFilter) {
+        items = items.filter(i => i.id !== selected.id)
+        selected = null
+      }
+    } catch (e) {
+      if (e.status === 409 && e.detail && typeof e.detail === 'object') {
+        conflit = e.detail
+      } else {
+        error = (typeof e.detail === 'object' ? e.detail?.message : e.detail)
+          || e.message || "Échec de l'enregistrement"
+      }
+    } finally {
+      saving = false
+    }
+  }
+
+  // Prendre la revue de l'autre comme nouvelle base, sans toucher à ce que
+  // l'éditeur a saisi : il relit, puis enregistre — ou non.
+  function reprendreVersion() {
+    const a = conflit?.actuel
+    selected.annotation = a
+      ? { ...selected.annotation, ...a, reviewed_by: conflit.par }
+      : { ...selected.annotation, reviewed_at: null }
+    items = items
+    conflit = null
+  }
+
+  function abandonnerSaisie() {
+    reprendreVersion()
+    pick(selected)
+  }
+
+  $: counts = items.reduce((acc, it) => {
+    const s = it.annotation?.review_status || 'jamais_relu'
+    acc[s] = (acc[s] || 0) + 1
+    return acc
+  }, {})
+
+  function fmtMontant(v) {
+    if (v == null) return '—'
+    return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(v)
+  }
+
+  $: tab, statusFilter, origineFilter, load()
+
+  // Le front ne devine pas ce qui est corrigeable : il demande le contrat.
+  api.champsCorrigeables()
+    .then(r => { champsParType = r.champs || {}; statutsFlux = r.statuts_flux || [] })
+    .catch(() => {})
+</script>
+
+<div class="donnees">
+  <header class="top">
+    <h1>Données importées</h1>
+    <p class="sub">Revoir, annoter et valider les délibérations, flux financiers et marchés
+       avant publication. L'annotation n'écrase jamais la donnée source.</p>
+  </header>
+
+  <div class="tabs">
+    {#each TABS as t}
+      <button class:active={tab === t.key} on:click={() => (tab = t.key)}>{t.label}</button>
+    {/each}
+  </div>
+
+  <div class="toolbar">
+    <div class="filters">
+      {#each STATUSES as s}
+        <button class="chip" class:on={statusFilter === s.key} on:click={() => (statusFilter = s.key)}>{s.label}</button>
+      {/each}
+      <select class="chip-select" bind:value={origineFilter}>
+        {#each ORIGINES as o}<option value={o.key}>{o.label}</option>{/each}
+      </select>
+    </div>
+    <div class="legend">
+      {#each VERDICTS as v}
+        <span class="pill {v.cle}" title={v.effet}>{counts[v.cle] || 0} {v.libelle.toLowerCase()}</span>
+      {/each}
+    </div>
+  </div>
+
+  {#if error}<div class="err">{error}</div>{/if}
+  {#if avis}<div class="avis">{avis} <a href="/atelier/propositions">Voir mes propositions</a></div>{/if}
+
+  <div class="layout">
+    <div class="table-wrap">
+      {#if loading}
+        <p class="muted">Chargement…</p>
+      {:else if items.length === 0}
+        <p class="muted">Aucune donnée pour ce filtre.</p>
+      {:else}
+        <table>
+          <thead>
+            {#if tab === 'deliberation'}
+              <tr><th>Date</th><th>Type</th><th>Titre</th><th>Statut</th></tr>
+            {:else if tab === 'flow'}
+              <tr><th>Année</th><th>Type</th><th>Montant</th><th>Bénéficiaire</th><th>Statut</th></tr>
+            {:else}
+              <tr><th>Date</th><th>Acheteur</th><th>Titulaire</th><th>Montant</th><th>Statut</th></tr>
+            {/if}
+          </thead>
+          <tbody>
+            {#each items as it (it.id)}
+              <tr class:sel={selected?.id === it.id} on:click={() => pick(it)}>
+                {#if tab === 'deliberation'}
+                  <td class="nowrap">{it.date || '—'}</td>
+                  <td>{it.type}</td>
+                  <td class="title">{it.title || it.excerpt || '—'}</td>
+                {:else if tab === 'flow'}
+                  <td>{it.year || '—'}</td>
+                  <td>{it.type || '—'}</td>
+                  <td class="nowrap">{fmtMontant(it.amount)}</td>
+                  <td class="title">{it.to_name || it.description || '—'}</td>
+                {:else}
+                  <td class="nowrap">{it.date_notif || '—'}</td>
+                  <td>{it.acheteur_nom || '—'}</td>
+                  <td>{it.titulaire_nom || '—'}</td>
+                  <td class="nowrap">{fmtMontant(it.montant)}</td>
+                {/if}
+                <td>
+                  <span class="dot {it.annotation?.review_status || 'jamais_relu'}"
+                        title={VERDICT[it.annotation?.review_status || 'jamais_relu']?.libelle}></span>
+                  {#if Object.keys(it.annotation?.corrections || {}).length}<span class="crayon" title="Donnée rectifiée">✎</span>{/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    </div>
+
+    <aside class="panel" class:empty={!selected}>
+      {#if !selected}
+        <p class="muted">Sélectionne une ligne pour l'annoter.</p>
+      {:else}
+        <h2>Annotation</h2>
+        <div class="src">
+          {#if tab === 'deliberation'}{' '}
+            <strong>{selected.title || '(sans titre)'}</strong>
+            <p class="excerpt">{selected.excerpt || ''}</p>
+          {:else if tab === 'flow'}{' '}
+            <strong>{fmtMontant(selected.amount)} · {selected.type || ''}</strong>
+            <p class="excerpt">{selected.from_name || '?'} → {selected.to_name || '?'} ({selected.year || '—'})</p>
+            <p class="excerpt">{selected.description || ''}</p>
+          {:else}{' '}
+            <strong>{selected.objet || '(objet inconnu)'}</strong>
+            <p class="excerpt">{selected.acheteur_nom} → {selected.titulaire_nom || '?'} · {fmtMontant(selected.montant)}</p>
+          {/if}
+          <p class="origine {selected.origine || 'inconnue'}">
+            {LIBELLE_ORIGINE[selected.origine] || 'origine non classée'}
+            {#if selected.saisi_par}· {selected.saisi_par}{/if}
+          </p>
+          {#if selected.source_url}{' '}
+            <a class="src-link" href={lienSur(selected.source_url)} target="_blank" rel="noopener">↗ source</a>
+          {' '}{/if}
+          {#if selected.document_id}{' '}
+            <a class="src-link" href={api.documentUrl(selected.document_id)}
+               on:click|preventDefault={() => api.ouvrirDocument(selected.document_id)}>↗ document archivé</a>
+          {' '}{/if}
+        </div>
+
+        <label class="field">
+          <span>Verdict{#if !tranche}{' '} <em class="hint">— Vous proposez ; un validateur tranche.</em>{/if}</span>
+          <div class="seg">
+            {#each VERDICTS as v}
+              <button class:on={draft.review_status === v.cle} title={v.effet}
+                      on:click={() => (draft.review_status = v.cle)}
+                      disabled={!tranche && draft.review_status !== v.cle}>
+                {v.libelle}
+              </button>
+            {/each}
+          </div>
+          <em class="hint">{VERDICT[draft.review_status]?.effet}</em>
+        </label>
+
+        <label class="field">
+          <span>Fiabilité</span>
+          <select bind:value={draft.confidence} disabled={!tranche}>
+            {#each CONFIDENCES as c}
+              <option value={c}>{c || '— (non renseigné)'}</option>
+            {/each}
+          </select>
+        </label>
+
+        {#if champsDuType.length && !rectifiable}
+          <div class="field corrections verrou">
+            <span>Corriger la donnée</span>
+            <p class="hint">
+              {#if selected.origine === 'institutionnel'}{' '}
+                Cette ligne vient d'un collecteur institutionnel : sa valeur est
+                celle que publie l'administration source, et l'atelier ne la
+                réécrit pas. Vous pouvez en revanche <strong>l'écarter de la
+                publication</strong> ci-dessus, ou la commenter.
+              {' '}{:else}{' '}
+                L'origine de cette ligne n'est pas classée : par précaution, sa
+                valeur n'est pas modifiable. Lancer
+                <code>scripts/classer_origine.py</code>, qui indiquera la source
+                à déclarer.
+              {' '}{/if}
+            </p>
+          </div>
+        {:else if champsDuType.length}
+          <div class="field corrections">
+            <span>Corriger la donnée</span>
+            <p class="hint">
+              La ligne source n'est pas modifiée. La correction s'applique à la
+              publication, et le site affiche « rectifié ». Vider un champ annule
+              sa correction.
+            </p>
+            {#each champsDuType as [champ, genre]}
+              <label class="corr">
+                <span class="corr-lab">
+                  {LIBELLES_CHAMPS[champ] || champ}
+                  {#if corrections[champ] != null && corrections[champ] !== ''}{' '}
+                    <em class="marque">rectifié</em>
+                  {' '}{/if}
+                </span>
+                {#if genre === 'statut'}{' '}
+                  <select bind:value={corrections[champ]}>
+                    <option value="">— source : {valeurSource(selected, champ) || '—'}</option>
+                    {#each statutsFlux as s}<option value={s}>{s}</option>{/each}
+                  </select>
+                {' '}{:else if genre === 'texte'}
+                  <textarea rows="2" bind:value={corrections[champ]}
+                            placeholder={String(valeurSource(selected, champ) || '—')}></textarea>
+                {:else if genre === 'montant' || genre === 'annee'}
+                  <!-- `type` ne peut pas être dynamique avec bind:value (Svelte) :
+                       les deux variantes sont écrites en clair. -->
+                  <input type="number" step={genre === 'montant' ? '0.01' : '1'}
+                         bind:value={corrections[champ]}
+                         placeholder={String(valeurSource(selected, champ) ?? '—')} />
+                {' '}{:else}{' '}
+                  <input type="text" bind:value={corrections[champ]}
+                         placeholder={String(valeurSource(selected, champ) ?? '—')} />
+                {' '}{/if}
+              </label>
+            {/each}
+          </div>
+        {/if}
+
+        <label class="field">
+          <span>Note</span>
+          <textarea rows="4" bind:value={draft.note}
+                    placeholder="Pourquoi cette correction ? La note s'affiche au survol du repère « rectifié » sur le site public."></textarea>
+        </label>
+
+        {#if conflit}
+          <div class="conflit" role="alert">
+            <strong>⚠ {conflit.message}</strong>
+            <p>
+              {#if conflit.par}Par <b>{conflit.par}</b>{/if}{#if conflit.le}, le {heureLocale(conflit.le)}{/if}.
+              {#if conflit.actuel}Sa revue : <b>{STATUSES.find(x => x.key === conflit.actuel.review_status)?.label ?? conflit.actuel.review_status}</b>{#if conflit.actuel.note}, avec la note « {conflit.actuel.note} »{/if}.{/if}
+              Ce que vous avez saisi est toujours là.
+            </p>
+            <button class="save" on:click={reprendreVersion}>Partir de sa version en gardant ma saisie</button>
+            <button class="secondaire" on:click={abandonnerSaisie}>Abandonner ma saisie</button>
+          </div>
+        {/if}
+
+        <button class="save" on:click={save} disabled={saving || !!conflit}>
+          {saving ? 'Enregistrement…' : 'Enregistrer'}
+        </button>
+        {#if selected.annotation?.reviewed_by}
+          <p class="meta">Dernière revue : {selected.annotation.reviewed_by}{selected.annotation.reviewed_at ? ' · ' + heureLocale(selected.annotation.reviewed_at) : ''}</p>
+        {/if}
+      {/if}
+    </aside>
+  </div>
+</div>
+
+<style>
+  .donnees { padding: 1.25rem 1.5rem; height: 100%; overflow-y: auto; color: var(--texte); }
+  .top h1 { font-size: 1.4rem; margin: 0; }
+  .sub { color: var(--texte-doux); font-size: .85rem; max-width: 70ch; margin: .35rem 0 1rem; }
+
+  .tabs { display: flex; gap: .25rem; margin-bottom: .75rem; }
+  .tabs button {
+    padding: .4rem .9rem; border-radius: 6px; background: var(--surface); color: var(--texte-doux); font-size: .85rem;
+  }
+  .tabs button.active { background: var(--accent); color: var(--sur-accent); }
+
+  .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; margin-bottom: .75rem; }
+  .filters { display: flex; gap: .35rem; }
+  .chip { padding: .25rem .7rem; border-radius: 999px; background: var(--surface); color: var(--texte-doux); font-size: .78rem; }
+  .chip.on { background: var(--surface-2); color: var(--texte); }
+  .chip-select { width: auto; padding: .25rem .5rem; border-radius: 999px;
+                 background: var(--surface); color: var(--texte-doux); font-size: .78rem;
+                 border: none; }
+
+  .crayon { color: var(--succes); font-size: .8rem; margin-left: .25rem; }
+
+  .origine { margin: .4rem 0 0; font-size: .7rem; text-transform: uppercase;
+             letter-spacing: .04em; }
+  .origine.institutionnel { color: var(--lien); }
+  .origine.verbatim       { color: var(--info); }
+  .origine.atelier        { color: var(--succes); }
+  .origine.inconnue       { color: var(--alerte); }
+  .corrections.verrou .hint { color: var(--texte-doux); }
+  .corrections.verrou code { background: var(--fond); padding: 0 .25rem; border-radius: 3px; }
+  .corrections { border-top: 1px solid var(--bordure-douce); padding-top: .75rem; margin-top: .25rem; }
+  .corrections .hint { color: var(--texte-doux); font-size: .74rem; line-height: 1.45;
+                       margin: .2rem 0 .6rem; font-weight: 400; }
+  .corr { display: block; margin-bottom: .5rem; }
+  .corr-lab { display: block; font-size: .74rem; color: var(--texte-doux); margin-bottom: .15rem; }
+  .corr .marque { color: var(--succes); font-style: normal; font-size: .68rem;
+                  text-transform: uppercase; letter-spacing: .03em; margin-left: .3rem; }
+  .corr input, .corr select, .corr textarea {
+    width: 100%; background: var(--fond); color: var(--texte); border: 1px solid var(--bordure);
+    border-radius: 6px; padding: .35rem .5rem; font-size: .82rem; font-family: inherit;
+  }
+  .corr input::placeholder, .corr textarea::placeholder { color: var(--texte-doux); }
+  .legend { display: flex; gap: .4rem; }
+  .pill { font-size: .72rem; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
+  .pill.jamais_relu { background: var(--surface-2); color: var(--texte); }
+  .pill.a_revoir    { background: var(--alerte-doux); color: var(--alerte-texte); }
+  .pill.retenu      { background: var(--succes-bordure); color: var(--succes-texte); }
+  .pill.ecarte      { background: var(--danger-bordure); color: var(--danger-texte); }
+
+  .err { background: var(--danger-bordure); color: var(--danger-texte); padding: .5rem .75rem; border-radius: 6px; margin-bottom: .75rem; font-size: .85rem; }
+
+  .layout { display: grid; grid-template-columns: 1fr 340px; gap: 1rem; align-items: start; }
+  .table-wrap { background: var(--fond); border: 1px solid var(--bordure-douce); border-radius: 8px; overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  thead th { text-align: left; padding: .5rem .7rem; color: var(--texte-doux); font-weight: 600; border-bottom: 1px solid var(--bordure-douce); position: sticky; top: 0; background: var(--fond); }
+  tbody td { padding: .45rem .7rem; border-bottom: 1px solid var(--bordure-douce); }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--surface); }
+  tbody tr.sel { background: var(--info-doux); }
+  .nowrap { white-space: nowrap; }
+  .title { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .muted { color: var(--texte-doux); font-size: .85rem; padding: 1rem; }
+
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
+  .dot.jamais_relu { background: var(--texte-pale); }
+  .dot.a_revoir    { background: var(--alerte); }
+  .dot.retenu      { background: var(--succes); }
+  .dot.ecarte      { background: var(--danger); }
+
+  .panel { background: var(--surface); border: 1px solid var(--bordure); border-radius: 8px; padding: 1rem; position: sticky; top: 0; }
+  .panel.empty { display: flex; align-items: center; justify-content: center; min-height: 120px; }
+  .panel h2 { font-size: 1rem; margin: 0 0 .6rem; }
+  .src { background: var(--fond); border-radius: 6px; padding: .6rem .7rem; margin-bottom: .8rem; }
+  .src strong { font-size: .85rem; }
+  .excerpt { color: var(--texte-doux); font-size: .78rem; margin: .3rem 0 0; line-height: 1.4; }
+  .src-link { display: inline-block; margin-top: .4rem; font-size: .78rem; }
+
+  .field { display: block; margin-bottom: .8rem; }
+  .field > span { display: block; font-size: .75rem; color: var(--texte-doux); margin-bottom: .3rem; }
+  .seg { display: flex; gap: .25rem; }
+  .seg button { flex: 1; padding: .35rem; border-radius: 5px; background: var(--fond); color: var(--texte-doux); font-size: .78rem; }
+  .seg button.on { background: var(--accent); color: var(--sur-accent); }
+  select, textarea { width: 100%; background: var(--fond); border: 1px solid var(--bordure); border-radius: 5px; color: var(--texte); padding: .4rem; font: inherit; font-size: .82rem; }
+  .save { width: 100%; padding: .55rem; border-radius: 6px; background: var(--bouton); color: var(--sur-accent); font-weight: 600; }
+  .save:disabled { opacity: .6; }
+  .meta { color: var(--texte-doux); font-size: .72rem; margin: .5rem 0 0; }
+  .conflit {
+    margin: .5rem 0; padding: .6rem .7rem;
+    background: var(--alerte-doux); border: 1px solid var(--alerte-bordure); border-radius: 6px;
+    color: var(--alerte-texte); font-size: .8rem; line-height: 1.45;
+  }
+  .conflit p { margin: .3rem 0 .5rem; }
+  .conflit .save { margin-bottom: .35rem; }
+  .conflit .secondaire {
+    width: 100%; padding: .4rem; border: 1px solid var(--alerte-bordure); border-radius: 6px;
+    color: var(--alerte-texte); font-size: .8rem; cursor: pointer;
+  }
+
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  .avis { background: var(--alerte-doux); border: 1px solid var(--alerte-bordure); border-radius: 6px; color: var(--alerte-texte); padding: .5rem .75rem; }
+  .avis a { color: var(--alerte-texte); text-decoration: underline; }
+</style>
