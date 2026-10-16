@@ -174,7 +174,7 @@
 <div class="controls">
   <div class="filters">
     {#each FILTERS as f}
-      <button class:on={filter === f.key} on:click={() => setFilter(f.key)}>{f.label}</button>
+      <button class:on={filter === f.key} aria-pressed={filter === f.key} on:click={() => setFilter(f.key)}>{f.label}</button>
     {/each}
   </div>
   <div class="legend">

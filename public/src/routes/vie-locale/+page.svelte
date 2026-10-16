@@ -75,7 +75,7 @@
         <li>
           <span class="date">{dateLabel(e)}</span>
           <span class="title">{e.title}</span>
-          {#if e.source_url}<a href={e.source_url} target="_blank" rel="noopener">source ↗</a>{/if}
+          {#if e.source_url}<a href={e.source_url} target="_blank" rel="noopener">source<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}
         </li>
       {/each}
     </ul>
@@ -88,7 +88,7 @@
         <li>
           <span class="date">{dateLabel(e)}</span>
           <span class="title">{e.title}</span>
-          {#if e.source_url}<a href={e.source_url} target="_blank" rel="noopener">source ↗</a>{/if}
+          {#if e.source_url}<a href={e.source_url} target="_blank" rel="noopener">source<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}
         </li>
       {/each}
     </ul>

@@ -9,10 +9,15 @@ ce site (page « Mentions légales »). Toute rectification est appliquée puis
 rectification, jamais remplacée en silence. Une demande d'effacement fondée,
 elle, retire la donnée.
 
-Les personnes physiques ne figurent sur un site public qu'au titre d'une
-fonction publique, d'un mandat électif ou d'une responsabilité inscrite dans un
-registre public. Si ce n'est pas votre cas, c'est un défaut du filtre, et il
-sera traité comme tel — pas comme une demande de retrait ordinaire.
+Une personne physique figure sur un site public à deux titres seulement :
+une fonction publique, un mandat électif ou une responsabilité inscrite dans un
+registre public ; ou son nom dans un acte officiel voté et publié par la
+collectivité (le titre d'une délibération, par exemple), cité tel que la
+collectivité l'a publié. Dans les deux cas, son domicile, sa date de naissance
+et ses coordonnées personnelles sont masqués. Si vous figurez sur un site hors
+de ces deux cas, ou si l'une de ces données y apparaît, c'est un défaut du
+filtre, et il sera traité comme tel — pas comme une demande de retrait
+ordinaire.
 
 ## Une faille dans le code
 

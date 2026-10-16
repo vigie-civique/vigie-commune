@@ -299,11 +299,12 @@
     </p>
     <div class="chart-wrap">
       <table>
+        <caption class="visually-hidden">Logement, la part des résidences secondaires</caption>
         <thead>
           <tr>
-            <th>Année</th><th class="r">Logements</th>
-            <th class="r">Principales</th><th class="r">Secondaires</th>
-            <th class="r">Vacants</th><th>Répartition</th>
+            <th scope="col">Année</th><th scope="col" class="r">Logements</th>
+            <th scope="col" class="r">Principales</th><th scope="col" class="r">Secondaires</th>
+            <th scope="col" class="r">Vacants</th><th scope="col">Répartition</th>
           </tr>
         </thead>
         <tbody>
@@ -466,9 +467,10 @@
       </Niveau>
       <div class="chart-wrap">
         <table>
-          <thead><tr><th>Année</th><th class="r">Crèches</th><th class="r">Assistantes maternelles</th>
-            <th class="r">Garde à domicile</th><th class="r">École avant 3 ans</th>
-            <th class="r">Total</th><th class="r">Pour 100 enfants</th></tr></thead>
+          <caption class="visually-hidden">Accueil des moins de trois ans</caption>
+          <thead><tr><th scope="col">Année</th><th scope="col" class="r">Crèches</th><th scope="col" class="r">Assistantes maternelles</th>
+            <th scope="col" class="r">Garde à domicile</th><th scope="col" class="r">École avant 3 ans</th>
+            <th scope="col" class="r">Total</th><th scope="col" class="r">Pour 100 enfants</th></tr></thead>
           <tbody>
             {#each accueil.serie as s}
               <tr><td>{s.annee}</td><td class="r">{nb(s.creche)}</td><td class="r">{nb(s.assistantes)}</td>
@@ -499,7 +501,8 @@
       permanente des équipements de l'INSEE{#if equipements.total}{' '} : {equipements.total} au total{/if}.</p>
     <div class="chart-wrap">
       <table>
-        <thead><tr><th>Équipement ou service</th><th class="r">Nombre</th></tr></thead>
+        <caption class="visually-hidden">Ce qu’il y a sur place</caption>
+        <thead><tr><th scope="col">Équipement ou service</th><th scope="col" class="r">Nombre</th></tr></thead>
         <tbody>
           {#each equipements.etat as e}
             <tr><td>{e.libelle || e.code}</td><td class="r">{e.nombre}</td></tr>
@@ -517,7 +520,8 @@
       </Niveau>
       <div class="chart-wrap">
         <table>
-          <thead><tr><th>Équipement</th><th class="r">{mouvements.debut}</th><th class="r">{mouvements.fin}</th><th class="r">Écart</th></tr></thead>
+          <caption class="visually-hidden">Ce qui a fermé, ce qui a ouvert</caption>
+          <thead><tr><th scope="col">Équipement</th><th scope="col" class="r">{mouvements.debut}</th><th scope="col" class="r">{mouvements.fin}</th><th scope="col" class="r">Écart</th></tr></thead>
           <tbody>
             {#each [...(mouvements.pertes || []), ...(mouvements.gains || [])] as m}
               <tr>
@@ -622,8 +626,9 @@
           pas pour {COMMUNE} seule. Période&nbsp;: {qualite.periode}.</p>
         <div class="chart-wrap">
           <table>
-            <thead><tr><th>Indicateur</th><th>Périmètre</th><th class="r">Ce réseau</th>
-              <th class="r">Médiane des réseaux</th><th class="r">Rang</th></tr></thead>
+            <caption class="visually-hidden">Le réseau fibre et ses pannes</caption>
+            <thead><tr><th scope="col">Indicateur</th><th scope="col">Périmètre</th><th scope="col" class="r">Ce réseau</th>
+              <th scope="col" class="r">Médiane des réseaux</th><th scope="col" class="r">Rang</th></tr></thead>
             <tbody>
               {#each QUALITE as [cle, libelle, perimetre]}
                 {@const q = qualite[cle]}
@@ -665,8 +670,9 @@
       {#if mobile.dans_la_commune.length}
         <div class="chart-wrap">
           <table>
-            <thead><tr><th>Site</th><th>Opérateur</th><th class="r">Distance</th>
-              <th>2G</th><th>3G</th><th>4G</th><th>5G</th></tr></thead>
+            <caption class="visually-hidden">Le mobile, sites alentour</caption>
+            <thead><tr><th scope="col">Site</th><th scope="col">Opérateur</th><th scope="col" class="r">Distance</th>
+              <th scope="col">2G</th><th scope="col">3G</th><th scope="col">4G</th><th scope="col">5G</th></tr></thead>
             <tbody>
               {#each mobile.dans_la_commune as s}
                 {#each s.operateurs as o, i}

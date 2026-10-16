@@ -13,7 +13,7 @@ publication**, et à quel rythme.
 
     demonstration  le moteur rejoué pour éprouver son portage ; personne
                    sur place ne tient le site
-    constitution   tenu sur place, l'atelier qui le relit se constitue
+    constitution   tenu sur place, la vigie qui le relit se constitue
     tenue          tenu et relu sur place par un collectif identifié
 
 Un statut déclaré est une promesse ; la DATE de dernière collecte, publiée à
@@ -34,7 +34,7 @@ TYPES = ("demonstration", "constitution", "tenue")
 
 LIBELLES = {
     "demonstration": "Portage de démonstration",
-    "constitution":  "Atelier local en constitution",
+    "constitution":  "Vigie locale en constitution",
     "tenue":         "Instance tenue",
 }
 
@@ -47,7 +47,7 @@ TEXTES = {
         "de la commune."
     ),
     "constitution": (
-        "Ce site est tenu sur place et remis à jour régulièrement ; l'atelier "
+        "Ce site est tenu sur place et remis à jour régulièrement ; la vigie "
         "qui le relit se constitue, et c'est ce que ce site cherche à rendre "
         "possible. Il comporte encore des manques et des erreurs : il est fait "
         "pour qu'on les lui signale."

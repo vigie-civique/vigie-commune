@@ -1,6 +1,6 @@
 # Données publiques — Vigie Civique Testonville
 
-Généré le 2026-10-15T14:20:07 depuis la base de travail, sans la modifier.
+Généré le 2026-10-16T19:33:03 depuis la base de travail, sans la modifier.
 
 Ces fichiers sont le snapshot public : ce que le site sert, et rien d'autre. Ils sont produits par `scripts/build_public_snapshot.py` et contrôlés par `scripts/verify_snapshot.py`, qui refuse de publier tout type de relation absent de l'allowlist.
 

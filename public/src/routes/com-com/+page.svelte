@@ -129,13 +129,14 @@
     </p>
     <div class="tableau-wrap">
       <table>
+        <caption class="visually-hidden">Le poids de chaque commune</caption>
         <thead>
           <tr>
-            <th>Commune</th>
-            <th class="num">Habitants</th>
-            <th class="num">Sièges</th>
-            <th>Part des sièges</th>
-            <th class="num" title="Nombre d'habitants représentés par un siège : plus le chiffre est bas, plus la commune est surreprésentée">Hab. par siège</th>
+            <th scope="col">Commune</th>
+            <th scope="col" class="num">Habitants</th>
+            <th scope="col" class="num">Sièges</th>
+            <th scope="col">Part des sièges</th>
+            <th scope="col" class="num" title="Nombre d'habitants représentés par un siège : plus le chiffre est bas, plus la commune est surreprésentée">Hab. par siège</th>
           </tr>
         </thead>
         <tbody>
@@ -224,7 +225,7 @@
             <span class="date">{e.date || '-'}</span>
             <span class="titre">{e.title || '(sans titre)'}</span>
             {#if e.source_url}{' '}
-              <a href={e.source_url} target="_blank" rel="noopener">source ↗</a>
+              <a href={e.source_url} target="_blank" rel="noopener">source<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>
             {' '}{/if}
           </li>
         {/each}

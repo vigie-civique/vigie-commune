@@ -40,7 +40,7 @@
        rubrique ne doit pas le promettre à leur place. -->
   {#if clair}
     <div class="clair">
-      <p class="etat"><b>Mise en clair</b>, relue à l'atelier le {clair.relu_le}.</p>
+      <p class="etat"><b>Mise en clair</b>, relue par la vigie le {clair.relu_le}.</p>
       <p class="titre-clair">{clair.titre}</p>
       <p><a class="bouton" href="/data/{clair.fichier}">Lire les trois feuilles en clair</a>
         <span class="aide">ce qui était annoncé, ce qui a été décidé, ce que les documents ont de faux ou d'incomplet : imprimables en A4</span></p>
@@ -75,7 +75,7 @@
     <h2>Les pièces</h2>
     <ul class="pieces">
       {#each s.pieces as p}
-        <li><a href={p.url} target="_blank" rel="noopener">{PIECES[p.nature] || p.libelle || 'Pièce'}</a>{#if p.libelle && PIECES[p.nature]}{' '} <span class="aide"> : {p.libelle}</span>{/if}</li>
+        <li><a href={p.url} target="_blank" rel="noopener">{PIECES[p.nature] || p.libelle || 'Pièce'}<span class="visually-hidden"> (nouvelle fenêtre)</span></a>{#if p.libelle && PIECES[p.nature]}{' '} <span class="aide"> : {p.libelle}</span>{/if}</li>
       {/each}
     </ul>
   {/if}

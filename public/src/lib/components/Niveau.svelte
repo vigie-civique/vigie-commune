@@ -51,7 +51,7 @@
     <span class="etiquette">{n.etiquette}</span>
     {#if type === 'fait' && source}{' '}
       <span class="detail">{source}</span>
-      {#if href}<a class="doc" {href} target="_blank" rel="noopener">voir la source ↗</a>{/if}
+      {#if href}<a class="doc" {href} target="_blank" rel="noopener">voir la source<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}
     {:else if type === 'calcul'}{' '}
       <span class="detail">{base ? `du site, sur ${base}` : 'du site'}</span>
     {' '}{:else}{' '}
@@ -64,7 +64,7 @@
     <span class="etiquette">{n.etiquette}</span>
     {#if type === 'fait' && source}{' '}
       <span class="detail">{source}</span>
-      {#if href}<a class="doc" {href} target="_blank" rel="noopener">voir le document ↗</a>{/if}
+      {#if href}<a class="doc" {href} target="_blank" rel="noopener">voir le document<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}
     {:else if type === 'calcul'}{' '}
       <span class="detail">{base ? `du site, sur ${base}` : 'du site'}</span>
     {' '}{/if}

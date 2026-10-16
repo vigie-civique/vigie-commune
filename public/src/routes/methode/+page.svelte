@@ -15,7 +15,8 @@
 
   <h2>Sources de données</h2>
   <table>
-    <thead><tr><th>Producteur</th><th>Jeu de données</th><th>Description</th><th>Licence</th></tr></thead>
+    <caption class="visually-hidden">Sources de données</caption>
+    <thead><tr><th scope="col">Producteur</th><th scope="col">Jeu de données</th><th scope="col">Description</th><th scope="col">Licence</th></tr></thead>
     <tbody>
       <tr><td>Insee</td><td><a href="https://www.data.gouv.fr/datasets/base-sirene-des-entreprises-et-de-leurs-etablissements-siren-siret" rel="noopener">Base Sirene</a></td><td>Entreprises et établissements, associations employeuses</td><td>Licence Ouverte v2</td></tr>
       <tr><td>Ministère de l'Intérieur</td><td><a href="https://www.data.gouv.fr/datasets/repertoire-national-des-associations" rel="noopener">Répertoire national des associations (RNA)</a></td><td>Associations déclarées en préfecture</td><td>Licence Ouverte v1.0</td></tr>
@@ -65,7 +66,7 @@
     national, un site officiel.
   </p>
   <p>
-    En sens inverse, les pistes de travail de l'atelier, une entreprise
+    En sens inverse, les pistes de travail de la vigie, une entreprise
     soupçonnée d'être liée à une autre, un rapprochement plausible mais non
     établi, portent un niveau inférieur et <strong>ne sont jamais publiées</strong>.
     {#if data.ecartes.entites}{' '}
@@ -307,7 +308,7 @@
     </li>
     <li>
       <a href="/data/popolo.json">popolo.json</a> : les mandats au format
-      <a href="https://www.popoloproject.com/" target="_blank" rel="noopener">Popolo</a>,
+      <a href="https://www.popoloproject.com/" target="_blank" rel="noopener">Popolo<span class="visually-hidden"> (nouvelle fenêtre)</span></a>,
       le vocabulaire commun des projets de transparence démocratique. Un outil
       qui parle déjà Popolo lit ce fichier sans rien connaître de ce site.
     </li>
@@ -323,7 +324,7 @@
   <p>
     Les données de ce site sont publiées sous
     <a href="https://opendatacommons.org/licenses/odbl/1-0/" target="_blank" rel="noopener">Open
-    Database License 1.0</a> (ODbL). Vous pouvez les copier, les modifier et les
+    Database License 1.0<span class="visually-hidden"> (nouvelle fenêtre)</span></a> (ODbL). Vous pouvez les copier, les modifier et les
     utiliser, y compris commercialement, à trois conditions&nbsp;: <strong>citer</strong>
     la source, <strong>partager à l'identique</strong> toute base dérivée que vous
     redistribuez, et ne pas les diffuser sous verrou technique sans en fournir

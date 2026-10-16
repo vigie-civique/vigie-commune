@@ -25,7 +25,7 @@
     <h2>Par carte, via HelloAsso</h2>
     <p>Adhésion à l'association, ponctuelle ou annuelle. HelloAsso ne prélève aucune commission : la
       plateforme se finance par une contribution volontaire, que vous pouvez ramener à zéro au paiement.</p>
-    <p><a class="bouton" href={HELLOASSO} target="_blank" rel="noreferrer">Adhérer ou donner sur HelloAsso ↗</a></p>
+    <p><a class="bouton" href={HELLOASSO} target="_blank" rel="noreferrer">Adhérer ou donner sur HelloAsso<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a></p>
   </div>
 
   {#if IBAN}

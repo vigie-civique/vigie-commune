@@ -140,7 +140,7 @@
                   ✓ <strong>« {c.deport.mention} »</strong>
                   : {c.deport.titre}{#if c.deport.date}, {c.deport.date}{/if}
                   {#if c.deport.source_url}{' '}
-                    · <a href={c.deport.source_url} target="_blank" rel="noopener">compte rendu</a>
+                    · <a href={c.deport.source_url} target="_blank" rel="noopener">compte rendu<span class="visually-hidden"> (nouvelle fenêtre)</span></a>
                   {' '}{/if}
                 </p>
               {/if}

@@ -100,7 +100,7 @@ def export_en_clair(conn, out: Path, root: Path, graphe=None) -> dict:
             continue
         # La mention publique ne porte pas l'adresse du relecteur : une date suffit
         # à dire que quelqu'un a regardé et l'assume.
-        relu = f"relu à l'atelier le {(a['reviewed_at'] or '')[:10]}"
+        relu = f"relu par la vigie le {(a['reviewed_at'] or '')[:10]}"
         nom = nom_de_fichier(r)
         s = r["seance"]
         actes_lies = _liens_en_clair(r, graphe)

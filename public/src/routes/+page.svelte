@@ -123,11 +123,11 @@
             <details>
               <summary>L'ordre du jour : {s.convocation.ordre_du_jour.length} point{s.convocation.ordre_du_jour.length > 1 ? 's' : ''}</summary>
               <ol>{#each s.convocation.ordre_du_jour as point}<li>{point}</li>{/each}</ol>
-              <p class="source">Lu dans la convocation{#if s.convocation.convoque_le}{' '}du {dateLongue(s.convocation.convoque_le)}{/if}{#if s.convocation.url}{' '}(<a href={s.convocation.url} target="_blank" rel="noopener">la lire</a>){/if}.
+              <p class="source">Lu dans la convocation{#if s.convocation.convoque_le}{' '}du {dateLongue(s.convocation.convoque_le)}{/if}{#if s.convocation.url}{' '}(<a href={s.convocation.url} target="_blank" rel="noopener">la lire<span class="visually-hidden"> (nouvelle fenêtre)</span></a>){/if}.
                 Séance publique : chacun peut y assister.</p>
             </details>
           {:else if s.convocation?.url}
-            <p class="source"><a href={s.convocation.url} target="_blank" rel="noopener">La convocation</a></p>
+            <p class="source"><a href={s.convocation.url} target="_blank" rel="noopener">La convocation<span class="visually-hidden"> (nouvelle fenêtre)</span></a></p>
           {/if}
         </article>
       {/each}
@@ -221,11 +221,11 @@
               {#if item.pieces?.length}{' '}
                 <span class="pieces">
                   {#each item.pieces as p, i}{#if i}<span class="sep"> · </span>{/if}<a
-                    href={p.url} target="_blank" rel="noopener">{PIECES[p.nature] || 'pièce'}</a>{/each}
+                    href={p.url} target="_blank" rel="noopener">{PIECES[p.nature] || 'pièce'}<span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/each}
                 </span>
               {' '}{/if}
             {:else if item.url}{' '}
-              <a href={item.url} target="_blank" rel="noopener">{titre(item.titre)}</a>
+              <a href={item.url} target="_blank" rel="noopener">{titre(item.titre)}<span class="visually-hidden"> (nouvelle fenêtre)</span></a>
             {' '}{:else}{titre(item.titre)}{/if}
           </span>
           <span class="genre {GENRES[item.genre]?.classe || ''}">{GENRES[item.genre]?.label || item.genre}</span>
@@ -256,7 +256,7 @@
           <time datetime={item.date}>{jour(item.date)}</time>
           <span class="titre">
             {#if item.url}{' '}
-              <a href={item.url} target="_blank" rel="noopener">{titre(item.titre)}</a>
+              <a href={item.url} target="_blank" rel="noopener">{titre(item.titre)}<span class="visually-hidden"> (nouvelle fenêtre)</span></a>
             {' '}{:else}{titre(item.titre)}{/if}
           </span>
         </li>

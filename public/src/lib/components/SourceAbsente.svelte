@@ -37,7 +37,7 @@
       national ne les publie&nbsp;: il faut aller les chercher sur le site de la
       commune, les lire et les rattacher un par un. C'est un travail humain, et
       c'est l'objet du <a href={DOSSIER_COMPLET_URL} target="_blank"
-      rel="noopener">dossier relu à la main</a>.</span>
+      rel="noopener">dossier relu à la main<span class="visually-hidden"> (nouvelle fenêtre)</span></a>.</span>
     {' '}{/if}
   </p>
 {:else if etat === 'vide'}

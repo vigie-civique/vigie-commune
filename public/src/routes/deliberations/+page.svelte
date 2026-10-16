@@ -69,7 +69,7 @@
       <input type="search" placeholder="Rechercher un acte, toutes années confondues…" aria-label="Rechercher un acte dans les titres, toutes années confondues" bind:value={q} />
       <div class="seg">
         {#each [['all', 'Tout'], ['CM', 'Municipal'], ['CC', 'Intercommunal']] as [v, l]}
-          <button class:on={instance === v} on:click={() => instance = v}>{l}</button>
+          <button class:on={instance === v} aria-pressed={instance === v} on:click={() => instance = v}>{l}</button>
         {/each}
       </div>
     </div>

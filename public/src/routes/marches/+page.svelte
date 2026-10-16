@@ -250,7 +250,7 @@
               {#if m.procedure}<span class="chip light">{m.procedure}</span>{/if}
               <span class="macheteur">{m.acheteur_nom}</span>
               {#if m.date_notif}<span class="mdate">{m.date_notif}</span>{/if}
-              {#if m.source_url}<a class="msrc" class:cr={srcTag(m) === 'CR'} href={m.source_url} target="_blank" rel="noopener">{srcTag(m)} ↗</a>{:else}<span class="msrc">{srcTag(m)}</span>{/if}
+              {#if m.source_url}<a class="msrc" class:cr={srcTag(m) === 'CR'} href={m.source_url} target="_blank" rel="noopener">{srcTag(m)}<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{:else}<span class="msrc">{srcTag(m)}</span>{/if}
             </div>
           </li>
         {/each}
@@ -280,7 +280,8 @@
           Quand la délibération vote une enveloppe prévisionnelle, elle est indiquée : c'est une estimation, pas un prix payé,
           et elle n'entre pas dans le total des marchés attribués.</p>
         <table>
-          <thead><tr><th>Date</th><th>Objet</th><th class="r">Enveloppe</th><th>Acheteur</th><th>Source</th></tr></thead>
+          <caption class="visually-hidden">Avis de consultation et appels d’offres recensés</caption>
+          <thead><tr><th scope="col">Date</th><th scope="col">Objet</th><th scope="col" class="r">Enveloppe</th><th scope="col">Acheteur</th><th scope="col">Source</th></tr></thead>
           <tbody>
             {#each avis as m (m.id)}
               <tr>
@@ -288,7 +289,7 @@
                 <td>{m.objet || '-'}</td>
                 <td class="r">{m.montant ? eurosC(m.montant) : '-'}</td>
                 <td>{m.acheteur_nom || '-'}</td>
-                <td>{#if m.source_url}<a href={m.source_url} target="_blank" rel="noopener">{srcTag(m)} ↗</a>{:else}{srcTag(m)}{/if}</td>
+                <td>{#if m.source_url}<a href={m.source_url} target="_blank" rel="noopener">{srcTag(m)}<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{:else}{srcTag(m)}{/if}</td>
               </tr>
             {/each}
           </tbody>

@@ -92,7 +92,7 @@
             <details>
               <summary>Ce que dit la délibération</summary>
               <blockquote>{a.citation}</blockquote>
-              {#if a.source_url}<a class="src" href={a.source_url} target="_blank" rel="noopener">Compte rendu ↗</a>{/if}
+              {#if a.source_url}<a class="src" href={a.source_url} target="_blank" rel="noopener">Compte rendu<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}
             </details>
           {/if}
         </li>

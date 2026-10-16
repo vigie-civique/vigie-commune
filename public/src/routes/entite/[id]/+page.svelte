@@ -319,7 +319,7 @@
           {#if entity.osm_category}<dt>Catégorie</dt><dd>{entity.osm_category} {entity.osm_value || ''}</dd>{/if}
           {#if entity.urls && entity.urls.length}
             <dt>Liens</dt>
-            <dd>{#each entity.urls as u}<a href={u.url || u} target="_blank" rel="noopener">{u.label || u.domain || u}</a><br>{/each}</dd>
+            <dd>{#each entity.urls as u}<a href={u.url || u} target="_blank" rel="noopener">{u.label || u.domain || u}<span class="visually-hidden"> (nouvelle fenêtre)</span></a><br>{/each}</dd>
           {/if}
         </dl>
 
@@ -360,7 +360,8 @@
             seulement sollicitées. {anneesFlux.length ? `Période ${anneesFlux[0]}–${anneesFlux[anneesFlux.length - 1]}.` : ''}
           </p>
           <table>
-            <thead><tr><th>Année</th><th>Nature</th><th class="r">Montant</th></tr></thead>
+            <caption class="visually-hidden">Flux financiers</caption>
+            <thead><tr><th scope="col">Année</th><th scope="col">Nature</th><th scope="col" class="r">Montant</th></tr></thead>
             <tbody>
               {#each flows as f}
                 <tr class:demande={f.statut === 'demande'}>
@@ -392,6 +393,7 @@
           {#each dernierExercice.budgets as b}
             {#if dernierExercice.budgets.length > 1}<h3 class="budget">{b.libelle}</h3>{/if}
             <table>
+              <caption class="visually-hidden">Comptes du syndicat {dernierExercice.year}{#if dernierExercice.budgets.length > 1}&nbsp;: {b.libelle}{/if}</caption>
               <tbody>
                 {#each POSTES_SYNDICAT as [cle, libelle]}
                   {#if b.postes[cle] != null}
@@ -422,7 +424,8 @@
         {#if marches.length}
           <h2>Marchés publics</h2>
           <table>
-            <thead><tr><th>Notifié</th><th>Objet</th><th class="r">Montant</th></tr></thead>
+            <caption class="visually-hidden">Marchés publics</caption>
+            <thead><tr><th scope="col">Notifié</th><th scope="col">Objet</th><th scope="col" class="r">Montant</th></tr></thead>
             <tbody>
               {#each marches as m}
                 <tr>
@@ -481,7 +484,7 @@
                       {' '}{:else}{e.vote.pour ?? '?'} pour · {e.vote.contre ?? 0} contre{/if}
                     </span>
                   {' '}{/if}
-                  {#if e.source_url}<a href={e.source_url} target="_blank" rel="noopener">source ↗</a>{/if}
+                  {#if e.source_url}<a href={e.source_url} target="_blank" rel="noopener">source<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}
                 </span>
               </li>
             {/each}

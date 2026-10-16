@@ -21,7 +21,7 @@
 import { asset } from '$app/paths'
 
 const ATTRIBUTION =
-  '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'
+  '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap<span class="visually-hidden"> (nouvelle fenêtre)</span></a>'
 
 /** Source PMTiles qui télécharge le fichier une fois et sert les plages depuis
  *  la mémoire — l'interface attendue par la bibliothèque. */
