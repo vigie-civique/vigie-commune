@@ -233,7 +233,7 @@ def test_une_feuille_retenue_devenue_fausse_sort_du_site(base, instance, tmp_pat
 
 def test_un_releve_reecrit_apres_relecture_ne_sort_plus(base, instance, tmp_path):
     """Le défaut du 01/10/2026 : réécrit après avoir été retenu, un relevé
-    serait sorti signé « relu à l'atelier » sans que personne l'ait relu."""
+    serait sorti signé « relu par la vigie » sans que personne l'ait relu."""
     from scripts.build_public_snapshot import export_en_clair
     _verdict(base, _seance(base), "retenu", instance)
     _chemin(instance).write_text(json.dumps(_releve("Le club reçoit 1 200 € cette année."),

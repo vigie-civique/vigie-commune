@@ -230,8 +230,9 @@
       {#if anneesPrix.length > 1}
         <h3>Le prix du mètre cube, exercice par exercice</h3>
         <table>
+          <caption class="visually-hidden">Le prix du mètre cube, exercice par exercice</caption>
           <thead>
-            <tr><th>Exercice</th>{#each eauPotable as s}<th class="r">{s.nom || s.libelle}</th>{/each}</tr>
+            <tr><th scope="col">Exercice</th>{#each eauPotable as s}<th scope="col" class="r">{s.nom || s.libelle}</th>{/each}</tr>
           </thead>
           <tbody>
             {#each anneesPrix as a}
@@ -281,10 +282,11 @@
         {' '}{/if}
       </Niveau>
       <table>
+        <caption class="visually-hidden">Contrôle sanitaire de l’eau, par réseau</caption>
         <thead>
-          <tr><th>Réseau</th><th class="r">Prélèvements</th>
-            <th class="r">Hors limites<br>bactériologie</th>
-            <th class="r">Hors limites<br>chimie</th><th>Dernier hors limites</th></tr>
+          <tr><th scope="col">Réseau</th><th scope="col" class="r">Prélèvements</th>
+            <th scope="col" class="r">Hors limites<br>bactériologie</th>
+            <th scope="col" class="r">Hors limites<br>chimie</th><th scope="col">Dernier hors limites</th></tr>
         </thead>
         <tbody>
           {#each controleEau.reseaux as r}
@@ -321,8 +323,9 @@
         <details class="plus">
           <summary>{r.nom || r.code}&nbsp;: année par année</summary>
           <table>
-            <thead><tr><th>Année</th><th class="r">Prélèvements</th>
-              <th class="r">Hors limites bactériologie</th><th class="r">Hors limites chimie</th></tr></thead>
+            <caption class="visually-hidden">{r.nom || r.code}&nbsp;: contrôle sanitaire année par année</caption>
+            <thead><tr><th scope="col">Année</th><th scope="col" class="r">Prélèvements</th>
+              <th scope="col" class="r">Hors limites bactériologie</th><th scope="col" class="r">Hors limites chimie</th></tr></thead>
             <tbody>
               {#each r.par_annee as a}
                 <tr><td>{a.annee}</td><td class="r">{a.prelevements}</td>
@@ -344,7 +347,7 @@
 
     <div class="chips">
       {#each parametres as p}
-        <button class:on={parametre === p} on:click={() => parametre = p}>{p}</button>
+        <button class:on={parametre === p} aria-pressed={parametre === p} on:click={() => parametre = p}>{p}</button>
       {/each}
     </div>
 
@@ -379,7 +382,8 @@
     {#if couverture.length}
       <h3>Étendue de la surveillance</h3>
       <table>
-        <thead><tr><th>Année</th><th class="r">Analyses</th><th class="r">Paramètres recherchés</th><th class="r">Détectés</th></tr></thead>
+        <caption class="visually-hidden">Étendue de la surveillance</caption>
+        <thead><tr><th scope="col">Année</th><th scope="col" class="r">Analyses</th><th scope="col" class="r">Paramètres recherchés</th><th scope="col" class="r">Détectés</th></tr></thead>
         <tbody>
           {#each couverture as c}
             <tr>
@@ -422,7 +426,7 @@
         {#each catnatRecents as c}
           <li>
             <span class="date">{fmtDate(c.date)}</span> {c.title}
-            {#if c.source_url}<a href={c.source_url} target="_blank" rel="noopener">source ↗</a>{/if}
+            {#if c.source_url}<a href={c.source_url} target="_blank" rel="noopener">source<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}
           </li>
         {/each}
       </ul>
@@ -473,7 +477,7 @@
           L'obligation pèse sur le propriétaire de la construction, pas sur la
           commune&nbsp;; le maire est chargé de la faire respecter. Ce calcul
           dit où tombent les adresses, pas si les terrains sont débroussaillés.
-          {#if d.url}<a href={d.url} target="_blank" rel="noopener">La règle dans le département ↗</a>{/if}
+          {#if d.url}<a href={d.url} target="_blank" rel="noopener">La règle dans le département<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}
         </p>
       {/if}
 
@@ -492,7 +496,8 @@
         </Niveau>
         {#if f.liste.length}
           <table>
-            <thead><tr><th>Alerte</th><th class="r">Surface</th><th class="r">dont forêt</th><th>Cause retenue</th></tr></thead>
+            <caption class="visually-hidden">Feux recensés</caption>
+            <thead><tr><th scope="col">Alerte</th><th scope="col" class="r">Surface</th><th scope="col" class="r">dont forêt</th><th scope="col">Cause retenue</th></tr></thead>
             <tbody>
               {#each [...f.liste].reverse() as feu}
                 <tr><td>{fmtAlerte(feu.alerte)}</td><td class="r">{surface(feu.surface_ha)}</td>
@@ -512,7 +517,8 @@
     {#if icpe.length}
       <h2>Installations classées (ICPE)</h2>
       <table>
-        <thead><tr><th>Exploitant</th><th>Commune</th><th>Régime</th><th>État</th></tr></thead>
+        <caption class="visually-hidden">Installations classées (ICPE)</caption>
+        <thead><tr><th scope="col">Exploitant</th><th scope="col">Commune</th><th scope="col">Régime</th><th scope="col">État</th></tr></thead>
         <tbody>
           {#each icpe as i}
             <tr>
@@ -562,9 +568,10 @@
         {#if a.situer?.length}
           <h3>Combien par habitant ({dernier.annee})</h3>
           <table>
-            <thead><tr><th>Par habitant et par an</th><th class="r">Ici</th>
-              <th class="r">Médiane<br>France</th><th class="r">Médiane<br>département</th>
-              <th>Parmi les collectivités de France</th></tr></thead>
+            <caption class="visually-hidden">Déchets, combien par habitant ({dernier.annee})</caption>
+            <thead><tr><th scope="col">Par habitant et par an</th><th scope="col" class="r">Ici</th>
+              <th scope="col" class="r">Médiane<br>France</th><th scope="col" class="r">Médiane<br>département</th>
+              <th scope="col">Parmi les collectivités de France</th></tr></thead>
             <tbody>
               {#each a.situer as s}
                 <tr>
@@ -594,9 +601,10 @@
         {#if a.serie.length > 1}
           <h3>D'une enquête à l'autre</h3>
           <table>
-            <thead><tr><th>Année</th><th class="r">Ordures ménagères</th><th class="r">Collecte séparée</th>
-              <th class="r">dont emballages<br>et papiers</th>
-              <th class="r">dont verre</th><th class="r">Déchèterie</th><th class="r">Total</th></tr></thead>
+            <caption class="visually-hidden">Déchets, d’une enquête à l’autre</caption>
+            <thead><tr><th scope="col">Année</th><th scope="col" class="r">Ordures ménagères</th><th scope="col" class="r">Collecte séparée</th>
+              <th scope="col" class="r">dont emballages<br>et papiers</th>
+              <th scope="col" class="r">dont verre</th><th scope="col" class="r">Déchèterie</th><th scope="col" class="r">Total</th></tr></thead>
             <tbody>
               {#each a.serie as s}
                 <tr><td>{s.annee}</td><td class="r">{kg(s.omr)}</td><td class="r">{kg(s.tri)}</td>

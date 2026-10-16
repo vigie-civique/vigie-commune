@@ -227,7 +227,7 @@
           <span class="yrhead in">Reçu par la commune</span>
           <div class="yrbars">
             {#each flowsByYear as d}
-              <button class="ycol" class:sel={d.year === year} title="{d.year} : {eurosC(d.in)} reçu, cliquer pour voir le détail"
+              <button class="ycol" class:sel={d.year === year} aria-pressed={d.year === year} title="{d.year} : {eurosC(d.in)} reçu, cliquer pour voir le détail"
                       on:click={() => year = d.year}>
                 <span class="yval">{d.in ? eurosC(d.in) : ''}</span>
                 <span class="ytrack"><span class="ybar in" style="height:{Math.max(2, 100 * d.in / inYrMax)}%"></span></span>
@@ -242,7 +242,7 @@
           <span class="yrhead out">Versé par la commune</span>
           <div class="yrbars">
             {#each flowsByYear as d}
-              <button class="ycol" class:sel={d.year === year} title="{d.year} : {eurosC(d.out)} {verbeOut}, cliquer pour voir le détail"
+              <button class="ycol" class:sel={d.year === year} aria-pressed={d.year === year} title="{d.year} : {eurosC(d.out)} {verbeOut}, cliquer pour voir le détail"
                       on:click={() => year = d.year}>
                 <span class="yval">{d.out ? eurosC(d.out) : ''}</span>
                 <span class="ytrack"><span class="ybar out" style="height:{Math.max(2, 100 * d.out / outYrMax)}%"></span></span>
@@ -308,7 +308,7 @@
         {/each}
       </ul>
       {#if outByBenef.length > TOP}{' '}
-        <button class="more" on:click={() => showAllOut = !showAllOut}>
+        <button class="more" aria-expanded={showAllOut} on:click={() => showAllOut = !showAllOut}>
           {showAllOut ? '− Réduire' : `+ ${outByBenef.length - TOP} autres`}
         </button>
       {' '}{/if}
@@ -329,7 +329,7 @@
         {/each}
       </ul>
       {#if inBySource.length > TOP}{' '}
-        <button class="more" on:click={() => showAllIn = !showAllIn}>
+        <button class="more" aria-expanded={showAllIn} on:click={() => showAllIn = !showAllIn}>
           {showAllIn ? '− Réduire' : `+ ${inBySource.length - TOP} autres`}
         </button>
       {' '}{/if}
@@ -341,7 +341,8 @@
         <summary>Autres flux publics recensés sur le territoire ({others.length} · {eurosC(othTotal)})</summary>
         <p class="hint">Flux n'impliquant pas directement le budget communal : subventions Région, marchés et emprunts de l'intercommunalité, cessions entre acteurs privés.</p>
         <table>
-          <thead><tr><th>Année</th><th>Type</th><th>De → vers</th><th class="r">Montant</th></tr></thead>
+          <caption class="visually-hidden">D’où vient l’argent reçu</caption>
+          <thead><tr><th scope="col">Année</th><th scope="col">Type</th><th scope="col">De → vers</th><th scope="col" class="r">Montant</th></tr></thead>
           <tbody>
             {#each [...others].sort((a, b) => (b.amount || 0) - (a.amount || 0)) as f (f.id)}
               <tr>
@@ -359,7 +360,8 @@
     <details>
       <summary>Détail des flux de la commune ({inflows.length + outflows.length})</summary>
       <table>
-        <thead><tr><th>Année</th><th>Sens</th><th>État</th><th>Type</th><th>Financeur → bénéficiaire</th><th>Description</th><th class="r">Montant</th></tr></thead>
+        <caption class="visually-hidden">Détail des flux de la commune</caption>
+        <thead><tr><th scope="col">Année</th><th scope="col">Sens</th><th scope="col">État</th><th scope="col">Type</th><th scope="col">Financeur → bénéficiaire</th><th scope="col">Description</th><th scope="col" class="r">Montant</th></tr></thead>
         <tbody>
           {#each [...inflows, ...outflows].sort((a, b) => (b.year || 0) - (a.year || 0) || (b.amount || 0) - (a.amount || 0)) as f (f.id)}
             <tr>

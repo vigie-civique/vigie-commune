@@ -288,7 +288,7 @@
       <div class="votebanner">
         <b>Budget primitif voté {year}</b> : chiffres <b>prévisionnels</b> adoptés par le conseil municipal,
         non encore consolidés par la DGFiP / OFGL. Source unique provisoire :
-        {voteSource}{#if voteSourceUrl}{' '} · <a href={voteSourceUrl} target="_blank" rel="noopener">voir le CR ↗</a>{/if}.
+        {voteSource}{#if voteSourceUrl}{' '} · <a href={voteSourceUrl} target="_blank" rel="noopener">voir le CR<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}.
       </div>
 
       {#if voteRec && voteDep}
@@ -538,15 +538,16 @@
       <div class="secthead">
         <h3>Agrégats financiers, année par année</h3>
         <div class="seg">
-          <button class:on={!showPerHab} on:click={() => showPerHab = false}>Montant</button>
-          <button class:on={showPerHab} on:click={() => showPerHab = true}>€/hab.</button>
+          <button class:on={!showPerHab} aria-pressed={!showPerHab} on:click={() => showPerHab = false}>Montant</button>
+          <button class:on={showPerHab} aria-pressed={showPerHab} on:click={() => showPerHab = true}>€/hab.</button>
         </div>
       </div>
       <p class="hint">Les grands équilibres financiers de la commune sur {Math.min(...ofglYears)}–{Math.max(...ofglYears)} (source OFGL). Colonne <b>{year}</b> surlignée.</p>
       <div class="scrollx">
         <table class="matrix">
+          <caption class="visually-hidden">Agrégats financiers, année par année</caption>
           <thead>
-            <tr><th class="ag">Agrégat</th>{#each ofglYears as y}<th class="r" class:cur={y === year}>{y}</th>{/each}</tr>
+            <tr><th scope="col" class="ag">Agrégat</th>{#each ofglYears as y}<th scope="col" class="r" class:cur={y === year}>{y}</th>{/each}</tr>
           </thead>
           <tbody>
             {#each ofglGroupsShown as g}
@@ -580,7 +581,8 @@
           {/if}
           <div class="scrollx">
             <table class="annexe">
-              <thead><tr><th>Année</th>{#if s.aDette}<th class="r" title="Emprunts, balance DGFiP ; « - » : aucun compte de dette dans la balance">Encours de dette</th>{/if}<th class="r">Solde de fonctionnement</th>{#if s.aSubv}<th class="r">Subvention communale</th>{/if}<th>Source</th></tr></thead>
+              <caption class="visually-hidden">Comptes de {s.name}, année par année</caption>
+              <thead><tr><th scope="col">Année</th>{#if s.aDette}<th scope="col" class="r" title="Emprunts, balance DGFiP ; « - » : aucun compte de dette dans la balance">Encours de dette</th>{/if}<th scope="col" class="r">Solde de fonctionnement</th>{#if s.aSubv}<th scope="col" class="r">Subvention communale</th>{/if}<th scope="col">Source</th></tr></thead>
               <tbody>
                 {#each s.years as y}
                   <tr>
@@ -602,7 +604,8 @@
           <details class="raw">
             <summary>Détail ligne à ligne</summary>
             <table>
-              <thead><tr><th>Année</th><th>Section</th><th>Sens</th><th>Libellé</th><th class="r">Montant</th></tr></thead>
+              <caption class="visually-hidden">Comptes de {s.name}, détail ligne à ligne</caption>
+              <thead><tr><th scope="col">Année</th><th scope="col">Section</th><th scope="col">Sens</th><th scope="col">Libellé</th><th scope="col" class="r">Montant</th></tr></thead>
               <tbody>
                 {#each s.years as y}{#each y.rows as r}
                   <tr><td>{r.year}</td><td>{r.section || ''}</td><td>{r.sens || ''}</td><td>{r.libelle || ''}</td><td class="r">{euros(r.montant)}</td></tr>

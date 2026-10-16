@@ -278,7 +278,7 @@
     <ul class="bars">
       {#each byNature as [nat, n]}
         <li>
-          <button class="blabel" class:active={natureFilter === nat} on:click={() => natureFilter = natureFilter === nat ? 'all' : nat}>{nat}</button>
+          <button class="blabel" class:active={natureFilter === nat} aria-pressed={natureFilter === nat} on:click={() => natureFilter = natureFilter === nat ? 'all' : nat}>{nat}</button>
           <span class="btrack"><span class="bfill" style="width:{100 * n / natMax}%"></span></span>
           <span class="bval">{n}</span>
         </li>
@@ -290,9 +290,10 @@
     <summary>Transactions {natureFilter !== 'all' ? `, ${natureFilter}` : ''} ({dvfFiltered.length})</summary>
     <p class="muted">Le détail vente par vente sert à vérifier un cas précis, pas
       à lire le marché : les constats ci-dessus s'en chargent. Données brutes et
-      complètes&nbsp;: <a href="https://explore.data.gouv.fr/immobilier" target="_blank" rel="noopener">DVF sur data.gouv.fr</a>.</p>
+      complètes&nbsp;: <a href="https://explore.data.gouv.fr/immobilier" target="_blank" rel="noopener">DVF sur data.gouv.fr<span class="visually-hidden"> (nouvelle fenêtre)</span></a>.</p>
     <table>
-      <thead><tr><th>Date</th><th>Parcelle</th><th>Nature</th><th class="r">Surface</th><th class="r">Prix</th><th class="r">€/m²</th></tr></thead>
+      <caption class="visually-hidden">Transactions immobilières, vente par vente</caption>
+      <thead><tr><th scope="col">Date</th><th scope="col">Parcelle</th><th scope="col">Nature</th><th scope="col" class="r">Surface</th><th scope="col" class="r">Prix</th><th scope="col" class="r">€/m²</th></tr></thead>
       <tbody>
         {#each dvfTable as t (t.id)}
           <tr>

@@ -51,9 +51,9 @@
   {#if communes.length}
     <div class="filtres">
       {#each communes as c}
-        <button class:actif={commune === c} on:click={() => commune = c}>{c}</button>
+        <button class:actif={commune === c} aria-pressed={commune === c} on:click={() => commune = c}>{c}</button>
       {/each}
-      <button class:actif={commune === '*'} on:click={() => commune = '*'}>Toutes les communes</button>
+      <button class:actif={commune === '*'} aria-pressed={commune === '*'} on:click={() => commune = '*'}>Toutes les communes</button>
     </div>
   {/if}
 

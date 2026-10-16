@@ -70,6 +70,7 @@ export function mettreEnForme(html) {
   // aux lecteurs d'écran).
   html = html.replace(/<table>/g, '<div class="tableau" role="region" tabindex="0" aria-label="Tableau, défilable"><table>')
              .replace(/<\/table>/g, '</table></div>')
+             .replace(/<th(?=[ >])/g, '<th scope="col"')
   html = html.replace(/<h3>([\s\S]*?)<\/h3>/g, (_, t) => `<h3 id="${unique(ancre(t))}">${t}</h3>`)
   const morceaux = html.split(/(?=<h2>)/)
   const sommaire = []

@@ -134,9 +134,9 @@
           associative." />
 
   <div class="filtres">
-    <button class:actif={!filtre} on:click={() => filtre = ''}>Tout</button>
+    <button class:actif={!filtre} aria-pressed={!filtre} on:click={() => filtre = ''}>Tout</button>
     {#each Object.entries(GENRES) as [k, g]}
-      <button class:actif={filtre === k} on:click={() => filtre = k}>
+      <button class:actif={filtre === k} aria-pressed={filtre === k} on:click={() => filtre = k}>
         {g.emoji} {g.label}
       </button>
     {/each}
@@ -155,7 +155,7 @@
               <span class="jour" class:masque={memeJour(aVenir, idx)}>{jour(i.date)}</span>
               <div class="corps">
                 <p class="titre">
-                  {#if i.url}<a href={i.url} target="_blank" rel="noopener">{i.titre}</a>
+                  {#if i.url}<a href={i.url} target="_blank" rel="noopener">{i.titre}<span class="visually-hidden"> (nouvelle fenêtre)</span></a>
                   {' '}{:else}{i.titre}{/if}
                 </p>
                 <p class="meta">
@@ -184,7 +184,7 @@
             <div class="corps">
               <p class="titre">
                 {#if i.url}{' '}
-                  <a href={i.url} target="_blank" rel="noopener">{i.titre || '(sans titre)'}</a>
+                  <a href={i.url} target="_blank" rel="noopener">{i.titre || '(sans titre)'}<span class="visually-hidden"> (nouvelle fenêtre)</span></a>
                 {' '}{:else if i.acteur_id}{' '}
                   <a href="/entite/{i.acteur_id}">{i.titre || '(sans titre)'}</a>
                 {' '}{:else}{i.titre || '(sans titre)'}{/if}

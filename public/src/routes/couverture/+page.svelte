@@ -102,7 +102,8 @@
       </p>
       <div class="tableau">
         <table class="etroit">
-          <thead><tr><th>Pièces publiées</th><th class="r">Nombre</th></tr></thead>
+          <caption class="visually-hidden">Ce que comptent les totaux du site</caption>
+          <thead><tr><th scope="col">Pièces publiées</th><th scope="col" class="r">Nombre</th></tr></thead>
           <tbody>
             {#each data.totaux.lignes as l}
               <tr>
@@ -119,8 +120,9 @@
     <h2>Période couverte, par source</h2>
     <div class="tableau">
       <table>
+        <caption class="visually-hidden">Période couverte, par source</caption>
         <thead>
-          <tr><th>Source</th><th class="r">Pièces</th><th>Période</th><th class="r">Avec la pièce</th></tr>
+          <tr><th scope="col">Source</th><th scope="col" class="r">Pièces</th><th scope="col">Période</th><th scope="col" class="r">Avec la pièce</th></tr>
         </thead>
         <tbody>
           {#each c.sources as s}

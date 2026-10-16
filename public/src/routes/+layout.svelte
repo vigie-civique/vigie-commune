@@ -121,13 +121,16 @@
 <svelte:window on:keydown={(e) => { if (e.key === 'Escape') menuOuvert = false }} />
 
 <div class="app" class:sept={nav.length > 5}>
+  <!-- RGAA 12.7 : premier élément focalisable, il saute l'en-tête et la
+       navigation ; caché tant qu'il n'a pas le focus. -->
+  <a class="evitement" href="#contenu">Aller au contenu</a>
   <header>
     <a class="brand" href="/">
       <img class="logo" src="/favicon{icone}.svg" alt="" width="24" height="24" />
       <span><strong>Vigie Civique</strong> <em>{COMMUNE}</em></span>
     </a>
 
-    <nav class="principale">
+    <nav class="principale" aria-label="Navigation principale">
       {#each nav as n}
         <a href={n.href} class:active={estActif(n)} class:fort={n.fort} title={n.titre || n.label}>
           <Icon name={n.icone} size={16} />{n.label}
@@ -135,7 +138,7 @@
       {/each}
     </nav>
 
-    <form class="recherche" on:submit={chercher} role="search">
+    <form class="recherche" on:submit={chercher} role="search" aria-label="Recherche">
       <Icon name="recherche" size={15} />
       <input type="search" bind:value={q} placeholder="Un sujet, un nom, un montant…"
              aria-label="Rechercher un sujet, un nom, un montant" autocomplete="off" />
@@ -150,7 +153,7 @@
   </header>
 
   {#if menuOuvert}
-    <div class="menu-mobile" id="menu-mobile">
+    <nav class="menu-mobile" id="menu-mobile" aria-label="Menu mobile">
       {#each nav as n}
         <a href={n.href} class:active={estActif(n)} class:fort={n.fort}>
           <Icon name={n.icone} size={18} />{n.titre || n.label}
@@ -161,15 +164,15 @@
       <a href="/environnement"><Icon name="environnement" size={18} />Environnement</a>
       {#if !data?.aDossiers}<a href="/dossiers"><Icon name="document" size={18} />Dossiers thématiques</a>{/if}
       <a href="/vie-locale"><Icon name="vie" size={18} />Vie locale</a>
-      <form class="recherche mobile" on:submit={chercher} role="search">
+      <form class="recherche mobile" on:submit={chercher} role="search" aria-label="Recherche, menu mobile">
         <Icon name="recherche" size={15} />
         <input type="search" bind:value={q} placeholder="Un sujet, un nom, un montant…"
                  aria-label="Rechercher un sujet, un nom, un montant" autocomplete="off" />
       </form>
-    </div>
+    </nav>
   {/if}
 
-  <main>
+  <main id="contenu" tabindex="-1">
     <EtatInstance derniereCollecte={data?.derniereCollecte} />
     <slot />
   </main>
@@ -230,6 +233,26 @@
   }
 
   :global(*) { box-sizing: border-box; }
+  /* Lu par les lecteurs d'écran, invisible à l'œil : titre de tableau qui
+     double un intertitre visible, « (nouvelle fenêtre) » d'un lien externe. */
+  :global(.visually-hidden) {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  .evitement {
+    position: absolute; left: .5rem; top: -3rem; z-index: 100;
+    padding: .5rem .8rem; background: var(--encre); color: var(--papier, #fff);
+    border-radius: 4px;
+  }
+  .evitement:focus { top: .5rem; }
+  :global(main:focus) { outline: none; }
+  /* RGAA 13.8 : qui a demandé moins de mouvement à son système n'en reçoit pas. */
+  @media (prefers-reduced-motion: reduce) {
+    :global(*), :global(*::before), :global(*::after) {
+      animation-duration: .01ms !important; animation-iteration-count: 1 !important;
+      transition-duration: .01ms !important; scroll-behavior: auto !important;
+    }
+  }
   :global(body) {
     margin: 0; background: var(--papier); color: var(--encre);
     font-family: var(--texte); line-height: 1.55;

@@ -102,8 +102,8 @@
 
   {#if all.length}
     <div class="scope">
-      <button class:on={scope === 'cites'} on:click={() => scope = 'cites'}>Cités dans un acte <b>{cites.length}</b></button>
-      <button class:on={scope === 'tous'} on:click={() => scope = 'tous'}>Tout le répertoire <b>{all.length}</b></button>
+      <button class:on={scope === 'cites'} aria-pressed={scope === 'cites'} on:click={() => scope = 'cites'}>Cités dans un acte <b>{cites.length}</b></button>
+      <button class:on={scope === 'tous'} aria-pressed={scope === 'tous'} on:click={() => scope = 'tous'}>Tout le répertoire <b>{all.length}</b></button>
     </div>
     <p class="scope-hint">
       {#if scope === 'cites'}{' '}
@@ -127,10 +127,10 @@
             compétences à elle, décidées par son conseil communautaire." />
 
     <div class="scope">
-      <button class:on={activite === 'vivantes'} on:click={() => activite = 'vivantes'}>En activité <b>{nVivantes}</b></button>
-      <button class:on={activite === 'dormantes'} on:click={() => activite = 'dormantes'}>dont sans trace récente <b>{nDormantes}</b></button>
-      <button class:on={activite === 'cessees'} on:click={() => activite = 'cessees'}>Cessées ou dissoutes <b>{nCessees}</b></button>
-      <button class:on={activite === 'toutes'} on:click={() => activite = 'toutes'}>Toutes <b>{dansPortee.length}</b></button>
+      <button class:on={activite === 'vivantes'} aria-pressed={activite === 'vivantes'} on:click={() => activite = 'vivantes'}>En activité <b>{nVivantes}</b></button>
+      <button class:on={activite === 'dormantes'} aria-pressed={activite === 'dormantes'} on:click={() => activite = 'dormantes'}>dont sans trace récente <b>{nDormantes}</b></button>
+      <button class:on={activite === 'cessees'} aria-pressed={activite === 'cessees'} on:click={() => activite = 'cessees'}>Cessées ou dissoutes <b>{nCessees}</b></button>
+      <button class:on={activite === 'toutes'} aria-pressed={activite === 'toutes'} on:click={() => activite = 'toutes'}>Toutes <b>{dansPortee.length}</b></button>
     </div>
     <p class="scope-hint">
       {#if activite === 'vivantes'}{' '}
@@ -151,18 +151,18 @@
     </p>
 
     <div class="chips">
-      <button class:on={typeFilter === 'all'} on:click={() => typeFilter = 'all'}>Tout <b>{dansActivite.length}</b></button>
+      <button class:on={typeFilter === 'all'} aria-pressed={typeFilter === 'all'} on:click={() => typeFilter = 'all'}>Tout <b>{dansActivite.length}</b></button>
       {#each TYPES as t}
-        <button class="{t}" class:on={typeFilter === t} on:click={() => typeFilter = t}>{TYPE_LABELS[t]} <b>{counts[t] || 0}</b></button>
+        <button class="{t}" class:on={typeFilter === t} aria-pressed={typeFilter === t} on:click={() => typeFilter = t}>{TYPE_LABELS[t]} <b>{counts[t] || 0}</b></button>
       {/each}
     </div>
   {/if}
 
   {#if natureVisible}
     <div class="chips natures">
-      <button class:on={nature === 'all'} on:click={() => nature = 'all'}>Toutes natures <b>{dansActivite.filter(e => e.type === 'business').length}</b></button>
+      <button class:on={nature === 'all'} aria-pressed={nature === 'all'} on:click={() => nature = 'all'}>Toutes natures <b>{dansActivite.filter(e => e.type === 'business').length}</b></button>
       {#each Object.entries(NATURES) as [cle, label]}
-        <button class:on={nature === cle} on:click={() => nature = cle}>{label} <b>{comptesNature[cle] || 0}</b></button>
+        <button class:on={nature === cle} aria-pressed={nature === cle} on:click={() => nature = cle}>{label} <b>{comptesNature[cle] || 0}</b></button>
       {/each}
     </div>
     <p class="scope-hint">

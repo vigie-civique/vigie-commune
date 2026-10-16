@@ -111,7 +111,7 @@
           {#if fiche.vote}<p>Vote : {vote(fiche.vote)}</p>{/if}
           {#if fiche.statut === 'imprecis'}<p class="imprecis">Renvoi imprécis : {fiche.raison}.</p>{/if}
           {#if fiche.cle_faible}<p class="imprecis">Cet acte n'a pas de numéro : ce lien peut changer.</p>{/if}
-          {#if fiche.source_url}<p><a href={fiche.source_url} target="_blank" rel="noopener">Ouvrir la pièce source ↗</a></p>{/if}
+          {#if fiche.source_url}<p><a href={fiche.source_url} target="_blank" rel="noopener">Ouvrir la pièce source<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a></p>{/if}
         </div>
       {/if}
     </div>

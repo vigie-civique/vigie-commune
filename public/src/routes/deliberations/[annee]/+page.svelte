@@ -85,7 +85,7 @@
     <input type="search" placeholder="Rechercher dans les titres de {libelleAnnee(annee)}…" aria-label="Rechercher dans les titres des actes de {libelleAnnee(annee)}" bind:value={q} />
     <div class="seg">
       {#each [['all', 'Tout'], ['CM', 'Municipal'], ['CC', 'Intercommunal']] as [v, l]}
-        <button class:on={instance === v} on:click={() => instance = v}>{l}</button>
+        <button class:on={instance === v} aria-pressed={instance === v} on:click={() => instance = v}>{l}</button>
       {/each}
     </div>
     <span class="count">{filtered.length}</span>
@@ -120,8 +120,8 @@
               {/if}
             </span>
           {' '}{/if}
-          {#if e.source_url}<a href={e.source_url} target="_blank" rel="noopener">{libelleDoc(e, e.source_url)} ↗</a>{/if}
-          {#if e.pdf_url && e.pdf_url !== e.source_url}<a href={e.pdf_url} target="_blank" rel="noopener">{libelleDoc(e, e.pdf_url)} ↗</a>{/if}
+          {#if e.source_url}<a href={e.source_url} target="_blank" rel="noopener">{libelleDoc(e, e.source_url)}<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}
+          {#if e.pdf_url && e.pdf_url !== e.source_url}<a href={e.pdf_url} target="_blank" rel="noopener">{libelleDoc(e, e.pdf_url)}<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}
         </span>
 
         <!-- Les trois axes portés par l'acte lui-même, pas renvoyés dans une
@@ -150,12 +150,12 @@
               <p class="lecture">
                 Texte extrait automatiquement du document publié par la collectivité :
                 il peut comporter des erreurs de lecture. La pièce qui fait foi est le
-                document d'origine{#if e.pdf_url || e.source_url}{' '} : <a href={e.pdf_url || e.source_url} target="_blank" rel="noopener">l'ouvrir ↗</a>{/if}.
+                document d'origine{#if e.pdf_url || e.source_url}{' '} : <a href={e.pdf_url || e.source_url} target="_blank" rel="noopener">l'ouvrir<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}.
               </p>
             {:else if extraits[e.id]?.etat === 'erreur'}
               <p class="lecture">
                 Le texte n'a pas pu être chargé.
-                {#if e.pdf_url || e.source_url}<a href={e.pdf_url || e.source_url} target="_blank" rel="noopener">Ouvrir le document ↗</a>{/if}
+                {#if e.pdf_url || e.source_url}<a href={e.pdf_url || e.source_url} target="_blank" rel="noopener">Ouvrir le document<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}
               </p>
             <!-- Rien avant l'ouverture : le HTML prérendu ne porte aucun texte
                  d'attente. `verifier_build.mjs` refuse « Chargement… » dans une

@@ -73,12 +73,13 @@
       <p class="aide">{ligne.aide}</p>
       <div class="tableau">
         <table>
+          <caption class="visually-hidden">{ligne.label}</caption>
           <thead>
             <tr>
-              <th>Commune</th>
-              {#if ligne.vote}<th class="num">Part votée<br><small>par la commune</small></th>{/if}
-              <th class="num">Taux total<br><small>tout compris</small></th>
-              {#if ligne.vote}<th class="num">Évolution<br><small>{annees[0]}→{annees[annees.length - 1]}</small></th>{/if}
+              <th scope="col">Commune</th>
+              {#if ligne.vote}<th scope="col" class="num">Part votée<br><small>par la commune</small></th>{/if}
+              <th scope="col" class="num">Taux total<br><small>tout compris</small></th>
+              {#if ligne.vote}<th scope="col" class="num">Évolution<br><small>{annees[0]}→{annees[annees.length - 1]}</small></th>{/if}
             </tr>
           </thead>
           <tbody>
