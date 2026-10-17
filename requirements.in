@@ -26,7 +26,7 @@
 # ce fichier, ou être décrit dans « Hors pip » avec sa commande d'installation.
 
 # ─── API de l'atelier ────────────────────────────────────────────────────────
-fastapi==0.142.2
+fastapi==0.143.1
 uvicorn==0.44.0
 pydantic==2.12.5
 starlette==1.7.0
