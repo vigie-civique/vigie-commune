@@ -42,7 +42,7 @@ def etape_ecrire_finances(out, budget_annuel, budget_annexe, budget_vote, ofgl_d
     write_json(out / "budget.json", {"annuel": budget_annuel, "annexe": budget_annexe})
     write_json(out / "budget_vote.json", {"budget_vote": budget_vote, "total": len(budget_vote)})
     write_json(out / "ofgl.json", {"ofgl": ofgl_data, "total": len(ofgl_data)})
-    write_json(out / "dvf.json", {"dvf": dvf_data, "total": len(dvf_data)})
+    write_json(out / "dvf.json", {**dvf_data, "total": dvf_data["synthese"]["mutations"]})
     write_json(out / "marches.json", {"marches": marches_data, "total": len(marches_data)})
     write_json(out / "approbations.json",
                {"approbations": approbations_data, "total": len(approbations_data)})

@@ -54,7 +54,7 @@ Publiées en JSON, sans inscription ni clé d'API, sous licence ODbL
 - ${SITE_URL}/data/events.json : actes et événements
 - ${SITE_URL}/data/marches.json : marchés publics
 - ${SITE_URL}/data/flows.json : flux financiers
-- ${SITE_URL}/data/dvf.json : mutations foncières
+- ${SITE_URL}/data/dvf.json : mutations foncières, en agrégats annuels (aucune vente à l'unité)
 - ${SITE_URL}/data/popolo.json : élus et mandats (format Popolo)
 - ${SITE_URL}/data/stats.json : compteurs, exclusions, qualité de localisation
 - ${SITE_URL}/data/README.md : dictionnaire des données

@@ -1,5 +1,5 @@
-// Mutations foncières DVF. La carte Leaflet reste montée côté client
-// (`onMount`) : c'est du rendu interactif, pas de la donnée.
+// Mutations foncières DVF, en agrégats seulement : le snapshot ne publie plus
+// aucune vente à l'unité (cf. scripts/snapshot/argent.py, `agreger_dvf`).
 // Lu dans le snapshot au build — cf. marches/+page.server.js pour le motif.
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -13,8 +13,13 @@ const lire = (nom, defaut = {}) => {
 }
 
 export function load() {
-  const d = lire('dvf.json', { dvf: [] })
-  const dvf = d.dvf || []
+  const d = lire('dvf.json', {})
+  const dvf = {
+    synthese: d.synthese || { mutations: 0 },
+    parAnnee: d.par_annee || [],
+    parNature: d.par_nature || [],
+    seuil: d.seuil_mediane ?? 5,
+  }
 
   // Le document d'urbanisme, tel que le Géoportail le connaît. Trois cas, et
   // il faut les distinguer à l'écran : la commune est au RNU (aucun document
@@ -34,24 +39,11 @@ export function load() {
   // 1 284 €/m² d'une année sur l'autre : c'est du bruit d'échantillon, pas un
   // mouvement de marché. Afficher la courbe sans le dire inviterait à lire une
   // tendance là où il n'y en a pas de mesurable.
-  const bati = dvf.filter((t) => t.price_per_m2 && /maison|appartement/i.test(t.nature_bien || ''))
-  const parAnnee = new Map()
-  for (const t of bati) {
-    const a = (t.date || '').slice(0, 4)
-    if (!a) continue
-    if (!parAnnee.has(a)) parAnnee.set(a, [])
-    parAnnee.get(a).push(t.price_per_m2)
-  }
-
-  const mediane = (arr) => {
-    const s = [...arr].sort((x, y) => x - y)
-    const m = Math.floor(s.length / 2)
-    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2
-  }
-
-  const annees = [...parAnnee.entries()]
-    .map(([annee, vals]) => ({ annee, n: vals.length, mediane: Math.round(mediane(vals)) }))
-    .sort((a, b) => a.annee.localeCompare(b.annee))
+  // Seules les années dont la médiane est publiée entrent dans la fourchette :
+  // sous le seuil, le snapshot la laisse vide.
+  const annees = dvf.parAnnee
+    .filter((a) => a.mediane_m2 != null)
+    .map((a) => ({ annee: String(a.annee), n: a.ventes_bati, mediane: a.mediane_m2 }))
 
   const medianes = annees.map((a) => a.mediane)
 
@@ -60,7 +52,7 @@ export function load() {
     urbanisme: { statut, documents, zonage, couverture },
     constat: annees.length > 1 ? {
       annees,
-      ventes: bati.length,
+      ventes: annees.reduce((t, a) => t + a.n, 0),
       minEchantillon: Math.min(...annees.map((a) => a.n)),
       maxEchantillon: Math.max(...annees.map((a) => a.n)),
       basse: Math.min(...medianes),

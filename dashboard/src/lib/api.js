@@ -195,9 +195,27 @@ export const api = {
   // page HTML ouverte depuis l'atelier s'exécuterait à son adresse.
   // L'onglet est ouvert AVANT la requête : après un `await`, le navigateur ne
   // reconnaît plus le clic et bloque la fenêtre.
+  //
+  // Quand l'atelier a un hôte de documents (`DOCS_URL`), le document s'ouvre
+  // là, par un lien signé : une autre origine, sans session ni cookie de
+  // l'atelier. Sinon (atelier local), en `blob:` à l'adresse de l'atelier.
+  // Dans les deux cas l'onglet perd son lien vers la fenêtre de l'atelier.
   async ouvrirDocument(id) {
     const onglet = window.open('', '_blank')
+    if (onglet) onglet.opener = null
     try {
+      const lien = await authFetch(`/atelier/documents/${id}/lien`, { method: 'POST' })
+      if (!lien.ok) throw await echec(lien)
+      const { url: signe, affichage } = await lien.json()
+      if (signe) {
+        if (affichage === 'pdf' && onglet) {
+          onglet.location = signe
+        } else {
+          onglet?.close()
+          Object.assign(document.createElement('a'), { href: signe, rel: 'noopener noreferrer' }).click()
+        }
+        return
+      }
       const r = await authFetch(`/atelier/documents/${id}/fichier`)
       if (!r.ok) throw await echec(r)
       const blob = await r.blob()

@@ -48,7 +48,8 @@ LockPersonality=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=
 UMask=0027
-ReadWritePaths=/opt/vigie/db /opt/vigie/data /opt/vigie/audits /opt/vigie/public /opt/vigie/config
+# `saisies/` et non `config/` : cf. atelier.service.
+ReadWritePaths=/opt/vigie/db /opt/vigie/data /opt/vigie/audits /opt/vigie/public /opt/vigie/saisies
 ReadWritePaths=-/opt/vigie/territoire -/opt/vigie/decisions -/opt/vigie/dossiers -/opt/vigie/public-data
 ReadWritePaths=-/srv/vigie/national-store
 # La passe publie (`collecte.sh` → `publier-site.sh` → `publication.py publier`),

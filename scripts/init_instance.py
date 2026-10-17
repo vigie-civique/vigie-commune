@@ -396,6 +396,10 @@ def main() -> int:
     INSTANCE.write_text(json.dumps(inst, ensure_ascii=False, indent=2) + "\n",
                         encoding="utf-8")
     print(f"\n✓ {INSTANCE.relative_to(ROOT)} écrit")
+    # Les saisies de l'atelier vivent hors de `config/`, que le service ne doit
+    # pas pouvoir écrire (cf. collectors/saisies.py) : leur répertoire existe dès
+    # l'amorçage, sans quoi elles retomberaient dans `config/`.
+    (ROOT / "saisies").mkdir(exist_ok=True)
 
     adapter_regles(inst, False)
 

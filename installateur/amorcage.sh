@@ -81,6 +81,23 @@ cible_uv() {
   esac
 }
 
+UV_VERSION=0.12.22
+empreinte_uv() {
+  case "$1" in
+    uv-aarch64-apple-darwin)      dire 5d714de09501a59393ceca78f4bc232a50478729640d251907160299b2a93ddd ;;
+    uv-x86_64-apple-darwin)       dire 1b8a5b316883df2daf20fb9a446e5b230e01d947d57aba2694977c5ac5a7e98c ;;
+    uv-aarch64-unknown-linux-gnu) dire 6f66a14e8239871fb477f9746c941fedfa77e8fe28a8bc7c07e1dc7f53a66712 ;;
+    uv-x86_64-unknown-linux-gnu)  dire b9980552309f09c15172b8be828555e375097f16deb459795ce7bfd200380f0b ;;
+    *) dire "" ;;
+  esac
+}
+
+# `shasum` sur macOS, `sha256sum` sur Linux.
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
 poser_python() {
   cible=$(cible_uv)
   if [ -z "$cible" ]; then
@@ -94,12 +111,21 @@ poser_python() {
   raconter "  Je vais en poser un DANS ce dossier (≈ 40 Mo, rien sur le système)."
   raconter ""
 
-  # `latest` plutôt qu'une version figée : cet outil ne sert qu'à télécharger un
-  # interpréteur, aucune reproductibilité ne repose sur lui — alors qu'un numéro
-  # figé qui disparaît un jour du dépôt bloquerait toute installation, sur toutes
-  # les machines, sans recours pour celui qui la subit.
-  telecharger "https://github.com/astral-sh/uv/releases/latest/download/$cible.tar.gz" \
+  # Version figée et empreinte vérifiée : uv est le seul binaire que la chaîne
+  # exécute sans l'avoir construit, et `latest` exécutait ce que la release du
+  # jour contenait (audit du 17/10/2026). Une archive qui ne correspond pas
+  # n'est pas ouverte. Monter de version : changer UV_VERSION et les quatre
+  # empreintes, lues dans les fichiers `.sha256` de la release.
+  telecharger "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/$cible.tar.gz" \
               "$OUTILS/uv.tar.gz"
+  attendu=$(empreinte_uv "$cible")
+  obtenu=$(sha256 "$OUTILS/uv.tar.gz")
+  if [ -z "$attendu" ] || [ "$obtenu" != "$attendu" ]; then
+    rm -f "$OUTILS/uv.tar.gz"
+    raconter "✖ L'archive de uv téléchargée n'a pas l'empreinte attendue : je ne l'ouvre pas."
+    raconter "  Installer Python $PYTHON_MIN ou plus récent, puis relancer ce fichier."
+    exit 1
+  fi
   tar -xzf "$OUTILS/uv.tar.gz" -C "$OUTILS"
   rm -f "$OUTILS/uv.tar.gz"
   UV=$(find "$OUTILS" -type f -name uv -perm -u+x 2>/dev/null | head -1)

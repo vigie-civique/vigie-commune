@@ -95,7 +95,9 @@ def etape_dictionnaire(out, stats, location_quality) -> None:
         "`resultats` |",
         "| `fiscalite.json` · `impots` | Taux d'imposition comparés, et "
         "leur rang parmi les communes | `taux`, `reperes` |",
-        "| `dvf.json` | Transactions immobilières (DVF) | `dvf` |",
+        "| `dvf.json` | Mutations immobilières (DVF), en agrégats : par année, "
+        "par nature de bien — aucune vente à l'unité | `synthese`, `par_annee`, "
+        "`par_nature` |",
         "| `urbanisme.json` | Autorisations d'urbanisme | `autorisations` |",
         "| `environnement.json` | Eau (prix, contrôle sanitaire), déchets, "
         "forêt et feux, risques, ICPE, catastrophes naturelles | racine |",

@@ -49,6 +49,7 @@ config/dossiers_locaux.json
 # Les saisies de l'atelier : du travail humain, qui peut nommer des personnes
 # physiques (un acquéreur, un locataire de la commune). Elles se partagent par
 # l'export de décisions vers un dépôt PRIVÉ, jamais par le dépôt du moteur.
+/saisies/
 config/saisies.json
 # Arbitrages d'entités : les fiches qu'un humain a décidé de garder
 # distinctes. Propre à une instance, comme seed_local.json.
@@ -56,7 +57,8 @@ config/arbitrages_entites.json
 # Journal des corrections du site : propre à une instance (ses erreurs, ses
 # dates). Le moteur n'en versionne que l'exemple.
 config/journal_corrections.json
-# Temporaires d'écriture (nom unique) et verrou du fichier de saisies.
+# Temporaires d'écriture (nom unique) et verrou du fichier de saisies, à son
+# ancien emplacement.
 config/saisies.json.*
 # Idem pour l'export lui-même, produit dans l'arborescence de l'instance.
 decisions/

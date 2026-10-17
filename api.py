@@ -21,7 +21,7 @@ except ImportError:
     pass
 
 from fastapi import (Body, Depends, FastAPI, File, Form, Header, HTTPException,
-                     Path as FPath, Query, UploadFile)
+                     Path as FPath, Query, Request, UploadFile)
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -71,6 +71,14 @@ RAG_ENABLED = os.environ.get("RAG_ENABLED", "0").strip().lower() not in ("0", "f
 # demande explicite (`VIGIE_API_DOCS=1`, en développement).
 _DOCS = os.environ.get("VIGIE_API_DOCS", "0").strip().lower() not in ("0", "false", "no", "")
 
+# L'origine à part d'où s'ouvrent les documents archivés (api_auth.py, « Les
+# documents »), sans « / » final : `https://docs.atelier.example.org`. Vide, les
+# documents s'ouvrent comme avant, en `blob:` — un atelier local n'a pas de
+# second hôte à donner.
+DOCS_URL = os.environ.get("DOCS_URL", "").strip().rstrip("/")
+from urllib.parse import urlencode, urlsplit  # noqa: E402
+HOTE_DOCS = urlsplit(DOCS_URL).hostname if DOCS_URL else None
+
 app = FastAPI(title=f"Vigie Civique — atelier {COMMUNE_NAME}",
               docs_url="/docs" if _DOCS else None,
               redoc_url="/redoc" if _DOCS else None,
@@ -88,6 +96,10 @@ from starlette.responses import JSONResponse as _JSONResponse
 @app.middleware("http")
 async def _api_auth_guard(request, call_next):
     path = request.url.path
+    # L'hôte des documents ne sert QUE `/d/` : ni l'API, ni l'interface. nginx
+    # le borne déjà ; l'application ne compte pas dessus.
+    if HOTE_DOCS and request.url.hostname == HOTE_DOCS and not path.startswith("/d/"):
+        return _JSONResponse({"detail": "introuvable"}, status_code=404)
     if (request.method == "OPTIONS"
             or not path.startswith("/api/")
             or path.startswith("/api/auth/")):
@@ -3218,7 +3230,7 @@ def _journaliser_dossier(user, dossier_id: int, action: str) -> None:
 # scripts Python jetables, et les budgets votés n'existent nulle part ailleurs
 # que dans les comptes rendus du conseil.
 #
-# La saisie n'écrit PAS directement en base. Elle va dans `config/saisies.json`,
+# La saisie n'écrit PAS directement en base. Elle va dans `saisies/saisies.json`,
 # que le collecteur `saisies` rejoue à chaque collecte : sans quoi elle serait
 # perdue au premier `init_instance`, exactement comme le travail de la v1. L'API
 # écrit le fichier puis rejoue l'import — un seul chemin d'écriture, donc pas de
@@ -3358,7 +3370,7 @@ def atelier_saisie_creer(req: SaisieCreate, user=Depends(require_auth)):
         # elle sera reprise au prochain passage. Le dire, plutôt que de laisser
         # croire à un échec total : le travail de lecture est ce qui coûte cher.
         raise HTTPException(
-            500, f"Saisie enregistrée dans config/saisies.json, mais son "
+            500, f"Saisie enregistrée dans saisies/saisies.json, mais son "
                  f"insertion en base a échoué : {e}. Elle sera reprise au "
                  f"prochain passage du collecteur.")
 
@@ -3521,13 +3533,11 @@ async def atelier_document_deposer(
         conn.close()
 
 
-@app.get("/api/atelier/documents/{doc_id}/fichier")
-def atelier_document_fichier(doc_id: int = FPath(..., ge=1), user=Depends(require_auth)):
-    """Sert le document archivé, pour relire la source sans quitter l'atelier."""
+def _document_archive(doc_id: int) -> tuple[Path, str]:
+    """Le fichier d'un document archivé et son type, ou 404."""
     conn = get_db()
     try:
-        doc = row(conn, "SELECT local_path, doc_type, title FROM raw_documents "
-                        "WHERE id=?", (doc_id,))
+        doc = row(conn, "SELECT local_path, doc_type FROM raw_documents WHERE id=?", (doc_id,))
     finally:
         conn.close()
     if not doc:
@@ -3540,17 +3550,68 @@ def atelier_document_fichier(doc_id: int = FPath(..., ge=1), user=Depends(requir
     chemin = (RACINE / doc["local_path"]).resolve()
     if not chemin.is_file() or (RACINE / "data") not in chemin.parents:
         raise HTTPException(404, "fichier absent du disque.")
+    return chemin, doc["doc_type"]
+
+
+@app.get("/api/atelier/documents/{doc_id}/fichier")
+def atelier_document_fichier(doc_id: int = FPath(..., ge=1), user=Depends(require_auth)):
+    """Sert le document archivé, pour relire la source sans quitter l'atelier.
+    Chemin de repli, quand `DOCS_URL` n'est pas réglé (atelier local)."""
+    chemin, doc_type = _document_archive(doc_id)
     # Un document vient d'un site tiers ou d'un dépôt : son contenu n'est PAS de
     # confiance. Servi en `text/html`, il s'exécutait à l'adresse de l'atelier,
     # où le navigateur garde le jeton de session de celui qui l'ouvre. Seul le
     # PDF s'affiche ; tout le reste se télécharge, sans type deviné.
-    if doc["doc_type"] == "pdf":
+    if doc_type == "pdf":
         return FileResponse(chemin, media_type="application/pdf",
                             headers={"X-Content-Type-Options": "nosniff"})
     return FileResponse(
         chemin, media_type="application/octet-stream", filename=chemin.name,
         headers={"X-Content-Type-Options": "nosniff",
                  "Content-Security-Policy": "default-src 'none'; sandbox"})
+
+
+@app.post("/api/atelier/documents/{doc_id}/lien")
+def atelier_document_lien(doc_id: int = FPath(..., ge=1), user=Depends(require_auth)):
+    """Un lien signé vers le document, sur l'hôte `DOCS_URL`, pour ce compte et
+    cinq minutes. `url` vaut `null` sans `DOCS_URL` : l'interface se replie
+    alors sur `/fichier`."""
+    from api_auth import DUREE_LIEN_DOCUMENT, signer_lien_document
+    if not DOCS_URL:
+        return {"url": None}
+    _, doc_type = _document_archive(doc_id)
+    return {"url": f"{DOCS_URL}/d/{doc_id}?{urlencode(signer_lien_document(doc_id, user))}",
+            "affichage": "pdf" if doc_type == "pdf" else "telechargement",
+            "expire_dans": DUREE_LIEN_DOCUMENT}
+
+
+# Hors de `/api/`, donc hors du verrou global — et c'est voulu : l'hôte des
+# documents ne voit passer aucune session. La signature tient lieu de verrou.
+@app.get("/d/{doc_id}", include_in_schema=False)
+def document_signe(request: Request, doc_id: int = FPath(..., ge=1),
+                   exp: int = Query(...), u: int = Query(...), sig: str = Query(..., max_length=64)):
+    from api_auth import lien_document_valide
+    if not HOTE_DOCS or request.url.hostname != HOTE_DOCS:
+        raise HTTPException(404, "introuvable")
+    if not lien_document_valide(doc_id, exp, u, sig):
+        raise HTTPException(403, "Lien invalide ou expiré : rouvrir le document depuis l'atelier.")
+    chemin, doc_type = _document_archive(doc_id)
+    entetes = {
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",          # le lien signé ne fuit pas
+        "X-Frame-Options": "DENY",
+        "Cross-Origin-Resource-Policy": "same-origin",
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cache-Control": "private, no-store",
+        "X-Robots-Tag": "noindex, nofollow",
+    }
+    # Le PDF s'affiche SANS `sandbox` : la CSP `sandbox` empêche le lecteur PDF
+    # de Chrome de s'ouvrir, et l'isolement tient ici à l'origine elle-même.
+    if doc_type == "pdf":
+        return FileResponse(chemin, media_type="application/pdf", headers=entetes)
+    return FileResponse(chemin, media_type="application/octet-stream", filename=chemin.name,
+                        headers={**entetes,
+                                 "Content-Security-Policy": "default-src 'none'; sandbox"})
 
 
 # ─── GET /api/atelier/entities/{id} — détail complet pour l'éditeur ───────────

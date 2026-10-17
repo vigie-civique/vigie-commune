@@ -10,6 +10,7 @@ le premier compte admin est créé à l'installation (installateur ou
 son rôle, et seul le porteur du lien d'invitation crée le compte.
 """
 import hashlib
+import hmac
 import os
 import secrets
 import sqlite3
@@ -18,6 +19,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -37,6 +39,18 @@ def _hash_pw(password: str) -> str:
 def _verify_pw(password: str, hashed: str) -> bool:
     pre = hashlib.sha256(password.encode()).hexdigest().encode()
     return bcrypt.checkpw(pre, hashed.encode())
+
+
+_leurre: list[str] = []
+
+
+def _hash_leurre() -> str:
+    """Un hash sans compte, pour qu'une adresse inconnue coûte un bcrypt comme
+    les autres : sans lui, la réponse rapide disait quelles adresses ont un
+    compte (audit du 17/10/2026). Calculé au premier besoin, pas à l'import."""
+    if not _leurre:
+        _leurre.append(_hash_pw(secrets.token_hex(16)))
+    return _leurre[0]
 
 BASE_DIR         = Path(__file__).parent
 from collectors.config import DB_PATH
@@ -142,8 +156,10 @@ def _make_token(sub: str, kind: str, minutes: int, version: int = 0) -> str:
     # `sv` : la génération de sessions du compte. Un changement de mot de passe
     # l'incrémente, et tout jeton d'une génération antérieure est refusé. Une
     # date (`iat`, à la seconde) laissait passer les jetons de la même seconde.
+    # `jti` : deux jetons de la même seconde seraient sinon identiques, et
+    # révoquer l'ancien à la rotation (`/refresh`) révoquerait aussi le neuf.
     return jwt.encode({"sub": sub, "kind": kind, "exp": exp, "iat": int(maintenant.timestamp()),
-                       "sv": version}, _SECRET, algorithm=_ALGO)
+                       "sv": version, "jti": secrets.token_hex(8)}, _SECRET, algorithm=_ALGO)
 
 
 def _decode(token: str) -> dict:
@@ -238,6 +254,73 @@ def require_au_moins(role: str, geste: str = "Cette action"):
     return _dep
 
 
+# ─── Les documents : un lien signé, ouvert sur une autre origine ────────────────
+# Un document archivé vient d'un site tiers ou d'un dépôt : son contenu n'est
+# pas de confiance. L'atelier l'affichait en `blob:`, c'est-à-dire À SON
+# ADRESSE, dans un onglet relié à la fenêtre de l'atelier : le lecteur PDF du
+# navigateur était le seul rempart (audit du 17/10/2026, S6). Il s'ouvre
+# maintenant sur l'hôte `DOCS_URL`, qui ne porte ni session ni cookie de
+# l'atelier, par un lien que l'API signe pour un compte et cinq minutes.
+#
+# La clé est dérivée de JWT_SECRET, jamais JWT_SECRET lui-même : une signature
+# de lien ne doit pas pouvoir servir de jeton, ni l'inverse. Le lien porte la
+# génération de sessions du compte (`sv`) : un mot de passe changé, ou un compte
+# désactivé, éteint aussi les liens déjà donnés.
+
+DUREE_LIEN_DOCUMENT = 300
+
+
+def _signature_document(doc_id: int, exp: int, uid: int, sv: int) -> str:
+    cle = hmac.new(_SECRET.encode(), b"vigie-documents", hashlib.sha256).digest()
+    return hmac.new(cle, f"{doc_id}.{exp}.{uid}.{sv}".encode(), hashlib.sha256).hexdigest()
+
+
+def signer_lien_document(doc_id: int, user: dict) -> dict:
+    """Les paramètres du lien (`exp`, `u`, `sig`) pour ce document et ce compte."""
+    conn = _db()
+    try:
+        compte = _get(conn, "SELECT sessions_version FROM users WHERE id=?", (user["id"],))
+    finally:
+        conn.close()
+    exp = int(time.time()) + DUREE_LIEN_DOCUMENT
+    sv = (compte or {}).get("sessions_version") or 0
+    return {"exp": exp, "u": user["id"], "sig": _signature_document(doc_id, exp, user["id"], sv)}
+
+
+def lien_document_valide(doc_id: int, exp: int, uid: int, sig: str) -> bool:
+    maintenant = int(time.time())
+    # Une échéance plus lointaine que la durée d'un lien ne vient pas de l'API.
+    if not (maintenant <= exp <= maintenant + DUREE_LIEN_DOCUMENT + 60):
+        return False
+    conn = _db()
+    try:
+        compte = _get(conn, "SELECT desactive_le, sessions_version FROM users WHERE id=?", (uid,))
+    finally:
+        conn.close()
+    if not compte or compte["desactive_le"]:
+        return False
+    attendue = _signature_document(doc_id, exp, uid, compte["sessions_version"] or 0)
+    return hmac.compare_digest(attendue.encode(), sig.encode())
+
+
+# ─── Le cookie ne part que de l'atelier lui-même ────────────────────────────────
+# `SameSite=Strict` arrête un AUTRE SITE, pas un sous-domaine : `docs.` et
+# l'atelier sont du même site, et une page servie sur `docs.` pouvait faire
+# partir le cookie vers `/refresh` ou `/logout` (sans lire la réponse, mais en
+# fermant la session). Une requête qui annonce une autre origine que l'hôte
+# appelé, hors des origines déclarées, est refusée.
+
+def _origine_admise(request: Request) -> None:
+    origine = request.headers.get("origin")
+    if not origine:
+        return                                   # un script, pas un navigateur
+    admises = [o.strip() for o in os.environ.get(
+        "ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:4173").split(",")]
+    if origine in admises or urlsplit(origine).netloc == request.headers.get("host", ""):
+        return
+    raise HTTPException(403, "Origine refusée.")
+
+
 # ─── Schemas ───────────────────────────────────────────────────────────────────
 
 class LoginRequest(BaseModel):
@@ -326,9 +409,11 @@ def login(req: LoginRequest, request: Request, response: Response):
     try:
         user = _get(conn, "SELECT * FROM users WHERE email=?", (email,))
 
-        if not user or not _verify_pw(req.password, user["password_hash"]):
-            # Compté même si le compte n'existe pas : la réponse ne doit pas
-            # dire, par sa différence, quelles adresses ont un compte.
+        # Un compte inexistant passe aussi par bcrypt, contre un hash leurre : la
+        # réponse ne doit dire quelles adresses ont un compte ni par son contenu,
+        # ni par son temps.
+        if not _verify_pw(req.password, user["password_hash"] if user else _hash_leurre()) \
+                or not user:
             _noter_echec(cle)
             raise HTTPException(401, "Email ou mot de passe incorrect")
 
@@ -342,10 +427,8 @@ def login(req: LoginRequest, request: Request, response: Response):
         conn.commit()
         _echecs.pop(cle, None)
 
-        sessions = _sessions(conn, user["id"])
-        _poser_cookie(response, request, sessions["refresh_token"])
         return {
-            **sessions,
+            **_sessions(conn, user["id"], request, response),
             "user": {"id": user["id"], "email": user["email"], "role": user["role"]},
         }
     finally:
@@ -353,15 +436,28 @@ def login(req: LoginRequest, request: Request, response: Response):
 
 
 @router.post("/refresh")
-def refresh_token(request: Request, req: Optional[RefreshRequest] = None):
+def refresh_token(request: Request, response: Response,
+                  req: Optional[RefreshRequest] = None):
+    """Rotation : le jeton présenté est révoqué, un neuf part dans le cookie. Un
+    jeton volé ne sert qu'une fois, et son usage coupe la session légitime — ce
+    qui se voit, au lieu de durer sept jours en silence."""
+    _origine_admise(request)
     jeton = (req.refresh_token if req else None) or request.cookies.get(COOKIE_SESSION)
     if not jeton:
         raise HTTPException(401, "Session absente : se reconnecter.")
     payload = _decode(jeton)
     user = utilisateur_du_jeton(jeton, "refresh")
+    conn = _db()
+    try:
+        conn.execute("INSERT OR IGNORE INTO revoked_tokens(jti, expires_at) VALUES(?,?)",
+                     (jeton, datetime.fromtimestamp(payload["exp"], tz=timezone.utc).isoformat()))
+        conn.commit()
+    finally:
+        conn.close()
+    sv = payload.get("sv", 0)
+    _poser_cookie(response, request, _make_token(user["email"], "refresh", _REFRESH_MINUTES, sv))
     return {
-        "access_token": _make_token(user["email"], "access", _ACCESS_MINUTES,
-                                    payload.get("sv", 0)),
+        "access_token": _make_token(user["email"], "access", _ACCESS_MINUTES, sv),
         "token_type":   "bearer",
     }
 
@@ -375,6 +471,7 @@ def logout(request: Request, response: Response, req: Optional[LogoutRequest] = 
     (sept jours, gardé dans le navigateur) en refabriquait un neuf : après
     « Déconnexion », la session survivait une semaine — constaté le 17/09/2026.
     """
+    _origine_admise(request)
     jetons = [jeton_acces] if jeton_acces else []
     for rafraichissement in ((req.refresh_token if req else None),
                              request.cookies.get(COOKIE_SESSION)):
@@ -410,13 +507,19 @@ MOT_DE_PASSE_MIN = 12
 INVITATION_JOURS = 7
 
 
-def _sessions(conn, user_id: int) -> dict:
-    """Jetons neufs, de la génération de sessions COURANTE du compte."""
+def _sessions(conn, user_id: int, request: Request, response: Response) -> dict:
+    """Jetons neufs, de la génération de sessions COURANTE du compte.
+
+    Le jeton de rafraîchissement ne part que dans le cookie `HttpOnly`. Il
+    sortait aussi dans le corps JSON, où un script injecté le lisait : le cookie
+    ne protégeait plus rien (audit du 17/10/2026). L'interface ne s'en servait pas.
+    """
     u = _get(conn, "SELECT email, COALESCE(sessions_version, 0) AS v FROM users WHERE id=?",
              (user_id,))
+    _poser_cookie(response, request,
+                  _make_token(u["email"], "refresh", _REFRESH_MINUTES, u["v"]))
     return {
         "access_token":  _make_token(u["email"], "access",  _ACCESS_MINUTES, u["v"]),
-        "refresh_token": _make_token(u["email"], "refresh", _REFRESH_MINUTES, u["v"]),
         "token_type":    "bearer",
     }
 
@@ -463,9 +566,7 @@ def changer_mot_de_passe(req: ChangementMotDePasse, request: Request, response: 
         _clore_sessions(conn, user["id"])
         _journal_compte(conn, user["id"], "mot_de_passe", user["email"])
         conn.commit()
-        sessions = _sessions(conn, user["id"])
-        _poser_cookie(response, request, sessions["refresh_token"])
-        return {"ok": True, **sessions}
+        return {"ok": True, **_sessions(conn, user["id"], request, response)}
     finally:
         conn.close()
 
@@ -592,9 +693,7 @@ def accepter_invitation(req: AcceptationInvitation, request: Request, response: 
         conn.execute("UPDATE invitations SET utilisee_le=datetime('now') WHERE id=?", (inv["id"],))
         conn.execute("UPDATE users SET last_login=datetime('now') WHERE id=?", (user["id"],))
         conn.commit()
-        sessions = _sessions(conn, user["id"])
-        _poser_cookie(response, request, sessions["refresh_token"])
-        return {**sessions, "user": user}
+        return {**_sessions(conn, user["id"], request, response), "user": user}
     finally:
         conn.close()
 

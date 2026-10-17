@@ -50,9 +50,6 @@ RACINE = Path(__file__).resolve().parent.parent
 DONNEES = RACINE / "public" / "static" / "data"
 SORTIE = RACINE / "public" / "static" / "carte" / "fond.pmtiles"
 LAYERS = DONNEES / "layers"
-# Les mutations DVF de /urbanisme : une carte de plus, alimentée par une source
-# qui n'a rien à voir avec les calques de /carte. Cf. `points_cartographies`.
-DVF = DONNEES / "dvf.json"
 
 INDEX_BUILDS = "https://build-metadata.protomaps.dev/builds.json"
 BASE_BUILDS = "https://build.protomaps.com/"
@@ -104,17 +101,10 @@ def lecteur_distant(url: str):
 def points_cartographies() -> list[tuple[float, float]]:
     """Tous les points que le site DESSINE, quelle que soit la page.
 
-    Le site porte trois cartes, pas une : les acteurs (/carte), les mutations
-    DVF (/urbanisme) et le repère d'une fiche (/entite). Les deux dernières ont
-    longtemps chargé leurs tuiles chez un tiers ; le jour où elles passent sur
-    le fond local, l'emprise doit les couvrir, sinon on remplace une fuite par
-    des carrés blancs.
-
-    L'emprise ne se déduisait que des calques de /carte. Mesuré le 30/08/2026,
-    les mutations DVF débordent réellement de leur cadre — de 0,005° au nord à
-    Saillans, autant au sud à Brassac. Elles restaient dedans par la seule
-    grâce de la marge de 35 %, c'est-à-dire par chance. Une source qui n'entre
-    pas dans le calcul n'y entre pas « le plus souvent » : elle n'y entre pas.
+    Le site porte deux cartes : les acteurs (/carte) et le repère d'une fiche
+    (/entite), qui retombe dans l'emprise des calques. La carte des mutations DVF
+    de /urbanisme est partie le 17/10/2026 avec les ventes à l'unité : DVF ne
+    sort plus qu'en agrégats, sans coordonnées.
     """
     pts: list[tuple[float, float]] = []
     for f in sorted(LAYERS.glob("*.geojson")):
@@ -123,28 +113,6 @@ def points_cartographies() -> list[tuple[float, float]]:
             c = (ft.get("geometry") or {}).get("coordinates")
             if c and len(c) == 2 and all(isinstance(v, (int, float)) for v in c):
                 pts.append((c[1], c[0]))
-    # DVF est absent d'une instance qui n'a pas collecté le foncier : sans
-    # mutation publiée, la page n'affiche pas de carte, et il n'y a rien à
-    # couvrir de plus. Ce n'est pas une anomalie.
-    if DVF.exists():
-        d = json.loads(DVF.read_text(encoding="utf-8"))
-        mutations = d.get("dvf", []) if isinstance(d, dict) else d
-        localisees = 0
-        for t in mutations:
-            lat, lon = t.get("lat"), t.get("lng")
-            if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-                pts.append((lat, lon))
-                localisees += 1
-        # Le fichier annonce son total. S'il porte des mutations et qu'aucune
-        # n'entre dans l'emprise, c'est que la clé a changé de nom ou de forme,
-        # pas que le foncier est vide — et on l'apprendrait par des carrés
-        # blancs sur /urbanisme, des mois plus tard. Une liste vide est une
-        # réponse ; une liste vide face à un total qui ne l'est pas, non.
-        if mutations and not localisees:
-            print(f"[fond] ⚠ {DVF.name} porte {len(mutations)} mutations, "
-                  "aucune avec lat/lng : /urbanisme sortira de l'emprise")
-        elif localisees:
-            print(f"[fond] dvf      : {localisees} mutations dans l'emprise")
     return pts
 
 

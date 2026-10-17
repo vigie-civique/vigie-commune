@@ -17,7 +17,7 @@ LE CHEMIN, ET CE QU'IL NE FAIT JAMAIS
                                  │ un validateur relit, acte et citation
                                  │ sous les yeux : accepte, corrige, écarte
                                  ▼
-                 accepter() ──▶ une saisie `marche` (config/saisies.json)
+                 accepter() ──▶ une saisie `marche` (saisies/saisies.json)
                                  ──import_saisies()──▶ marches_publics
 
 Extraction n'est pas publication : rien de ce qu'un rapport apporte n'atteint

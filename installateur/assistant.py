@@ -273,8 +273,13 @@ class Poignee(BaseHTTPRequestHandler):
 
     # ── contrôles d'entrée ───────────────────────────────────────────────────
     def _autorise(self) -> bool:
-        hote = (self.headers.get("Host") or "").split(":")[0]
-        if hote not in ("127.0.0.1", "localhost", "[::1]"):
+        # `urlsplit` sait lire `[::1]:8765` ; un `split(":")` y lisait « [ »
+        # et refusait toute adresse IPv6 (audit du 17/10/2026).
+        try:
+            hote = urllib.parse.urlsplit("//" + (self.headers.get("Host") or "")).hostname
+        except ValueError:
+            hote = None
+        if hote not in ("127.0.0.1", "localhost", "::1"):
             self._json({"erreur": "hôte refusé"}, 403)
             return False
         jeton = (self.headers.get("X-Jeton")

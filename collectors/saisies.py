@@ -8,7 +8,7 @@ lui, ne se régénère pas. Écrire une saisie directement en base, ce serait la
 perdre au premier `init_instance` — et c'est très exactement ce qui est arrivé à
 la v1, dont 49 % des flux financiers vivaient dans onze scripts Python jetables.
 
-Les saisies vivent donc dans `config/saisies.json`, non versionné, et ce module
+Les saisies vivent donc dans `saisies/saisies.json`, non versionné, et ce module
 les rejoue à chaque collecte. Même principe que `cm_events` / `seed_local.json`,
 avec ce que celui-ci n'a pas : une source obligatoire par ligne, un auteur, un
 identifiant stable entre machines, et le retrait plutôt que l'effacement.
@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -40,7 +41,18 @@ from . import verrou as verrou_fichier
 from .db import pivot_ids, transaction, upsert_entity, upsert_relation
 from .origine import ATELIER
 
-SAISIES = Path(__file__).resolve().parent.parent / "config" / "saisies.json"
+RACINE = Path(__file__).resolve().parent.parent
+# Hors de `config/` depuis le 17/10/2026 : l'écriture atomique (temporaire
+# renommé) rendait tout `config/` inscriptible au service de l'atelier, donc
+# aussi `publication_rules.json` — le filtre qui le contient. Les saisies ont
+# leur répertoire à elles, seul ouvert en écriture.
+SAISIES = RACINE / "saisies" / "saisies.json"
+_DEFAUT = SAISIES
+# La migration est un geste de déploiement, pas un effet du code : tant que le
+# répertoire `saisies/` n'existe pas, les saisies restent dans `config/`, lues
+# ET écrites comme avant — une unité systemd qui n'ouvre pas encore `saisies/`
+# en écriture ne casse donc rien. Migrer : deploy/README.md, « Les saisies ».
+ANCIEN = RACINE / "config" / "saisies.json"
 
 VERSION = 1
 
@@ -131,12 +143,25 @@ CHAMPS_SAISIE = {
 }
 
 
+def chemin_des_saisies() -> Path:
+    """`saisies/saisies.json` si l'instance a migré, `config/saisies.json` sinon."""
+    if SAISIES != _DEFAUT or SAISIES.parent.is_dir():
+        return SAISIES
+    return ANCIEN
+
+
 def charger(chemin: Path | None = None) -> dict:
     """Le fichier de saisies, ou une structure vide s'il n'existe pas encore.
 
     Un atelier neuf n'a rien saisi : absence n'est pas erreur.
     """
-    chemin = chemin or SAISIES
+    chemin = chemin or chemin_des_saisies()
+    if chemin != ANCIEN and chemin == _DEFAUT and ANCIEN.exists():
+        if chemin.exists():
+            print(f"⚠ {ANCIEN} est périmé : les saisies vivent dans {chemin}. "
+                  "Le retirer après vérification.", file=sys.stderr)
+        else:
+            chemin = ANCIEN      # pas encore déplacé : la première écriture le pose
     try:
         with open(chemin, encoding="utf-8") as f:
             data = json.load(f)
@@ -163,7 +188,7 @@ def enregistrer(data: dict, chemin: Path | None = None) -> None:
     tout le monde : deux écritures simultanées se le disputaient, la première à
     renommer l'emportait et la seconde échouait sur un fichier disparu.
     """
-    chemin = chemin or SAISIES
+    chemin = chemin or chemin_des_saisies()
     chemin.parent.mkdir(parents=True, exist_ok=True)
     data["version"] = VERSION
     fd, tmp = tempfile.mkstemp(dir=chemin.parent, prefix=f"{chemin.name}.",
@@ -212,7 +237,7 @@ def modifier(chemin: Path | None = None, *, ecrire: bool = True):
     Une exception levée dans le bloc n'écrit rien. `ecrire=False` garde le
     verrou pour une lecture à blanc qui doit voir un état stable.
     """
-    chemin = chemin or SAISIES
+    chemin = chemin or chemin_des_saisies()
     with _verrou(chemin):
         data = charger(chemin)
         yield data

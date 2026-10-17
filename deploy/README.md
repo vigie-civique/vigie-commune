@@ -187,6 +187,9 @@ cp deploy/env.exemple .env && chmod 600 .env
 #    → remplir JWT_SECRET, ALLOWED_ORIGINS ; ADMIN_KEY seulement si un script
 #      appelle l'API sans session humaine.
 
+#    Les saisies de l'atelier : un répertoire à elles, hors de config/.
+mkdir -p saisies
+
 # c) La base : la copier depuis la machine de collecte (scp). Ne pas la versionner.
 
 # d) Libellés et front de l'atelier
@@ -212,6 +215,35 @@ entrent **sur invitation** : page **Comptes** de l'atelier, où l'administrateur
 inscrit une adresse, choisit le rôle (contributeur, validateur, administrateur)
 et transmet le lien. Renseigner `ATELIER_URL` dans `.env` pour que ce lien porte
 l'adresse publique de l'atelier.
+
+#### Les saisies : une instance installée avant le 17/10/2026
+
+Ses saisies sont dans `config/saisies.json`, et son unité ouvre `config/` en
+écriture — donc aussi le filtre de publication. Les quatre gestes vont
+ensemble : le code n'écrit dans `saisies/` que si le répertoire existe, et
+l'unité doit l'ouvrir au même moment.
+
+```bash
+sudo systemctl stop vigie-atelier vigie-collecte.timer
+sudo -u vigie mkdir saisies
+sudo mv config/saisies.json config/saisies.json.verrou saisies/ 2>/dev/null
+#    dans l'unité installée : /opt/vigie/config → /opt/vigie/saisies (ReadWritePaths)
+sudo systemctl daemon-reload && sudo systemctl start vigie-atelier vigie-collecte.timer
+```
+
+Revenir à une révision d'avant demande le geste inverse.
+
+#### Les documents archivés : un hôte à part
+
+Un document collecté ou déposé n'est pas de confiance. Sans hôte à part,
+l'atelier l'ouvre à sa propre adresse, à côté de la session de celui qui le lit.
+Avec `DOCS_URL`, il s'ouvre sur un autre hôte, sans session, par un lien signé
+pour un compte et cinq minutes :
+
+1. DNS : `docs.<hôte de l'atelier>` vers le serveur ;
+2. certificat : `sudo certbot certonly --webroot -w /var/www/certbot -d docs.<hôte de l'atelier>` ;
+3. nginx : le bloc « Les documents archivés » de `nginx-atelier.conf` ;
+4. `.env` : `DOCS_URL=https://docs.<hôte de l'atelier>`, puis redémarrer l'atelier.
 
 Ce que le dispositif fait déjà pour vous, et qu'il ne faut pas défaire :
 

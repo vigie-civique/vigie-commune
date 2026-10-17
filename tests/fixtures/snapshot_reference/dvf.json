@@ -1,4 +1,18 @@
 {
-  "dvf": [],
+  "seuil_mediane": 5,
+  "synthese": {
+    "mutations": 0,
+    "debut": null,
+    "fin": null,
+    "maisons": 0,
+    "appartements": 0,
+    "dependances": 0,
+    "locaux": 0,
+    "non_bati": 0,
+    "mediane_prix_maison": null,
+    "mediane_m2_bati": null
+  },
+  "par_annee": [],
+  "par_nature": [],
   "total": 0
 }
