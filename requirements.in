@@ -56,7 +56,7 @@ xlrd==2.0.2           # sispea.py : l'extraction 2024 de l'OFB est un classeur
                       # d'ancienne génération, que openpyxl ne sait pas lire.
                       # Les autres millésimes sont des .xlsx — le format se
                       # reconnaît aux octets, pas au nom du fichier.
-ijson==3.5.1          # marches_publics.py : parcours INCRÉMENTAL des consolidés
+ijson==3.6.0          # marches_publics.py : parcours INCRÉMENTAL des consolidés
                       # DECP. Le fichier 2019 pèse 944 Mo ; `json.loads` en
                       # demandait 5,3 Go de mémoire vive — plus que n'en a un
                       # petit serveur. En flux, le pic tombe à 23 Mo pour la même
