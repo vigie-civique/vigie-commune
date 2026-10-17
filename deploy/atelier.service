@@ -65,11 +65,11 @@ UMask=0027
 # snapshot ; `public/` parce que la publication y construit le site. Le reste
 # est lu, et appartient à un autre compte que celui du service.
 #
-# ⚠️ `config/` y est à regret : `saisies.json` s'y écrit (par un temporaire
-# renommé, donc le répertoire entier doit être inscriptible), à côté de
-# `publication_rules.json` — le filtre de publication. Tant que les saisies
-# vivent là, le service peut réécrire les règles qui le contiennent.
-ReadWritePaths=/opt/vigie/db /opt/vigie/data /opt/vigie/audits /opt/vigie/public /opt/vigie/config
+# `config/` n'y est plus (17/10/2026) : les saisies, seule chose que le service
+# y écrivait, ont leur répertoire `saisies/`. Inscriptible, `config/` laissait
+# le service réécrire `publication_rules.json` — le filtre qui le contient.
+# Une instance installée avant : deploy/README.md, « Les saisies ».
+ReadWritePaths=/opt/vigie/db /opt/vigie/data /opt/vigie/audits /opt/vigie/public /opt/vigie/saisies
 ReadWritePaths=-/opt/vigie/public-data -/opt/vigie/decisions
 # `dashboard/static` et non `dashboard/static/public_api` : « Publier » met le
 # snapshot en service par renommage (`scripts/publication.py::basculer`), et

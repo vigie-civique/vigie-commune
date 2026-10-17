@@ -379,3 +379,42 @@ class TestEcrituresSimultanees:
         voisins = {p.name for p in atelier["fichier"].parent.iterdir()
                    if p.name.startswith("saisies.json")}
         assert voisins == {"saisies.json", "saisies.json.verrou"}
+
+
+class TestEmplacement:
+    """Les saisies sortent de `config/`, que le service ne doit pas écrire — mais
+    seulement quand l'instance a migré (audit du 17/10/2026)."""
+
+    @pytest.fixture
+    def racine(self, tmp_path, monkeypatch):
+        from collectors import saisies as mod
+        nouveau = tmp_path / "saisies" / "saisies.json"
+        ancien = tmp_path / "config" / "saisies.json"
+        ancien.parent.mkdir()
+        for nom, valeur in (("SAISIES", nouveau), ("_DEFAUT", nouveau), ("ANCIEN", ancien)):
+            monkeypatch.setattr(mod, nom, valeur)
+        return mod, nouveau, ancien
+
+    def test_sans_repertoire_saisies_rien_ne_bouge(self, racine):
+        mod, nouveau, ancien = racine
+        with mod.modifier() as data:
+            data["saisies"].append({"id": "a"})
+        assert ancien.exists() and not nouveau.parent.exists()
+
+    def test_migree_elle_ecrit_dans_saisies(self, racine):
+        mod, nouveau, ancien = racine
+        nouveau.parent.mkdir()
+        with mod.modifier() as data:
+            data["saisies"].append({"id": "a"})
+        assert nouveau.exists() and not ancien.exists()
+
+    def test_le_repertoire_cree_sans_deplacement_ne_perd_rien(self, racine):
+        """L'ancien fichier est lu tant que le nouveau n'existe pas : la première
+        écriture le pose au nouvel endroit, avec tout ce qu'il portait."""
+        mod, nouveau, ancien = racine
+        ancien.write_text('{"version": 1, "saisies": [{"id": "a"}]}', encoding="utf-8")
+        nouveau.parent.mkdir()
+        with mod.modifier() as data:
+            data["saisies"].append({"id": "b"})
+        ids = [s["id"] for s in json.loads(nouveau.read_text(encoding="utf-8"))["saisies"]]
+        assert ids == ["a", "b"]

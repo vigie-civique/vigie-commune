@@ -20,6 +20,10 @@ from fastapi.routing import APIRoute  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 MDP = "mot-de-passe-de-test"
+DOCS = "https://docs.atelier.exemple.fr"
+
+#: Routes hors de `/api/`, chacune avec son propre verrou et sa classe de tests.
+HORS_DU_VERROU = {"/d/{doc_id}": "lien signé — TestDocumentsSurUnAutreHote"}
 
 
 @pytest.fixture
@@ -66,6 +70,8 @@ class TestSansJeton:
         ouvertes = []
         for route in atelier["app"].routes:
             if not isinstance(route, APIRoute) or route.path.startswith("/api/auth/"):
+                continue
+            if route.path in HORS_DU_VERROU:
                 continue
             assert route.path.startswith("/api/"), (
                 f"{route.path} : hors de /api/, donc hors du verrou global")
@@ -257,3 +263,119 @@ class TestModeleDistant:
         monkeypatch.setattr(api, "_IA_MODELE", "un-modele")
         monkeypatch.setattr(api, "_IA_HORS_MACHINE", accepte)
         assert api._ia_configuree() is attendu
+
+
+class TestDocumentsSurUnAutreHote:
+    """Audit du 17/10/2026 (S6) : un document archivé n'est pas de confiance, et
+    il s'ouvrait à l'adresse de l'atelier. Il s'ouvre sur `DOCS_URL`, par un lien
+    signé pour un compte et cinq minutes."""
+
+    @pytest.fixture
+    def docs(self, atelier, monkeypatch):
+        import api
+        monkeypatch.setattr(api, "DOCS_URL", DOCS)
+        monkeypatch.setattr(api, "HOTE_DOCS", "docs.atelier.exemple.fr")
+        h = atelier["compte"]("contrib@exemple.fr", "contributor")
+        dossier = atelier["racine"] / "data" / "raw" / "atelier"
+        dossier.mkdir(parents=True)
+        (dossier / "pv.pdf").write_bytes(b"%PDF-1.4 faux pv")
+        (dossier / "piege.html").write_bytes(b"<script>alert(1)</script>")
+        ins = ("INSERT INTO raw_documents(source, doc_type, sha256, byte_size, local_path, "
+               "title, parse_status) VALUES('atelier', ?, ?, 1, ?, 'x', 'manuel')")
+        pdf = atelier["sql"](ins, ("pdf", "a", "data/raw/atelier/pv.pdf"))
+        html = atelier["sql"](ins, ("html", "b", "data/raw/atelier/piege.html"))
+        return {"h": h, "pdf": pdf, "html": html, "c": atelier["client"], "sql": atelier["sql"]}
+
+    def _lien(self, docs, doc):
+        r = docs["c"].post(f"/api/atelier/documents/{doc}/lien", headers=docs["h"])
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def test_le_lien_pointe_vers_l_autre_hote_et_y_ouvre_le_pdf(self, docs):
+        lien = self._lien(docs, docs["pdf"])
+        assert lien["url"].startswith(f"{DOCS}/d/{docs['pdf']}?")
+        assert lien["affichage"] == "pdf"
+        r = docs["c"].get(lien["url"])                 # sans session
+        assert r.status_code == 200, r.text
+        assert r.headers["content-type"] == "application/pdf"
+        assert "attachment" not in r.headers.get("content-disposition", "")
+        # Pas de `sandbox` sur le PDF : il empêche le lecteur de Chrome de s'ouvrir.
+        assert "content-security-policy" not in r.headers
+        for nom, valeur in (("referrer-policy", "no-referrer"), ("x-frame-options", "DENY"),
+                            ("cross-origin-resource-policy", "same-origin"),
+                            ("x-content-type-options", "nosniff")):
+            assert r.headers[nom] == valeur, nom
+
+    def test_le_reste_se_telecharge_sous_sandbox(self, docs):
+        lien = self._lien(docs, docs["html"])
+        assert lien["affichage"] == "telechargement"
+        r = docs["c"].get(lien["url"])
+        assert r.headers["content-type"] == "application/octet-stream"
+        assert r.headers["content-disposition"].startswith("attachment")
+        assert "sandbox" in r.headers["content-security-policy"]
+
+    def test_le_lien_ne_sert_que_sur_l_hote_des_documents(self, docs):
+        url = self._lien(docs, docs["pdf"])["url"]
+        assert docs["c"].get(url.replace(DOCS, "")).status_code == 404
+
+    def test_l_hote_des_documents_ne_sert_ni_l_api_ni_l_interface(self, docs):
+        for chemin in ("/api/atelier/stats", "/api/auth/login", "/"):
+            assert docs["c"].get(f"{DOCS}{chemin}", headers=docs["h"]).status_code == 404, chemin
+
+    def test_une_signature_alteree_ou_un_autre_document_sont_refuses(self, docs):
+        url = self._lien(docs, docs["pdf"])["url"]
+        assert docs["c"].get(url[:-1] + ("0" if url[-1] != "0" else "1")).status_code == 403
+        autre = url.replace(f"/d/{docs['pdf']}?", f"/d/{docs['html']}?")
+        assert docs["c"].get(autre).status_code == 403
+
+    def test_un_lien_expire_est_refuse(self, docs, monkeypatch):
+        import api_auth
+        url = self._lien(docs, docs["pdf"])["url"]
+        vrai = api_auth.time.time
+        monkeypatch.setattr(api_auth.time, "time", lambda: vrai() + api_auth.DUREE_LIEN_DOCUMENT + 5)
+        assert docs["c"].get(url).status_code == 403
+
+    def test_une_echeance_trop_lointaine_ne_vient_pas_de_l_api(self, docs):
+        import time
+        import api_auth
+        exp = int(time.time()) + 86400
+        sig = api_auth._signature_document(docs["pdf"], exp, 1, 0)
+        r = docs["c"].get(f"{DOCS}/d/{docs['pdf']}?exp={exp}&u=1&sig={sig}")
+        assert r.status_code == 403
+
+    def test_un_compte_desactive_eteint_ses_liens(self, docs):
+        url = self._lien(docs, docs["pdf"])["url"]
+        docs["sql"]("UPDATE users SET desactive_le=datetime('now')")
+        assert docs["c"].get(url).status_code == 403
+
+    def test_un_mot_de_passe_change_eteint_ses_liens(self, docs):
+        url = self._lien(docs, docs["pdf"])["url"]
+        docs["sql"]("UPDATE users SET sessions_version = sessions_version + 1")
+        assert docs["c"].get(url).status_code == 403
+
+    def test_sans_docs_url_l_atelier_se_replie_sur_le_blob(self, atelier):
+        h = atelier["compte"]("contrib@exemple.fr", "contributor")
+        r = atelier["client"].post("/api/atelier/documents/1/lien", headers=h)
+        assert r.status_code == 200 and r.json() == {"url": None}
+
+    def test_sans_docs_url_la_route_signee_n_existe_pas(self, atelier):
+        assert atelier["client"].get("/d/1?exp=1&u=1&sig=x").status_code == 404
+
+
+class TestCookieDepuisUneAutreOrigine:
+    """`docs.` et l'atelier sont du même SITE : `SameSite=Strict` laisse passer
+    une requête de l'un vers l'autre. L'origine annoncée est contrôlée."""
+
+    def test_un_rafraichissement_venu_de_l_hote_des_documents_est_refuse(self, atelier):
+        atelier["compte"]("une@exemple.fr", "validator")
+        c = atelier["client"]
+        r = c.post("/api/auth/refresh", headers={"Origin": DOCS})
+        assert r.status_code == 403
+        assert c.post("/api/auth/logout", headers={"Origin": DOCS}).status_code == 403
+        # La session n'a pas bougé : le cookie rafraîchit encore.
+        assert c.post("/api/auth/refresh").status_code == 200
+
+    def test_la_meme_origine_passe(self, atelier):
+        atelier["compte"]("une@exemple.fr", "validator")
+        r = atelier["client"].post("/api/auth/refresh", headers={"Origin": "http://testserver"})
+        assert r.status_code == 200, r.text

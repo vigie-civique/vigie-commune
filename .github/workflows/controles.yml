@@ -9,8 +9,10 @@ name: contrôles
 # tournent sur une instance factice et une base construite depuis db/schema.sql.
 
 on:
+  # push limité à main : une branche est contrôlée par sa PR, pas deux fois
+  # (minutes Actions comptées tant que le dépôt est privé).
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -27,8 +29,8 @@ jobs:
         # proche de la machine de développement. Entre les deux, c'est vérifié.
         python: ["3.11", "3.13"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python }}
       - name: Dépendances de test
@@ -49,12 +51,16 @@ jobs:
     # client de test de FastAPI appelle l'application dans le même processus.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.13"
       - name: Dépendances
-        run: pip install -r requirements.txt pytest
+        # Deux appels : le mode empreintes s'étend à tout ce qu'un appel
+        # installe, et pytest n'a pas d'empreinte dans requirements.txt.
+        run: |
+          pip install --require-hashes -r requirements.txt
+          pip install pytest
       - name: Suite entière
         # Un test SAUTÉ ici est un défaut, pas une information : tout est
         # installé, donc un skip dénonce un paquet absent de requirements.txt.
@@ -82,12 +88,14 @@ jobs:
       matrix:
         python: ["3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python }}
       - name: Dépendances
-        run: "pip install --only-binary=:all: -r requirements.txt pytest"
+        run: |
+          pip install --require-hashes --only-binary=:all: -r requirements.txt
+          pip install pytest
       - name: L'API et les collecteurs se chargent
         env:
           VIGIE_INSTANCE: tests/instance_test.json
@@ -106,8 +114,8 @@ jobs:
     # moteur, sans avoir à lire un rapport de suite.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.13"
       - name: Le moteur ne nomme aucune commune
@@ -121,8 +129,8 @@ jobs:
     # construira pas chez celui qui la reprend.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.13"
       - name: L'archive se construit et ne contient rien d'interdit
@@ -137,19 +145,19 @@ jobs:
     # parcours qu'un dépôt fraîchement cloné doit pouvoir suivre.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
         with:
           # La version vient du champ `packageManager` du paquet.
           package_json_file: public/package.json
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           # 22 et non 20 : le contrôle du dossier hors-ligne pilote Chrome par
           # CDP, et `WebSocket` n'est global qu'à partir de Node 22.
           node-version: "22"
           cache: pnpm
           cache-dependency-path: public/pnpm-lock.yaml
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.13"
       - name: Base d'épreuve
@@ -331,17 +339,17 @@ jobs:
     # qu'au déploiement sur le serveur — là où le script revient en arrière.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
         with:
           # La version vient du champ `packageManager` du paquet.
           package_json_file: dashboard/package.json
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22"
           cache: pnpm
           cache-dependency-path: dashboard/pnpm-lock.yaml
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.13"
       - name: Libellés de l'instance factice
@@ -364,7 +372,7 @@ jobs:
     # de Debian 12, où `listen … http2` n'est pas encore déprécié.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: nginx -t
         run: |
           mkdir -p /tmp/tls
@@ -393,21 +401,21 @@ jobs:
     # statiques, les outils de build ne sont pas servis.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.13"
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
         with:
           # La version vient du champ `packageManager` du paquet.
           package_json_file: public/package.json
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22"
       - name: Python
         run: |
           pip install pip-audit
-          pip-audit -r requirements.txt --no-deps --progress-spinner off
+          pip-audit -r requirements.txt --require-hashes --no-deps --progress-spinner off
       - name: Atelier
         working-directory: dashboard
         run: pnpm audit --prod

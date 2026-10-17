@@ -377,12 +377,12 @@ STEPS = {
     # budget sur lequel le conseil vient de se prononcer.
     "budgets_votes": ("Budgets primitifs votés (PV)",
                       lambda: run_budgets_votes(commit=True)),
-    # Rejoue `config/saisies.json` — ce qu'un humain a écrit dans l'atelier.
+    # Rejoue `saisies/saisies.json` — ce qu'un humain a écrit dans l'atelier.
     # APRÈS les collecteurs, y compris celui des budgets votés : une saisie
     # rectifie ce qu'une lecture automatique a mal lu, et rattache un flux à une
     # entité que la collecte vient peut-être de créer. AVANT `origine` et
     # `perimetre`, qui doivent classer ces lignes comme les autres.
-    "saisies":   ("Saisies de l'atelier (config/saisies.json)", import_saisies),
+    "saisies":   ("Saisies de l'atelier (saisies/saisies.json)", import_saisies),
     # Dérivé : rapproche ce que les autres ont écrit, et n'affirme RIEN — il
     # pose des candidats dans `relation_candidates`, que l'atelier tranche
     # (file « Liens présumés »). Après `saisies`, pour voir aussi ce qu'un

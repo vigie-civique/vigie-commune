@@ -5,7 +5,7 @@
   "moteur_modifie": null,
   "total": 49,
   "fichiers": [
-    {"chemin": "README.md", "etape": "dictionnaire", "objets": null, "octets": 6294, "sha256": "711c23007eed919d024089d0ed04409fb6a6b6aa6f6731681dd34e3b0b7f5372"},
+    {"chemin": "README.md", "etape": "dictionnaire", "objets": null, "octets": 6399, "sha256": "5a125179ac93c557bbc37e4497659e85676efb7bd4827a93366dd259a0dadbda"},
     {"chemin": "actualite.json", "etape": "actualite", "objets": 10, "octets": 4742, "sha256": "30e9ec66744357721be2489005340b4e469180efdfb1ffa27fe3aac2644fc211"},
     {"chemin": "approbations.json", "etape": "ecrire_finances", "objets": 0, "octets": 38, "sha256": "fb9e32a32600def0d7c161d16ab9c35fede04ccfdbc3e285bac439f8f08c98ff"},
     {"chemin": "budget.json", "etape": "ecrire_finances", "objets": 0, "octets": 34, "sha256": "6fdd7bb7b46288994f98d38067a3c16a3de650c13de707a18154ade436cba409"},
@@ -16,7 +16,7 @@
     {"chemin": "corrections.json", "etape": "corrections", "objets": 0, "octets": 33, "sha256": "7106e09d96123aa30284286c88b8b20134cd42c1090205fb4fc0dbaa11e06064"},
     {"chemin": "couverture.json", "etape": "couverture", "objets": 12, "octets": 2976, "sha256": "12bb7a9294ec47907e6975fa47ede7ddf138c58eb15609b307731929fd788b3d"},
     {"chemin": "dossiers.json", "etape": "graphe", "objets": 1, "octets": 7026, "sha256": "944ce9b3f0f4778e5ac5094b8258b74a9828d215508bc27d55958cedc13423f4"},
-    {"chemin": "dvf.json", "etape": "ecrire_finances", "objets": 0, "octets": 29, "sha256": "fa7f63c269dc166a61fde7629f4e7563d4d3bad3e7aff670af37bfbd14d07200"},
+    {"chemin": "dvf.json", "etape": "ecrire_finances", "objets": 0, "octets": 314, "sha256": "2a29d756eb5343d365df262ebb28bb7dfeb855d4fe20f7140d3371b109a28292"},
     {"chemin": "elections.json", "etape": "elections", "objets": 1, "octets": 2, "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"},
     {"chemin": "elus_rne.json", "etape": "elus", "objets": 2, "octets": 905, "sha256": "a164f44647ba2e49960ea21842d5e4d20b1e350107cfc36242acbd277cd92077"},
     {"chemin": "entite/1.json", "etape": "fiches_acteurs", "objets": 2, "octets": 1364, "sha256": "b904c641ab2672cd2d7e7944fa76750879b6251017ba29f59e1932c4e77c0f05"},

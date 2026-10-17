@@ -57,7 +57,9 @@ def atelier(tmp_path, monkeypatch, schema_sql):
     def compte(email, role):
         sql("INSERT INTO users(email, password_hash, role) VALUES(?,?,?)",
             (email, api_auth._hash_pw(MDP), role))
-        j = client.post("/api/auth/login", json={"email": email, "password": MDP}).json()
+        r = client.post("/api/auth/login", json={"email": email, "password": MDP})
+        # Le jeton de rafraîchissement ne vit que dans le cookie.
+        j = {**r.json(), "refresh_token": r.cookies.get("atelier_refresh")}
         return {"Authorization": f"Bearer {j['access_token']}"}, j
 
     def fiche():

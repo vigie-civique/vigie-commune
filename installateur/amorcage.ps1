@@ -50,12 +50,22 @@ function Poser-Python {
 
   New-Item -ItemType Directory -Force -Path $OUTILS | Out-Null
   $zip = Join-Path $OUTILS "uv.zip"
-  # `latest` et non une version figée : cet outil ne sert qu'à télécharger un
-  # interpréteur. Un numéro figé qui disparaîtrait du dépôt bloquerait toute
-  # installation, partout, sans recours pour celui qui la subit.
+  # Version figée et empreinte vérifiée : uv est le seul binaire que la chaîne
+  # exécute sans l'avoir construit (audit du 17/10/2026). Une archive qui ne
+  # correspond pas n'est pas ouverte. Monter de version : changer la version et
+  # les deux empreintes, lues dans les fichiers `.sha256` de la release.
+  $version = "0.12.22"
+  $empreintes = @{
+    "uv-aarch64-pc-windows-msvc" = "6a42b919c2bb7135f07b4d1bb8e489f0eaab0bae039020573cc522d831e2d32e"
+    "uv-x86_64-pc-windows-msvc"  = "ea1397797a0ca15f63516dd0f49c2dde9776db9be5861cab152ebe8ad199894d"
+  }
   Invoke-WebRequest -UseBasicParsing `
-    -Uri "https://github.com/astral-sh/uv/releases/latest/download/$cible.zip" `
+    -Uri "https://github.com/astral-sh/uv/releases/download/$version/$cible.zip" `
     -OutFile $zip
+  if ((Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower() -ne $empreintes[$cible]) {
+    Remove-Item $zip -Force
+    throw "L'archive de uv téléchargée n'a pas l'empreinte attendue : je ne l'ouvre pas."
+  }
   Expand-Archive -Path $zip -DestinationPath $OUTILS -Force
   Remove-Item $zip -Force
   $uv = Get-ChildItem -Path $OUTILS -Filter "uv.exe" -Recurse | Select-Object -First 1

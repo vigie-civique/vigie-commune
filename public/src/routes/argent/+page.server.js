@@ -17,7 +17,7 @@ export function load() {
   const stats = lire('stats.json')
   const ofgl = lire('ofgl.json', { ofgl: [] })
   const flows = lire('flows.json', [])
-  const dvf = lire('dvf.json', [])
+  const dvf = lire('dvf.json', {}).synthese || {}
   const fiscalite = lire('fiscalite.json', {})
   const marches = lire('marches.json', { marches: [] }).marches || []
 
@@ -31,9 +31,6 @@ export function load() {
   const beneficiaires = new Set(verses.map((f) => f.to_id).filter(Boolean)).size
   const totalVerse = verses.reduce((s, f) => s + (f.amount || 0), 0)
 
-  const transactions = Array.isArray(dvf) ? dvf : dvf.rows || dvf.dvf || []
-  const annees = transactions.map((t) => (t.date || '').slice(0, 4)).filter(Boolean).sort()
-
   return {
     annee,
     recettes: agregat('Recettes de fonctionnement'),
@@ -45,8 +42,8 @@ export function load() {
     avis: marches.filter((m) => !estAttribue(m)).length,
     beneficiaires,
     totalVerse,
-    dvf: transactions.length,
-    dvfPeriode: annees.length ? `${annees[0]}–${annees[annees.length - 1]}` : null,
+    dvf: dvf.mutations ?? 0,
+    dvfPeriode: dvf.debut ? `${dvf.debut}–${dvf.fin}` : null,
     // Communes réellement comparées dans /impots — compté sur le snapshot.
     // La carte annonçait « 7 communes comparées », vestige de l'ancien
     // ancien périmètre, plus étroit que celui de l'intercommunalité.

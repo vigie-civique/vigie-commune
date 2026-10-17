@@ -22,7 +22,7 @@ rapport JSON ─▶ dépôt (atelier, ou scripts/deposer_marches_extraits.py)
                  │ un VALIDATEUR relit chaque ligne, l'acte et la citation
                  │ sous les yeux : accepte, corrige puis accepte, ou écarte
                  ▼
-          une saisie `marche` dans config/saisies.json (confirmed)
+          une saisie `marche` dans saisies/saisies.json (confirmed)
                  │ rejouée par le collecteur `saisies`, comme tout travail humain
                  ▼
           marches_publics — rattachée à son acte (event_id), à sa pièce
@@ -42,7 +42,7 @@ rapport JSON ─▶ dépôt (atelier, ou scripts/deposer_marches_extraits.py)
   attente. L'acceptation écrit une saisie dont l'identifiant dérive de cette
   empreinte, et le rejeu des saisies ne réécrit pas une ligne déjà en base.
 - **Une ligne acceptée survit à une reconstruction de la base** : elle vit dans
-  `config/saisies.json`, que `run_all` rejoue. Sur une autre machine, l'acte se
+  `saisies/saisies.json`, que `run_all` rejoue. Sur une autre machine, l'acte se
   retrouve par sa clé datée (`events.cle_acte`) et la pièce par son empreinte
   (`raw_documents.sha256`), pas par des identifiants de ligne.
 - **Qui fait quoi.** Déposer un rapport et trancher une ligne sont réservés au

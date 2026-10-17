@@ -9,12 +9,73 @@ from __future__ import annotations
 
 import sys
 from collections import Counter
+from statistics import median
 
 from collectors.etat_flux import etat_du_flux
 from scripts.snapshot.revue import appliquer_revue
 from scripts.snapshot.actes import PORTEE_PAR_PERIMETRE
 from scripts.snapshot.socle import RULES, rows, table_exists
 from scripts.snapshot.textes import champ_publiable
+
+
+# Sous ce nombre de ventes, une médiane ne résume rien : elle désigne une vente
+# ou deux, donc un vendeur. Elle est publiée vide, avec le nombre qui l'explique.
+DVF_SEUIL_MEDIANE = 5
+
+
+def agreger_dvf(mutations: list[dict]) -> dict:
+    """DVF ne sort qu'en agrégats : par année, par nature de bien, et en synthèse.
+
+    Le snapshot publiait chaque mutation — date, parcelle, prix, coordonnées —
+    dans du HTML prérendu et un `dvf.json` signalé aux robots. Or les conditions
+    de réutilisation de la DGFiP interdisent la ré-identification, même
+    indirecte, des personnes (art. R112 A-3 LPF) et l'indexation par les moteurs
+    de recherche. Dans une commune de mille habitants, une parcelle et une date
+    suffisent à retrouver le vendeur (audit du 17/10/2026). La ligne reste en
+    base, pour l'atelier ; le site n'en reçoit que des comptes et des médianes,
+    et une médiane sur moins de `DVF_SEUIL_MEDIANE` ventes n'est pas publiée.
+    """
+    def nature(t, motif):
+        return motif in (t["nature_bien"] or "").lower()
+
+    def bati(t):
+        return nature(t, "maison") or nature(t, "appartement")
+
+    def med(valeurs):
+        valeurs = [v for v in valeurs if v]
+        return round(median(valeurs)) if len(valeurs) >= DVF_SEUIL_MEDIANE else None
+
+    annees = sorted({(t["date"] or "")[:4] for t in mutations} - {""})
+    par_annee = []
+    for annee in annees:
+        dans = [t for t in mutations if (t["date"] or "").startswith(annee)]
+        m2 = [t["price_per_m2"] for t in dans if bati(t) and t["price_per_m2"]]
+        par_annee.append({"annee": int(annee), "mutations": len(dans),
+                          "ventes_bati": len(m2), "mediane_m2": med(m2)})
+
+    maisons = [t for t in mutations if nature(t, "maison")]
+    appartements = [t for t in mutations if nature(t, "appartement")]
+    dependances = [t for t in mutations if nature(t, "dépendance") or nature(t, "dependance")]
+    locaux = [t for t in mutations if nature(t, "local")]
+    return {
+        "seuil_mediane": DVF_SEUIL_MEDIANE,
+        "synthese": {
+            "mutations": len(mutations),
+            "debut": int(annees[0]) if annees else None,
+            "fin": int(annees[-1]) if annees else None,
+            "maisons": len(maisons),
+            "appartements": len(appartements),
+            "dependances": len(dependances),
+            "locaux": len(locaux),
+            "non_bati": len(mutations) - len(maisons) - len(appartements)
+                        - len(dependances) - len(locaux),
+            "mediane_prix_maison": med(t["price"] for t in maisons),
+            "mediane_m2_bati": med(t["price_per_m2"] for t in mutations if bati(t)),
+        },
+        "par_annee": par_annee,
+        "par_nature": [{"nature": n, "mutations": k} for n, k in
+                       Counter(t["nature_bien"] or "-" for t in mutations).most_common()],
+    }
 
 
 def flux_extremites_publiees(flow: dict, public_ids: set[int]) -> bool:
@@ -377,7 +438,8 @@ def etape_flux(conn, revue, entity_rows, public_person_ids, public_ids,
 def etape_finances(conn, revue, public_ids, public_entities, perimetre_par_entite,
                    noms_publics, exclusions) -> dict:
     # ── Données financières & foncières officielles (open data) ───────────
-    # DGFiP, OFGL, Cerema (DVF), DECP : faits publics par nature → export complet.
+    # DGFiP, OFGL, DECP : faits publics par nature → export complet. DVF : agrégats
+    # seulement, cf. `agreger_dvf`.
     budget_annuel = rows(conn, """
         SELECT year, categorie, compte, libelle, montant, source
         FROM budget_annuel ORDER BY year DESC, categorie, montant DESC
@@ -422,11 +484,9 @@ def etape_finances(conn, revue, public_ids, public_entities, perimetre_par_entit
     """) if table_exists(conn, "budget_vote") else []
     for b in budget_vote:
         b["note"] = champ_publiable(b["note"], None, noms_publics)
-    dvf_data = rows(conn, """
-        SELECT id, date, cadastre_ref, lieu_dit, nature_mutation, nature_bien,
-               surface_terrain, surface_bati, price, price_per_m2, lat, lng
-        FROM dvf_transactions ORDER BY date DESC
-    """)
+    dvf_data = agreger_dvf(rows(conn, """
+        SELECT date, nature_bien, price, price_per_m2 FROM dvf_transactions
+    """))
     # Le filtre de confiance manquait ici, alors qu'il s'applique partout
     # ailleurs : la table publiait TOUT. Un marché dont l'acheteur n'a pas
     # pu être établi affirmait donc qu'une collectivité avait acheté ce

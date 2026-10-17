@@ -128,7 +128,9 @@ def creer_venv(journal, python_amorce: str | Path) -> None:
 
 def installer_dependances_python(journal) -> None:
     journal("   installation des dépendances Python (≈ 2 min la première fois)…")
-    courir([python_venv(), "-m", "pip", "install", "-r",
+    # `--require-hashes` : chaque fichier téléchargé est vérifié contre
+    # l'empreinte du verrou, et un paquet absent de la liste est refusé.
+    courir([python_venv(), "-m", "pip", "install", "--require-hashes", "-r",
             str(RACINE / "requirements.txt")], journal, quoi="pip install")
 
 

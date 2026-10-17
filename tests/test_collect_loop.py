@@ -77,7 +77,7 @@ SANS_RYTHME = {
     "init":          "pas un collecteur : crée le schéma",
     "origine":       "dérivé — relit la `source` que les collecteurs viennent d'écrire",
     "perimetre":     "dérivé — classe les entités déjà collectées",
-    "saisies":       "rejoue `config/saisies.json` : des décisions humaines, pas une source",
+    "saisies":       "rejoue `saisies/saisies.json` : des décisions humaines, pas une source",
     "approbations":  "dérivé du texte des séances",
     "budgets_votes": "dérivé du texte des séances",
     "liens":         "dérivé — rapproche des entités déjà collectées, ne source rien",

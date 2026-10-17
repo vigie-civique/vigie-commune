@@ -199,7 +199,7 @@ def importer(conn, src: Path, appliquer: bool, forcer: bool) -> Rapport:
     # ── Saisies manuelles ───────────────────────────────────────────────────
     # Les sections précédentes posent un jugement sur une ligne qui existe déjà
     # ici. Celle-ci apporte des lignes qui n'existent nulle part ailleurs : elle
-    # n'écrit donc pas en base, elle complète `config/saisies.json`, et c'est le
+    # n'écrit donc pas en base, elle complète `saisies/saisies.json`, et c'est le
     # collecteur `saisies` qui les insérera — le même chemin que pour une saisie
     # faite à la main sur cette machine.
     recues = _lire(src / "saisies.jsonl")

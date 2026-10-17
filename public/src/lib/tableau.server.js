@@ -177,8 +177,11 @@ export function tableauDeBord({ lire, insee, epciCourt, aujourdhui, chiffres, in
 
   // ── 6. Ventes foncières ─────────────────────────────────────────────────
   {
-    const points = parAnnee((lire('dvf.json', { dvf: [] }).dvf || []).map((v) => v.date),
-                            anneeCourante)
+    // DVF n'arrive qu'en comptes annuels : une date par mutation les remet
+    // dans la forme que `parAnnee` attend.
+    const dates = (lire('dvf.json', {}).par_annee || [])
+      .flatMap((a) => Array(a.mutations).fill(String(a.annee)))
+    const points = parAnnee(dates, anneeCourante)
     if (points.length) {
       const p = derniereEntiere(points)
       tuiles.push({

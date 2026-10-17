@@ -16,12 +16,12 @@
     "verifier-hors-ligne": "node scripts/verifier_hors_ligne.mjs"
   },
   "dependencies": {
-    "d3": "^7.9.0",
-    "leaflet": "^1.9.4",
-    "leaflet.markercluster": "^1.5.3",
+    "d3": "7.9.0",
+    "leaflet": "1.9.4",
+    "leaflet.markercluster": "1.5.3",
     "marked": "18.1.0",
-    "pmtiles": "^4.5.0",
-    "protomaps-leaflet": "^5.1.0"
+    "pmtiles": "4.5.0",
+    "protomaps-leaflet": "5.1.0"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "4.0.0",
