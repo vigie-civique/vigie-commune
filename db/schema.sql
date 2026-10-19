@@ -349,11 +349,13 @@ CREATE TABLE IF NOT EXISTS financial_flows (
     -- Colonnes attendues par build_public_snapshot.py :
     --   perimetre  'detail' (par défaut) ou 'agregat' — un agrégat OFGL englobe
     --              des flux détaillés, les additionner double le total ;
-    --   statut     'realise' (par défaut) ou 'demande' — une subvention
-    --              sollicitée n'est pas une subvention obtenue ;
+    --   statut     'realise' (par défaut, historique : ne dit pas où en est le
+    --              montant) ; ou ce qu'une saisie de l'atelier atteste —
+    --              'demande', 'vote', 'engage', 'paye', 'annule'
+    --              (collectors/etat_flux.py) ;
     --   type_norm  type ramené à une famille, pour les regroupements publics.
     perimetre   TEXT DEFAULT 'detail' CHECK(perimetre IN ('detail','agregat')),
-    statut      TEXT DEFAULT 'realise' CHECK(statut IN ('realise','demande')),
+    statut      TEXT DEFAULT 'realise' CHECK(statut IN ('realise','demande','vote','engage','paye','annule')),
     type_norm   TEXT,
     -- cf. events.origine — c'est ici que le partage compte le plus : au 20/08,
     -- 38 lignes institutionnelles (OFGL, DECP) et 150 lignes lues dans des

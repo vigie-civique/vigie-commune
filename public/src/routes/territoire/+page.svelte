@@ -2,6 +2,7 @@
   import { COMMUNE, COMMUNE_A, COMMUNE_DE, INSEE, SITE_NOM } from '#lib/instance.js'
   import Niveau from '#lib/components/Niveau.svelte'
   import VersDossier from '#lib/components/VersDossier.svelte'
+  import SourcesLimites from '#lib/components/SourcesLimites.svelte'
   import Icon from '#lib/components/Icon.svelte'
 
   // Portrait de territoire. 1 812 indicateurs INSEE (1968→2024) dormaient en
@@ -27,6 +28,15 @@
   $: mobile = telecoms?.mobile
   $: pannes = telecoms?.pannes
   $: enfance = data.enfance
+  // Qualifié au build (`export_lovac`) : chaque valeur est un nombre, « s »
+  // sous le secret statistique, ou absente. « s » ne se lit jamais comme zéro.
+  $: lovac = data.lovac
+  $: lovacSerie = lovac?.serie || []
+  $: lovacDernier = lovacSerie.at(-1)
+  $: lovacMax = Math.max(...lovacSerie.map(m => typeof m.vacants === 'number' ? m.vacants : 0), 11)
+  $: ruptureDe = Object.fromEntries((lovac?.ruptures || []).map(r => [r.millesime, r.raison]))
+  const estNombre = (v) => typeof v === 'number'
+  const vac = (v) => v === 's' ? 's' : nb(v)
   $: accueil = enfance?.accueil
   // Une élémentaire et une maternelle portent souvent le même nom : c'est alors
   // leur nature qui les distingue. Ailleurs elle n'apprend rien, et trompe —
@@ -281,9 +291,10 @@
         {/each}
       </div>
     </div>
+    <SourcesLimites bloc="territoire.population" millesime="{pop[0]?.annee} à {pop.at(-1)?.annee}" population={popActuelle?.valeur} />
 
     {:else}
-      <h2>Population</h2>
+      <h2 data-sans-donnees>Population</h2>
       <p class="note">La série historique des recensements n'a pas été collectée
          pour cette commune. Les autres indicateurs ci-dessous, eux, l'ont été.</p>
     {/if}
@@ -345,7 +356,61 @@
       commune sont publiés en données ouvertes
       (<a href="https://www.data.gouv.fr/datasets/logements-vacants-du-parc-prive-par-commune-departement-region-france-de-2020-a-2026" rel="noopener">data.gouv.fr</a>)&nbsp;;
       seul le niveau du logement, qui désigne des biens et leurs propriétaires,
-      reste soumis à convention. Nous ne la reprenons pas encore ici.
+      reste soumis à convention.{#if lovac}{' '}Ils sont repris <a href="#vacance">ci-dessous</a>.{:else}{' '}Ils n'ont pas été collectés pour cette commune.{/if}
+    </p>
+    <SourcesLimites bloc="territoire.logement" millesime="{anneesLog[0]} à {anneesLog.at(-1)}" population={popActuelle?.valeur} />
+    {/if}
+
+    {#if lovacDernier}
+    <!-- ── Vacance de longue durée (LOVAC) ─────────────────────────── -->
+    <h2 id="vacance">Logement : la vacance de plus de deux ans</h2>
+    <Niveau type="fait" source="Cerema pour le ministère de la Transition écologique, LOVAC {lovacDernier.millesime}" href={lovac.page_jeu}>
+      Au millésime {lovacDernier.millesime}, LOVAC compte
+      {#if estNombre(lovacDernier.vacants)}<b>{nb(lovacDernier.vacants)} logements vacants</b>{:else}<b>moins de 11 logements vacants</b> (chiffre non diffusé){/if}
+      dans le parc privé {COMMUNE_DE}{#if lovacDernier.vacants_plus_2ans !== undefined},
+      dont {#if estNombre(lovacDernier.vacants_plus_2ans)}<b>{nb(lovacDernier.vacants_plus_2ans)}</b>{:else}<b>moins de 11</b> (non diffusé){/if}
+      depuis plus de deux ans{/if}.
+    </Niveau>
+    <div class="chart-wrap">
+      <table>
+        <caption class="visually-hidden">Logements vacants du parc privé par millésime LOVAC, ruptures de méthode comprises</caption>
+        <thead>
+          <tr>
+            <th scope="col">Millésime</th><th scope="col" class="r">Parc privé</th>
+            <th scope="col" class="r">Vacants</th><th scope="col" class="r">Dont plus de 2 ans</th>
+            <th scope="col">Vacants, dont plus de 2 ans</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each lovacSerie as m, i}
+            {#if i > 0 && ruptureDe[m.millesime]}
+              <tr class="rupture">
+                <td colspan="5"><b>Rupture de méthode en {m.millesime}</b>&nbsp;: {ruptureDe[m.millesime]}. Les millésimes de part et d'autre ne se comparent pas.</td>
+              </tr>
+            {/if}
+            <tr>
+              <td>{m.millesime}</td>
+              <td class="r">{m.parc_prive === undefined ? '-' : vac(m.parc_prive)}</td>
+              <td class="r">{vac(m.vacants)}{#if estNombre(m.vacants) && estNombre(m.parc_prive)}{' '}<span class="muted">({pct(m.vacants / m.parc_prive * 100)})</span>{/if}</td>
+              <td class="r">{m.vacants_plus_2ans === undefined ? '-' : vac(m.vacants_plus_2ans)}</td>
+              <td>
+                {#if estNombre(m.vacants)}
+                  <div class="vbar" title="Vacants {vac(m.vacants)} · dont plus de 2 ans {vac(m.vacants_plus_2ans)}">
+                    <span class="s3" style="width:{m.vacants / lovacMax * 100}%">
+                      {#if estNombre(m.vacants_plus_2ans)}<span class="s1" style="width:{m.vacants_plus_2ans / m.vacants * 100}%"></span>{/if}
+                    </span>
+                  </div>
+                {:else}<span class="muted">non diffusé</span>{/if}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+    <p class="legend">
+      <span><i class="s3"></i> Logements vacants du parc privé</span>
+      <span><i class="s1"></i> dont vacants depuis plus de deux ans</span>
+      <span><b>s</b>&nbsp;: secret statistique, moins de 11 logements</span>
     </p>
     <p class="lecture">
       <b>Précautions d'emploi.</b> LOVAC n'est pas une série continue. En 2023,
@@ -354,9 +419,13 @@
       immobiliers&nbsp;». En 2025, le fichier fiscal d'origine a cessé de
       compter les logements vacants «&nbsp;par défaut&nbsp;»&nbsp;: seuls restent
       ceux que leur propriétaire a déclarés vacants. Comparer 2022 ou 2024 à
-      2025 revient donc à comparer deux définitions. Les communes comptant moins
-      de 11 logements vacants ne sont pas diffusées. Voir l'<a href="https://zerologementvacant.beta.gouv.fr/blog-et-actualit%C3%A9s/de-la-taxe-dhabitation-%C3%A0-gmbi-quels-impacts-pour-lovac/" rel="noopener">explication de Zéro Logement Vacant</a>.
+      2025 revient donc à comparer deux définitions. Sous 11 logements, le
+      chiffre n'est pas diffusé et s'écrit «&nbsp;s&nbsp;»&nbsp;: ce n'est pas
+      zéro. Le parc privé exclut les logements sociaux, et chaque millésime décrit
+      la situation au 1<sup>er</sup> janvier de l'année précédente. Voir
+      l'<a href="https://zerologementvacant.beta.gouv.fr/blog-et-actualites/de-la-taxe-dhabitation-a-gmbi-quels-impacts-pour-lovac/" rel="noopener">explication de Zéro Logement Vacant</a>.
     </p>
+    <SourcesLimites bloc="territoire.vacance" millesime="millésimes {lovacSerie[0].millesime} à {lovacDernier.millesime}" />
     {/if}
 
     <!-- ── Âges ─────────────────────────────────────────────────────── -->
@@ -371,6 +440,7 @@
           </div>
         {/each}
       </div>
+      <SourcesLimites bloc="territoire.ages" millesime="recensement {anneeAge}" population={popActuelle?.valeur} />
     {/if}
 
     {#if voisines.length > 1}
@@ -393,16 +463,9 @@
           </div>
         {/each}
       </div>
+      <SourcesLimites bloc="territoire.niveau-de-vie" millesime={anneeFilo} />
     {/if}
 
-    <p class="src">
-      Source : INSEE, recensements de la population, séries historiques,
-      dispositif FiLoSoFi (niveaux de vie), récupérés via l'API Melodi. Le
-      niveau de vie médian est publié à l'échelle communale, en euros par an et
-      par unité de consommation ; l'INSEE le couvre du secret statistique sur
-      les communes les plus petites, qui sont alors absentes de la comparaison.
-      La structure par âge porte sur le recensement {anneeAge}.
-    </p>
   {:else}
     <p class="muted">Aucun indicateur disponible.</p>
   {/if}
@@ -453,6 +516,7 @@
         chiffres comptent les élèves de l'école, pas les enfants {COMMUNE_DE}.
       </p>
     {/if}
+    {#if enfance.ecoles.length}<SourcesLimites bloc="territoire.ecoles" />{/if}
 
     {#if accueil}
       {@const a = accueil.dernier}
@@ -486,13 +550,8 @@
         compte autant qu'une place en crèche. Le département et la France ne sont
         comparés qu'à année égale.
       </p>
+      <SourcesLimites bloc="territoire.accueil" millesime={String(a.annee)} />
     {/if}
-    <p class="src">
-      Sources : ministère de l'éducation nationale
-      (<a href="https://data.education.gouv.fr/" rel="noopener">data.education.gouv.fr</a>),
-      Caisse nationale des allocations familiales
-      (<a href="https://data.caf.fr/" rel="noopener">data.caf.fr</a>).
-    </p>
   {/if}
 
   {#if equipements.etat?.length}
@@ -534,6 +593,7 @@
         </table>
       </div>
     {/if}
+    <SourcesLimites bloc="territoire.equipements" />
   {/if}
 
   {#if mobilite.aom || dispositifs.length}
@@ -561,6 +621,7 @@
         {#each dispositifs as d}<li>{d.libelle || d.code}<span class="muted"> : {d.reference}</span></li>{/each}
       </ul>
     {/if}
+    <SourcesLimites bloc="territoire.desserte" />
   {/if}
 
   {#if fixe}
@@ -719,13 +780,7 @@
       l'électricité, dont dépend désormais aussi le téléphone fixe&nbsp;: il passe
       par la box.
     </p>
-    <p class="src">
-      Source : ARCEP, <a href="https://data.arcep.fr/" rel="noopener">data.arcep.fr</a>,
-      Ma connexion internet (éligibilité par technologie, par trimestre),
-      déploiements de la fibre (zone et opérateur d'infrastructure), qualité des
-      réseaux en fibre optique (indicateurs par réseau, six mois glissants), sites
-      mobiles et sites indisponibles (relevé quotidien).
-    </p>
+    <SourcesLimites bloc="territoire.telecoms" millesime={trimestre(fixe.dernier.trimestre)} />
   {/if}
 </section>
 
@@ -772,6 +827,11 @@
 
   .stack { display: flex; height: 10px; border-radius: 3px; overflow: hidden; min-width: 120px; }
   .stack span { display: block; height: 100%; }
+  .vbar { height: 10px; min-width: 120px; }
+  .vbar > span { display: block; height: 100%; border-radius: 3px; overflow: hidden; }
+  .vbar .s1 { display: block; height: 100%; }
+  tr.rupture td { font-size: .8rem; color: var(--gris); background: var(--ambre-pale);
+                  border-top: 2px dashed var(--ambre); }
   .s1, i.s1 { background: var(--ardoise); } .s2, i.s2 { background: var(--ambre); } .s3, i.s3 { background: var(--trait); }
   .legend { display: flex; gap: 1.2rem; flex-wrap: wrap; font-size: .78rem;
             color: var(--gris); margin-top: .5rem; }
@@ -788,8 +848,6 @@
   .aval { text-align: right; color: var(--gris); }
   .aval em { color: var(--gris-clair); font-style: normal; font-size: .78rem; }
 
-  .src { margin-top: 2rem; padding-top: .8rem; border-top: 1px solid var(--trait);
-         color: var(--gris); font-size: .8rem; max-width: 72ch; }
 
   @media (max-width: 700px) {
     .agerow { grid-template-columns: 7.5rem 1fr 5.5rem; font-size: .8rem; }

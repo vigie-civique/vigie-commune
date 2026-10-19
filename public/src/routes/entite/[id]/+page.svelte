@@ -177,15 +177,22 @@
   $: relActives = relations.filter(actif)
   $: relPassees = relations.filter(r => !actif(r))
 
+  // L'état d'un flux est calculé au snapshot (`collectors/etat_flux`), comme
+  // sur /finances. Le repli sur `statut` vaut pour un snapshot plus ancien.
+  // Un montant demandé ou annulé n'entre dans aucun cumul.
+  const ETAT_LIB = { demande: 'demandé', annule: 'annulé' }
+  const etatDe = (f) => f.etat || f.statut
+  const horsCumul = (f) => etatDe(f) in ETAT_LIB
+
   // Synthèse : ce qu'il faut retenir avant de dérouler les listes.
-  $: recu = flows.filter(f => f.to_id === id && f.statut !== 'demande')
+  $: recu = flows.filter(f => f.to_id === id && !horsCumul(f))
                  .reduce((s, f) => s + (f.amount || 0), 0)
-  $: verse = flows.filter(f => f.from_id === id && f.statut !== 'demande')
+  $: verse = flows.filter(f => f.from_id === id && !horsCumul(f))
                   .reduce((s, f) => s + (f.amount || 0), 0)
   // Un cumul sans sa période se lit comme un montant annuel : « REÇU 7 M€ »
   // additionnait 2016-2026 sans le dire (audit du 24/09/2026).
   const periodeDe = (rows) => {
-    const a = rows.filter(f => f.statut !== 'demande').map(f => f.year).filter(Boolean).sort()
+    const a = rows.filter(f => !horsCumul(f)).map(f => f.year).filter(Boolean).sort()
     if (!a.length) return ''
     return a[0] === a[a.length - 1] ? `en ${a[0]}` : `cumul ${a[0]}–${a[a.length - 1]}`
   }
@@ -356,19 +363,19 @@
         {#if flows.length}
           <h2>Flux financiers</h2>
           <p class="note">
-            Montants constatés, hors agrégats comptables et hors subventions
-            seulement sollicitées. {anneesFlux.length ? `Période ${anneesFlux[0]}–${anneesFlux[anneesFlux.length - 1]}.` : ''}
+            Montants constatés, hors agrégats comptables ; les montants
+            seulement sollicités ou annulés sont listés, jamais cumulés. {anneesFlux.length ? `Période ${anneesFlux[0]}–${anneesFlux[anneesFlux.length - 1]}.` : ''}
           </p>
           <table>
             <caption class="visually-hidden">Flux financiers</caption>
             <thead><tr><th scope="col">Année</th><th scope="col">Nature</th><th scope="col" class="r">Montant</th></tr></thead>
             <tbody>
               {#each flows as f}
-                <tr class:demande={f.statut === 'demande'}>
+                <tr class:demande={horsCumul(f)}>
                   <td>{f.year || '-'}</td>
                   <td>
                     <span class="ftype">{(f.type_norm || f.type || '').replace(/_/g, ' ')}</span>
-                    {#if f.statut === 'demande'}<span class="tag">demandé</span>{/if}
+                    {#if horsCumul(f)}<span class="tag">{ETAT_LIB[etatDe(f)]}</span>{/if}
                     {#if f.description}<span class="fdesc">{f.description}</span>{/if}
                     <span class="fsens">{f.to_id === id ? `de ${f.from_name || '-'}` : `à ${f.to_name || '-'}`}</span>
                   </td>

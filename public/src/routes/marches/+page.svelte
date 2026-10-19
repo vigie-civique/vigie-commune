@@ -105,6 +105,9 @@
     La publication des données essentielles n'est obligatoire qu'à partir de
     <b>40 000 €&nbsp;HT</b>. En dessous, un marché est légalement attribué sans
     qu'aucun registre national n'en garde trace&nbsp;: ni le BOAMP, ni les DECP.
+    Entre 25&nbsp;000 et 40&nbsp;000&nbsp;€&nbsp;HT, la commune publie seulement,
+    chaque année, la liste de ces marchés, sur le support de son choix&nbsp;;
+    sous 25&nbsp;000&nbsp;€&nbsp;HT, rien ne l'oblige à les publier.
     Pour une commune de cette taille, l'essentiel de la commande publique passe
     sous ce seuil, et ne se lit, quand elle se lit, que dans les procès-verbaux
     du conseil.

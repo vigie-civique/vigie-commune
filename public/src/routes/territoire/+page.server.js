@@ -137,6 +137,9 @@ export function load() {
     // Qualifié au build (`export_enfance`) : effectifs par ÉCOLE, accueil des
     // moins de 3 ans par INTERCOMMUNALITÉ, repères à année égale.
     enfance: fichier.enfance || null,
+    // Qualifié au build (`export_lovac`) : « s » voyage tel quel, et les
+    // ruptures de méthode avec la série.
+    lovac: fichier.lovac || null,
     // Section → dossier thématique publié sur le même sujet (lot 8).
     dossiers: dossiersDeLaPage('/territoire'),
   }

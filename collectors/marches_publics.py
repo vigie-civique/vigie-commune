@@ -4,7 +4,10 @@ marches_publics.py — Marchés publics de la commune et de son EPCI
 Sources :
   1. DECP (Données Essentielles de la Commande Publique) — data.gouv.fr
      Fichiers JSON mensuels, filtrés par SIRET acheteur.
-     Seuil de publication : ≥ 40 000 € (services/fournitures), ≥ 90 000 € (travaux).
+     Seuil de publication : ≥ 40 000 € HT, quel que soit le type de marché
+     (art. R2196-1 du code de la commande publique, depuis le 01/01/2024).
+     Entre 25 000 et 40 000 € HT, l'acheteur publie seulement une liste annuelle,
+     sur le support de son choix ; sous 25 000 € HT, aucune obligation.
      Note : une commune de 1 300 hab. publie peu dans le DECP — l'EPCI est la
      source principale. Ces trois requêtes (DECP consolidé, DECP v3, DECP
      augmenté) sont nationales : elles fonctionnent sans adaptation locale.
@@ -40,7 +43,6 @@ from .config import (
     HEADERS, NATIONAL_STORE, REQUEST_DELAY
 )
 from .db import transaction, upsert_entity
-from .archive import archive_fetch
 from .national_store import (copier_atomiquement, est_frais,
                              magasin_ecrivable)
 
@@ -299,27 +301,6 @@ def fetch_json(url: str, timeout: int = 30) -> dict | list | None:
             return json.loads(r.read().decode("utf-8", errors="replace"))
     except Exception as e:
         print(f"  [erreur JSON] {url[:60]} → {e}")
-        _echecs_reseau.append(f"{url[:80]} → {e}")
-        return None
-
-
-def fetch_html(url: str, timeout: int = 15) -> str | None:
-    req = urllib.request.Request(url, headers={
-        **HEADERS,
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 Chrome/122.0 Safari/537.36"
-        )
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            raw = r.read()
-            from urllib.parse import urlparse
-            archive_fetch(f"web:{urlparse(url).netloc}", url, raw,
-                          r.headers.get_content_type(), r.status)
-            return raw.decode("utf-8", errors="replace")
-    except Exception as e:
-        print(f"  [erreur HTML] {url[:60]} → {e}")
         _echecs_reseau.append(f"{url[:80]} → {e}")
         return None
 
@@ -1268,7 +1249,7 @@ def main(
     print(f"\n[marches_publics] {inserted}/{len(all_marches)} insérés")
     if inserted == 0 and source in ("all", "decp"):
         print(
-            "  Note : le DECP couvre les contrats ≥ 40 000 € (services) / 90 000 € (travaux).\n"
+            "  Note : le DECP ne couvre que les marchés ≥ 40 000 € HT (tous types).\n"
             f"  Les marchés sous seuil de {COMMUNE_NAME} n'y figurent pas — normal pour une petite commune."
         )
     # Après le commit : les marchés lus sont gardés, mais le run est marqué

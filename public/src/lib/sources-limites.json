@@ -1,0 +1,187 @@
+{
+  "_lisez_moi": [
+    "Sources et limites de chaque bloc de donnée des pages carrefour (/territoire, /argent, /qui-decide, accueil).",
+    "Une entrée par bloc, lue par le seul composant SourcesLimites.svelte : aucune page n'écrit ces textes elle-même.",
+    "`source` : le producteur et le jeu. `millesime` : l'édition affichée, quand la page ne la passe pas elle-même.",
+    "`limite` : UNE phrase, ce que le chiffre ne dit pas — sans redire l'encadré « Ce que ce chiffre ne dit pas » que la page affiche déjà.",
+    "`sondage` : « principale » ou « complementaire » quand le bloc montre des effectifs du recensement ; le composant ajoute alors le seuil de 200 de l'INSEE là où le recensement procède par sondage.",
+    "tests/test_sources_limites.py échoue si un bloc des pages carrefour n'a pas d'entrée, ou si une entrée ne sert plus."
+  ],
+  "blocs": {
+    "territoire.population": {
+      "source": "INSEE, recensements de la population (séries historiques) et populations légales",
+      "lien": "https://api.insee.fr/melodi/catalog/DS_RP_SERIE_HISTORIQUE",
+      "millesime": "dernier recensement publié",
+      "limite": "La population légale en vigueur une année décrit la commune trois ans plus tôt : le chiffre le plus récent a donc déjà quelques années.",
+      "sondage": "principale"
+    },
+    "territoire.logement": {
+      "source": "INSEE, recensements de la population (séries historiques)",
+      "lien": "https://api.insee.fr/melodi/catalog/DS_RP_SERIE_HISTORIQUE",
+      "millesime": "recensements de 1968 au dernier publié",
+      "limite": "La catégorie est celle que le recensement a attribuée l'année de l'enquête : un meublé de tourisme y compte comme résidence secondaire, et un changement d'usage depuis n'y figure pas.",
+      "sondage": "principale"
+    },
+    "territoire.vacance": {
+      "source": "Cerema pour le ministère de la Transition écologique, base LOVAC (fichiers fiscaux et fonciers)",
+      "lien": "https://www.data.gouv.fr/datasets/logements-vacants-du-parc-prive-par-commune-departement-region-france-de-2020-a-2026",
+      "millesime": "millésimes 2020 à 2026",
+      "limite": "Un logement vacant compte une fois par millésime, sans dire depuis quand au-delà de deux ans, ni pourquoi il est vide."
+    },
+    "territoire.ages": {
+      "source": "INSEE, recensement de la population, exploitation principale",
+      "lien": "https://api.insee.fr/melodi/catalog/DS_RP_POPULATION_PRINC",
+      "limite": "La répartition au dernier recensement publié : dans une petite commune, l'arrivée de quelques familles suffit à déplacer une tranche.",
+      "sondage": "principale"
+    },
+    "territoire.niveau-de-vie": {
+      "source": "INSEE, dispositif FiLoSoFi (revenus fiscaux et sociaux)",
+      "lien": "https://api.insee.fr/melodi/catalog/DS_FILOSOFI_CC",
+      "limite": "Une médiane ne dit rien des écarts : deux communes au même niveau médian peuvent compter très différemment de ménages pauvres. Les plus petites communes sont sous secret, donc absentes."
+    },
+    "territoire.ecoles": {
+      "source": "Ministère de l'Éducation nationale, effectifs par école (constat de rentrée) et indice de position sociale",
+      "lien": "https://data.education.gouv.fr/explore/dataset/fr-en-ecoles-effectifs-nb_classes/",
+      "millesime": "rentrées publiées",
+      "limite": "Le constat se fait à la rentrée : les arrivées et les départs en cours d'année n'y sont pas."
+    },
+    "territoire.accueil": {
+      "source": "Caisse nationale des allocations familiales, capacité théorique d'accueil du jeune enfant",
+      "lien": "https://data.caf.fr/",
+      "limite": "Seuls les modes d'accueil formels y sont (crèche, assistante maternelle, salariée à domicile, école) : la garde par la famille ou un voisin n'y figure pas."
+    },
+    "territoire.equipements": {
+      "source": "INSEE, base permanente des équipements (BPE)",
+      "lien": "https://api.insee.fr/melodi/catalog/DS_BPE",
+      "limite": "Un équipement compté est un équipement présent dans les répertoires au 1er janvier : ni ses horaires, ni sa taille, ni son ouverture à l'année ne sont dits."
+    },
+    "territoire.desserte": {
+      "source": "transport.data.gouv.fr (fichiers horaires des réseaux) et Agence nationale de la cohésion des territoires (programmes)",
+      "lien": "https://transport.data.gouv.fr/",
+      "limite": "Un arrêt déclaré ne dit pas combien de passages il reçoit, ni s'il ne sert qu'aux transports scolaires."
+    },
+    "territoire.telecoms": {
+      "source": "ARCEP : Ma connexion internet, déploiements et qualité de la fibre, sites mobiles et sites indisponibles",
+      "lien": "https://data.arcep.fr/",
+      "millesime": "trimestre le plus récent ; pannes : relevé quotidien",
+      "limite": "Éligible ne veut pas dire raccordé : un local peut l'être à la fibre sans qu'aucun abonnement n'y soit pris."
+    },
+    "accueil.deliberations": {
+      "source": "Procès-verbaux et délibérations publiés par la commune, lus par le site",
+      "limite": "Ne compte que ce que la commune a mis en ligne et que le site a retrouvé."
+    },
+    "accueil.seances": {
+      "source": "Procès-verbaux et comptes rendus publiés par la commune et par l'intercommunalité",
+      "limite": "Une séance dont aucun document n'est publié n'apparaît pas ; « en clair » veut dire relue par la vigie."
+    },
+    "accueil.budget": {
+      "source": "OFGL, d'après les comptes de gestion de la DGFiP",
+      "lien": "https://data.ofgl.fr/",
+      "millesime": "dernier exercice publié",
+      "limite": "Budget principal seulement : les budgets annexes (eau, assainissement…) n'y sont pas."
+    },
+    "accueil.foncier-bati": {
+      "source": "DGFiP, fiscalité locale des particuliers",
+      "lien": "https://data.economie.gouv.fr/explore/dataset/fiscalite-locale-des-particuliers/",
+      "limite": "Le taux voté par la commune, pas ce que paie un propriétaire : la cotisation applique ce taux et ceux de l'intercommunalité et des syndicats à la valeur locative du bien."
+    },
+    "accueil.marches": {
+      "source": "Données essentielles de la commande publique (DECP) et avis de marché",
+      "lien": "https://www.data.gouv.fr/datasets/donnees-essentielles-de-la-commande-publique-fichiers-consolides",
+      "limite": "Sous 25 000 € HT, rien n'oblige la commune à publier un marché ; entre 25 000 et 40 000 € HT, une liste annuelle suffit. Ces marchés manquent ici, sauf ceux qu'un procès-verbal relu mentionne."
+    },
+    "accueil.ventes": {
+      "source": "DGFiP, demandes de valeurs foncières (DVF), via le Cerema",
+      "lien": "https://www.data.gouv.fr/datasets/demandes-de-valeurs-foncieres-geolocalisees",
+      "limite": "Seules les mutations à titre onéreux y sont (ventes, mais aussi échanges, adjudications, expropriations), ni les donations ni les successions ; la dernière année est encore incomplète."
+    },
+    "accueil.acteurs": {
+      "source": "INSEE (SIRENE), répertoire national des associations (RNA), annuaires des services publics et OpenStreetMap",
+      "limite": "Être inscrit au répertoire ne prouve pas une activité : une association peut rester déclarée des années sans plus rien faire."
+    },
+    "accueil.habitants": {
+      "source": "INSEE, populations légales et recensements",
+      "lien": "https://api.insee.fr/melodi/catalog/DS_POPULATIONS_REFERENCE",
+      "limite": "La population légale en vigueur une année décrit la commune trois ans plus tôt : le chiffre le plus récent a donc déjà quelques années."
+    },
+    "accueil.secondaires": {
+      "source": "INSEE, recensement de la population",
+      "lien": "https://api.insee.fr/melodi/catalog/DS_RP_SERIE_HISTORIQUE",
+      "limite": "Résidences secondaires et logements occasionnels réunis, au dernier recensement publié : un changement d'usage depuis n'y figure pas encore."
+    },
+    "accueil.eau": {
+      "source": "Office français de la biodiversité, observatoire SISPEA (déclaré par chaque service d'eau)",
+      "lien": "https://www.services.eaufrance.fr/",
+      "limite": "Eau potable seule : l'assainissement, facturé en plus, n'y est pas. Prix au 1er janvier suivant l'exercice, pour 120 m³ par an, déclaré par le service avec un à deux ans de retard."
+    },
+    "accueil.autorisations": {
+      "source": "Ministère de la Transition écologique (SDES), base Sitadel",
+      "lien": "https://www.data.gouv.fr/datasets/liste-des-permis-de-construire-et-autres-autorisations-durbanisme",
+      "limite": "Des autorisations accordées, et seulement celles qui créent un logement ou un local, aménagent ou démolissent ; accordé n'est pas construit, et les dernières années sont incomplètes."
+    },
+    "accueil.pieces": {
+      "source": "Mesure du site : actes publiés rattachés à leur document",
+      "limite": "Mesure ce que le site a pu rattacher, pas tout ce que la commune a décidé."
+    },
+    "argent.resume": {
+      "source": "OFGL, d'après les comptes de gestion de la DGFiP",
+      "lien": "https://data.ofgl.fr/",
+      "millesime": "dernier exercice publié",
+      "limite": "Fonctionnement du budget principal : l'investissement et les budgets annexes n'y sont pas."
+    },
+    "argent.impots": {
+      "source": "DGFiP, fiscalité locale des particuliers et des entreprises",
+      "lien": "https://data.economie.gouv.fr/explore/dataset/fiscalite-locale-des-particuliers/",
+      "limite": "Des taux, pas des montants payés : la base imposable change d'un logement à l'autre."
+    },
+    "argent.subventions": {
+      "source": "Délibérations de la commune ; DGCL et ministère de la Transition écologique (dotations, Fonds vert) ; annexe « jaune » au projet de loi de finances ; subventions publiées par les collectivités",
+      "limite": "Une subvention n'apparaît que si un acte ou un fichier public la mentionne ; un bénéficiaire recensé n'est pas un montant connu."
+    },
+    "argent.marches": {
+      "source": "Données essentielles de la commande publique (DECP) et avis de marché",
+      "lien": "https://www.data.gouv.fr/datasets/donnees-essentielles-de-la-commande-publique-fichiers-consolides",
+      "limite": "Sous 25 000 € HT, rien n'oblige la commune à publier un marché ; entre 25 000 et 40 000 € HT, une liste annuelle suffit. Ces marchés manquent ici, sauf ceux qu'un procès-verbal relu mentionne."
+    },
+    "argent.foncier": {
+      "source": "DGFiP, demandes de valeurs foncières (DVF), via le Cerema",
+      "lien": "https://www.data.gouv.fr/datasets/demandes-de-valeurs-foncieres-geolocalisees",
+      "limite": "Seules les mutations à titre onéreux y sont (ventes, mais aussi échanges, adjudications, expropriations), ni les donations ni les successions ; la dernière année est encore incomplète."
+    },
+    "qui-decide.elections": {
+      "source": "Ministère de l'Intérieur, résultats des élections municipales",
+      "limite": "Les résultats publiés par le ministère, sous réserve des recours ; pas ce que les listes promettaient.",
+      "lien": "https://www.data.gouv.fr/datasets/elections-municipales-2026-resultats-du-premier-tour"
+    },
+    "qui-decide.elus": {
+      "source": "Ministère de l'Intérieur (DGCL), Répertoire national des élus",
+      "lien": "https://www.data.gouv.fr/datasets/repertoire-national-des-elus-1",
+      "limite": "Le fichier publié n'est actualisé que chaque trimestre : une démission récente peut ne pas y figurer encore."
+    },
+    "qui-decide.intercommunalite": {
+      "source": "Procès-verbaux publiés par l'intercommunalité, et base BANATIC pour ses compétences",
+      "limite": "Ne compte que les actes que l'intercommunalité a mis en ligne et que le site a retrouvés."
+    },
+    "qui-decide.conseils-en-clair": {
+      "source": "Relecture des séances par la vigie locale",
+      "limite": "Une séance relue l'est d'après ses documents publiés, pas d'après ce qui s'est dit dans la salle."
+    },
+    "qui-decide.deliberations": {
+      "source": "Procès-verbaux et délibérations publiés par la commune, lus par le site",
+      "limite": "Ne compte que ce que la commune a mis en ligne et que le site a retrouvé."
+    },
+    "qui-decide.liens": {
+      "source": "Actes publics et registres officiels, liens vérifiés un à un",
+      "limite": "Un lien documenté établit une relation, jamais une influence ; un lien que rien de public n'atteste n'y est pas."
+    },
+    "qui-decide.elus-et-structures": {
+      "source": "Déports et mentions relevés dans les procès-verbaux, croisés avec les subventions",
+      "limite": "Une situation documentée n'est pas une faute : c'est un fait public à connaître."
+    },
+    "qui-decide.transparence": {
+      "source": "HATVP ; DILA, fonds JADE",
+      "lien": "https://www.hatvp.fr/",
+      "limite": "Le maire ne déclare qu'au-delà de 20 000 habitants, le président de l'intercommunalité au-delà de 20 000 habitants ou de 5 M€ de recettes ; JADE n'a aucun jugement de tribunal administratif."
+    }
+  }
+}
