@@ -67,6 +67,7 @@ from collectors.urbanisme_sitadel import run as run_sitadel
 from collectors.plu           import run as run_plu
 from collectors.equipements   import run as run_equipements
 from collectors.dpe           import run as run_dpe
+from collectors.lovac         import run as run_lovac
 from collectors.mobilite      import run as run_mobilite
 from collectors.sante         import run as run_sante
 from collectors.cadastre      import run as run_cadastre
@@ -234,6 +235,9 @@ STEPS = {
     # Agrégats seulement : le collecteur ne rapatrie aucune ligne de diagnostic,
     # donc aucune adresse de logement.
     "dpe":      ("État énergétique du parc (DPE, ADEME)", run_dpe),
+    # La vacance de plus de deux ans, que le recensement ne distingue pas. Le
+    # fichier des communes seulement : aucune adresse de logement n'entre.
+    "lovac":    ("Logements vacants du parc privé (LOVAC, Cerema)", run_lovac),
     "mobilite": ("Transport déclaré et dispositifs de l'État", run_mobilite),
     # Les murs du soin — pharmacies, EHPAD, laboratoires. Les professionnels,
     # eux, se comptent dans `equipements` (BPE, domaine D).

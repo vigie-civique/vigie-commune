@@ -29,11 +29,6 @@ RAW_DIR = ROOT / "data" / "raw"
 _EXT = {"html": "html", "pdf": "pdf", "json": "json", "csv": "csv", "txt": "txt",
         "xlsx": "xlsx"}
 
-# UA navigateur pour les sources anti-bot (emploi-collectivites = 403 sinon)
-_BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36")
-
-
 def _ssl_ctx():
     """Contexte SSL : vérifié via certifi si dispo, sinon tolérant (archivage de pages publiques)."""
     try:
@@ -148,7 +143,7 @@ def fetch_json(url: str, *, source: str, headers: dict | None = None,
 def archive_url(conn, url: str, *, source: str, title: str | None = None,
                 timeout: int = 20, metadata: dict | None = None) -> dict | None:
     """Télécharge une URL et l'archive. Retourne le dict archive_bytes ou None si échec."""
-    req = urllib.request.Request(url, headers={**HEADERS, "User-Agent": _BROWSER_UA})
+    req = urllib.request.Request(url, headers=HEADERS)
     raw = ct = status = None
     for ctx in (_ssl_ctx(), ssl._create_unverified_context()):  # retry SSL non-vérifié si chaîne incomplète
         try:

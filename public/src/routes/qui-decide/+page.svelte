@@ -1,6 +1,7 @@
 <script>
   import { COMMUNE_DE, EPCI, EPCI_COURT, SITE_NOM } from '#lib/instance.js'
   import Icon from '#lib/components/Icon.svelte'
+  import SourcesLimites from '#lib/components/SourcesLimites.svelte'
 
   // Hub « Qui décide ? » — la gouvernance et les liens documentés entre acteurs.
   // « Réseaux de pouvoir » promettait plus que les données ne montrent (mandats,
@@ -16,29 +17,29 @@
   $: justice = data.justice || []
 
   $: cartes = [
-    { icone: 'elections', titre: 'Les élections', href: '/elections',
+    { icone: 'elections', titre: 'Les élections', href: '/elections', bloc: 'qui-decide.elections',
       sub: "Participation, voix et sièges : d'où vient le mandat de ceux qui décident.",
       valeur: nombre(data.communes), unite: 'communes · municipales 2026' },
-    { icone: 'conseil', titre: 'Les conseils municipaux', href: '/elus',
+    { icone: 'conseil', titre: 'Les conseils municipaux', href: '/elus', bloc: 'qui-decide.elus',
       sub: `Maires, adjoints, conseillers et commissions ${COMMUNE_DE} et des communes de l'intercommunalité.`,
       valeur: nombre(data.elus), unite: 'élus en fonction' },
-    { icone: 'intercommunalite', titre: `L'intercommunalité (${EPCI_COURT})`, href: '/com-com',
+    { icone: 'intercommunalite', titre: `L'intercommunalité (${EPCI_COURT})`, href: '/com-com', bloc: 'qui-decide.intercommunalite',
       sub: `Délégués ${COMMUNE_DE}, compétences, délibérations communautaires.`,
       valeur: nombre(data.deliberationsInterco), unite: 'actes votés par la CC' },
-    { icone: 'conseil', titre: 'Les conseils en clair', href: '/conseils',
+    { icone: 'conseil', titre: 'Les conseils en clair', href: '/conseils', bloc: 'qui-decide.conseils-en-clair',
       sub: 'Chaque séance relue en trois feuilles : ce qui était annoncé, ce qui a été décidé, ce que les documents ont de faux.',
       // Zéro dit quelque chose ici : aucune séance n'est encore relue.
       valeur: nombre(data.seancesRelues), unite: data.seancesRelues > 1 ? 'séances relues' : 'séance relue' },
-    { icone: 'document', titre: 'Délibérations & décisions', href: '/deliberations',
+    { icone: 'document', titre: 'Délibérations & décisions', href: '/deliberations', bloc: 'qui-decide.deliberations',
       sub: 'La chronologie des votes du conseil municipal.',
       valeur: nombre(data.deliberations), unite: 'actes du conseil municipal' },
     // « Graphe d'influence » faisait franchir au lecteur une étape que les
     // données ne permettent pas : une relation documentée n'établit pas une
     // influence. Le titre dit maintenant ce que la page montre réellement.
-    { icone: 'graphe', titre: 'Les liens entre acteurs', href: '/graphe',
+    { icone: 'graphe', titre: 'Les liens entre acteurs', href: '/graphe', bloc: 'qui-decide.liens',
       sub: 'Qui est lié à qui, relations vérifiées uniquement.',
       valeur: nombre(data.relations), unite: 'liens vérifiés' },
-    { icone: 'recherche', titre: 'Élus et structures subventionnées', href: '/elus-et-structures',
+    { icone: 'recherche', titre: 'Élus et structures subventionnées', href: '/elus-et-structures', bloc: 'qui-decide.elus-et-structures',
       sub: "Quand un élu dirige une structure qui reçoit de l'argent public : les déports constatés.",
       // « cas » + compteur se lit comme un score. « Situations documentées »
       // dit la même chose sans compter des points.
@@ -73,6 +74,7 @@
     {/each}
   </div>
 
+  <SourcesLimites blocs={cartes.map((c) => c.bloc)} />
   <h2>Transparence et contentieux</h2>
   <div class="bloc">
     <h3>Déclarations d'intérêts</h3>
@@ -92,8 +94,10 @@
       </ul>
     {:else}
       <p class="dit">Aucun responsable public n'est ici soumis à l'obligation de
-        déclarer ses intérêts à la Haute Autorité : le seuil est de
-        20 000 habitants pour les communes comme pour les intercommunalités.
+        déclarer ses intérêts à la Haute Autorité : le maire n'y est tenu
+        qu'au-delà de 20 000 habitants, le président de l'intercommunalité
+        au-delà de 20 000 habitants ou de 5 millions d'euros de recettes de
+        fonctionnement.
         <b>Une liste vide ne signale donc aucun manquement</b> : elle dit que la
         loi n'exige rien à cette échelle.</p>
     {/if}
@@ -111,9 +115,12 @@
       </ul>
     {:else}
       <p class="dit">Aucune décision citant la commune n'a été relevée dans les
-        publications récentes du fonds JADE (juridictions administratives).</p>
+        publications récentes du fonds JADE, qui réunit les décisions du
+        Conseil d'État et une sélection d'arrêts d'appel, sans les jugements des
+        tribunaux administratifs.</p>
     {/if}
   </div>
+  <SourcesLimites bloc="qui-decide.transparence" />
 </section>
 
 <style>

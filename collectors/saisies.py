@@ -603,8 +603,16 @@ def import_saisies(chemin: Path | None = None) -> dict[str, int]:
         print("[saisies] aucune saisie — rien à rejouer.")
         return {"ecrites": 0, "retirees": 0, "ignorees": 0}
 
-    from .db import pivot_ids
+    from .db import elargir_statut_flux, get_conn, pivot_ids
     ecrites = retirees = ignorees = 0
+
+    # L'atelier rejoue les saisies sans passer par `init_db` : la contrainte
+    # d'une base ancienne s'élargit donc ici aussi.
+    conn = get_conn()
+    try:
+        elargir_statut_flux(conn)
+    finally:
+        conn.close()
 
     with transaction() as conn:
         commune_id = pivot_ids(conn).get("commune")

@@ -33,8 +33,8 @@ from pathlib import Path
 
 from .archive import archive_fetch
 from .connecteurs.base import date_fr
-from .config import (COMMUNES, DEPARTEMENT, EPCI_NOM, PREFECTURE_RAA_PATH,
-                     PREFECTURE_URL)
+from .config import (COMMUNES, DEPARTEMENT, EPCI_NOM, HEADERS,
+                     PREFECTURE_RAA_PATH, PREFECTURE_URL)
 from .db import get_conn
 
 BASE = PREFECTURE_URL
@@ -49,8 +49,6 @@ MAX_NIVEAUX = 3
 # n'est pas optionnelle ici — elle conditionne le fait d'obtenir quoi que ce soit.
 DELAI_PAGE = 1.5
 MAX_PAGES = 400
-UA = {"User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36")}
 
 # Termes déclencheurs : les communes du registre et le nom de l'EPCI. Construit
 # depuis la config plutôt que saisi — une liste en dur ici se serait décorrélée
@@ -107,7 +105,7 @@ def _get(url: str, timeout: int = 60, tentatives: int = 3) -> bytes:
     """
     dernier = None
     for essai in range(tentatives):
-        req = urllib.request.Request(url, headers=UA)
+        req = urllib.request.Request(url, headers=HEADERS)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.read()

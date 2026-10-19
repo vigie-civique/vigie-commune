@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -133,7 +134,9 @@ def test_aucun_piege_ne_sort(piege):
 
 def test_ni_naissance_ni_piste_ni_note_de_travail(piege):
     out = piege[0]
-    tout = "\n".join(_textes(out).values())
+    # Les empreintes de `manifeste.json` (SHA-256) contiennent « 1961 » une fois
+    # sur vingt environ : on les retire avant de chercher l'année.
+    tout = re.sub(r"[0-9a-f]{32,}", "", "\n".join(_textes(out).values()))
     assert "1961" not in tout
     assert json.loads((out / "conflits.json").read_text(encoding="utf-8"))["cas"] == []
     stats = json.loads((out / "stats.json").read_text(encoding="utf-8"))

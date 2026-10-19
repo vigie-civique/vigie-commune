@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 
+from collectors.lovac import PAGE_JEU, RUPTURES, SECRET
 from scripts.snapshot.socle import (DEPARTEMENT, EPCI_SIREN_C2, INSEE_C1, TELECOMS_RAYON_KM,
                                     row, rows, table_exists, write_json)
 
@@ -387,6 +388,33 @@ def export_enfance(conn, insee: str, epci: str, departement: str) -> dict | None
     return {"insee": insee, "ecoles": ecoles, "accueil": accueil}
 
 
+def export_lovac(conn, insee: str) -> dict | None:
+    """La vacance du parc privé, millésime par millésime, et ses ruptures.
+
+    Chaque valeur sort comme le fichier l'écrit : un nombre, « s » sous le
+    secret statistique, ou rien si le millésime ne publie pas la colonne. La
+    page n'a pas à décider ce que vaut un « s » — surtout pas zéro.
+    """
+    if not table_exists(conn, "lovac_vacance"):
+        return None
+    lignes = rows(conn, """
+        SELECT millesime, indicateur, brut, valeur, source_url
+          FROM lovac_vacance WHERE insee=? ORDER BY millesime""", (insee,))
+    if not lignes:
+        return None
+    serie: dict[int, dict] = {}
+    for l in lignes:
+        serie.setdefault(l["millesime"], {"millesime": l["millesime"]})[l["indicateur"]] = \
+            SECRET if l["brut"] == SECRET else l["valeur"]
+    return {
+        "insee": insee,
+        "serie": list(serie.values()),
+        "ruptures": [{"millesime": m, "raison": r} for m, r in sorted(RUPTURES.items())],
+        "source_url": lignes[-1]["source_url"],
+        "page_jeu": PAGE_JEU,
+    }
+
+
 INSEE_PUBLIABLES = """
     SELECT insee, commune, dataset, indicateur, libelle, annee, valeur, dims
       FROM insee_indicateurs
@@ -648,6 +676,7 @@ def etape_territoire(conn, out) -> None:
         "cadastre": cadastre_resume,
         "telecoms": export_telecoms(conn, INSEE_C1, DEPARTEMENT, TELECOMS_RAYON_KM),
         "enfance": export_enfance(conn, INSEE_C1, EPCI_SIREN_C2, DEPARTEMENT),
+        "lovac": export_lovac(conn, INSEE_C1),
     })
 
 

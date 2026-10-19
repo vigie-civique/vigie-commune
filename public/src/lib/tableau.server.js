@@ -159,7 +159,7 @@ export function tableauDeBord({ lire, insee, epciCourt, aujourdhui, chiffres, in
     const raisons = []
     if (n === 0) {
       raisons.push(sourceMarches === 'absente' ? 'collecte pas encore lancée'
-                                               : "rien n'est publié sous 40 000 € HT")
+                                               : 'sous 40 000 € HT, aucun registre national')
     }
     const lus = n === 0 && extraitsMarches?.cas === 'en_attente' ? extraitsMarches.enAttente : 0
     tuiles.push({

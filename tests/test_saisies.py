@@ -418,3 +418,91 @@ class TestEmplacement:
             data["saisies"].append({"id": "b"})
         ids = [s["id"] for s in json.loads(nouveau.read_text(encoding="utf-8"))["saisies"]]
         assert ids == ["a", "b"]
+
+
+class TestStatutDuFlux:
+    """17/10/2026 : le formulaire propose cinq états depuis le 23/08, la base
+    n'en admettait que deux — la saisie partait au fichier et la base la
+    refusait, à chaque passe."""
+
+    ANCIEN = "CHECK(statut IN ('realise','demande'))"
+
+    @pytest.fixture
+    def base_ancienne(self, atelier, schema_sql):
+        """La base d'une instance installée avant le correctif : l'ancien CHECK,
+        un flux déjà en place, et les vues qui lisent la table."""
+        import sqlite3
+
+        from collectors.db import STATUTS_FLUX
+        nouveau = "CHECK(statut IN (" + ",".join(f"'{s}'" for s in STATUTS_FLUX) + "))"
+        assert nouveau in schema_sql
+        atelier["db"].unlink()
+        conn = sqlite3.connect(atelier["db"])
+        conn.executescript(schema_sql.replace(nouveau, self.ANCIEN))
+        conn.execute("INSERT INTO financial_flows(type, year, amount, statut) "
+                     "VALUES('DGF', 2025, 1000, 'realise')")
+        conn.commit()
+        conn.close()
+        return atelier
+
+    def _sql_de_la_table(self, atelier):
+        return atelier["lire"]("SELECT sql FROM sqlite_master "
+                               "WHERE type='table' AND name='financial_flows'")[0]["sql"]
+
+    @pytest.mark.parametrize("statut", ["vote", "engage", "paye", "demande", "annule"])
+    def test_chaque_etat_propose_par_le_formulaire_arrive_en_base(self, base_ancienne, statut):
+        from collectors.saisies import CHAMPS_SAISIE, import_saisies
+
+        assert statut in CHAMPS_SAISIE["flux"]["statut"][0]
+        base_ancienne["ecrire"](saisie_flux(valeurs={**saisie_flux()["valeurs"],
+                                                     "statut": statut}))
+        assert import_saisies()["ecrites"] == 1
+        lignes = base_ancienne["lire"]("SELECT statut FROM financial_flows "
+                                       "WHERE source='atelier:a1b2c3d4'")
+        assert lignes == [{"statut": statut}]
+
+    def test_l_elargissement_garde_les_lignes_les_index_et_se_rejoue(self, base_ancienne):
+        import sqlite3
+
+        from collectors.db import elargir_statut_flux
+        conn = sqlite3.connect(base_ancienne["db"])
+        try:
+            index_avant = conn.execute("SELECT name FROM sqlite_master WHERE type='index' "
+                                       "AND tbl_name='financial_flows' ORDER BY name").fetchall()
+            assert elargir_statut_flux(conn) is True
+            assert elargir_statut_flux(conn) is False          # déjà fait : rien
+            assert conn.execute("SELECT name FROM sqlite_master WHERE type='index' "
+                                "AND tbl_name='financial_flows' ORDER BY name"
+                                ).fetchall() == index_avant
+        finally:
+            conn.close()
+        assert self.ANCIEN not in self._sql_de_la_table(base_ancienne)
+        assert base_ancienne["lire"]("SELECT type, statut FROM financial_flows") == [
+            {"type": "DGF", "statut": "realise"}]
+        # Les vues qui lisent la table se lisent toujours.
+        assert base_ancienne["lire"]("SELECT financial_flows FROM v_stats")[0]["financial_flows"] == 1
+
+    def test_une_autre_connexion_ouverte_voit_la_nouvelle_contrainte(self, base_ancienne):
+        """L'atelier garde des connexions ouvertes pendant que la collecte migre."""
+        import sqlite3
+
+        from collectors.db import elargir_statut_flux
+        deja_ouverte = sqlite3.connect(base_ancienne["db"])
+        deja_ouverte.execute("SELECT COUNT(*) FROM financial_flows").fetchone()
+        migrante = sqlite3.connect(base_ancienne["db"])
+        elargir_statut_flux(migrante)
+        migrante.close()
+        deja_ouverte.execute("INSERT INTO financial_flows(type, year, amount, statut) "
+                             "VALUES('subvention', 2026, 10, 'paye')")
+        deja_ouverte.commit()
+        deja_ouverte.close()
+
+    def test_un_etat_hors_liste_reste_refuse(self, atelier):
+        import sqlite3
+        conn = sqlite3.connect(atelier["db"])
+        try:
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute("INSERT INTO financial_flows(type, year, amount, statut) "
+                             "VALUES('x', 2026, 1, 'promis')")
+        finally:
+            conn.close()

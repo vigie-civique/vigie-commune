@@ -2,6 +2,7 @@
   import { COMMUNE, COMMUNE_DE, EPCI, EPCI_COURT } from '#lib/instance.js'
   import Icon from '#lib/components/Icon.svelte'
   import Mini from '#lib/components/Mini.svelte'
+  import SourcesLimites from '#lib/components/SourcesLimites.svelte'
 
   // Accueil refondu le 11/08/2026. C'était une carte plein écran : 1 135 points
   // en quatre couleurs, un encart flottant, et rien qui dise ce qu'est ce site
@@ -87,7 +88,7 @@
 {#if dernieres?.length || prochains?.length}
   <section class="conseil">
     <header>
-      <h2>Les conseils en clair</h2>
+      <h2 data-sans-donnees>Les conseils en clair</h2>
       <!-- Le lien dit l'année tant que les séances publiées n'en couvrent
            qu'une : « toutes » promettrait un historique qui n'y est pas. -->
       <a class="tout" href="/conseils">Toutes les séances{anneesSeances?.length === 1 ? ` ${anneesSeances[0]}` : ''} <Icon name="fleche" size={14} /></a>
@@ -139,7 +140,7 @@
 {#if !dossiers?.length && sujets?.length}
   <section class="dossiers">
     <header>
-      <h2>Ce que les données disent de…</h2>
+      <h2 data-sans-donnees>Ce que les données disent de…</h2>
       <a class="tout" href="/dossiers">Dossiers thématiques <Icon name="fleche" size={14} /></a>
     </header>
     <p class="chapeau-dossiers">Aucun dossier n'est encore écrit ici. Sur ces sujets, les sources publiques ont déjà des faits&nbsp;:</p>
@@ -153,7 +154,7 @@
 {#if dossiers?.length}
   <section class="dossiers">
     <header>
-      <h2>Dossiers thématiques</h2>
+      <h2 data-sans-donnees>Dossiers thématiques</h2>
       <a class="tout" href="/dossiers">Tous les dossiers <Icon name="fleche" size={14} /></a>
     </header>
     <ul>
@@ -190,6 +191,7 @@
       Chiffres de la commune.
       <a href="/com-com">Ceux de la {EPCI_COURT}</a> · <a href="/methode">Méthode</a>
     </p>
+    <SourcesLimites blocs={tableau.map((t) => `accueil.${t.cle}`)} />
   </section>
 {/if}
 
@@ -202,7 +204,7 @@
 {#if recents.length}
   <section class="flux">
     <header>
-      <h2>Ce que la commune vient de décider</h2>
+      <h2 data-sans-donnees>Ce que la commune vient de décider</h2>
       {#if arreteLe}<span class="arrete">données arrêtées au {dateLongue(arreteLe)}</span>{/if}
       <a class="tout" href="/nouveautes">Tout le flux <Icon name="fleche" size={14} /></a>
     </header>
@@ -247,7 +249,7 @@
 {#if agenda?.length}
   <section class="flux agenda">
     <header>
-      <h2>Et dans la vie de la commune</h2>
+      <h2 data-sans-donnees>Et dans la vie de la commune</h2>
       <a class="tout" href="/vie-locale">L'agenda <Icon name="fleche" size={14} /></a>
     </header>
     <ul>

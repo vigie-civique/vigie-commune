@@ -181,6 +181,7 @@ PROFONDEUR_STEP = {
     "plu":         "fond",          # document d'urbanisme déposé au GPU
     "equipements": "fond",          # commerces, santé, écoles (BPE)
     "dpe":         "fond",          # état énergétique du parc de logements
+    "lovac":       "fond",          # logements vacants du parc privé
     "mobilite":    "fond",          # AOM, arrêts déclarés, dispositifs de l'État
     "sante":       "fond",          # établissements sanitaires et médico-sociaux
     "cadastre":    "fond",          # parcellaire — une commune, un fichier
@@ -471,6 +472,8 @@ STEP_META = {
     "equipements":(365, 15, "equipements",       ""),
     # L'ADEME publie en continu : un mois suffit à voir la source se taire.
     "dpe":        (30,  15, "dpe_couverture",    ""),
+    # Le Cerema dépose un millésime par an, à l'été.
+    "lovac":      (365, 15, "lovac_vacance",     ""),
     # Un GTFS se republie en continu, la table de l'ANCT quelques fois par an :
     # 30 jours suit le plus vif des deux.
     "mobilite":   (30,  18, "mobilite_aom",      ""),

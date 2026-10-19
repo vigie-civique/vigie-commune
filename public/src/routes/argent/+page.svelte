@@ -1,6 +1,7 @@
 <script>
   import { COMMUNE_DE, SITE_NOM } from '#lib/instance.js'
   import Icon from '#lib/components/Icon.svelte'
+  import SourcesLimites from '#lib/components/SourcesLimites.svelte'
 
   // Hub « Où va l'argent ? » — les finances rendues lisibles.
   // Modèle NosFinancesLocales / Éclaireur Public : pédagogique, pas un export
@@ -16,21 +17,21 @@
     : `${Math.round(n / 1e3).toLocaleString('fr-FR')} k€`
 
   $: cartes = [
-    { icone: 'impots', titre: 'Les impôts locaux', href: '/impots',
+    { icone: 'impots', titre: 'Les impôts locaux', href: '/impots', bloc: 'argent.impots',
       sub: "Taux votés par la commune et taux réellement payés, comparés aux communes de l'intercommunalité.",
       valeur: nombre(data.communes), unite: 'communes comparées' },
-    { icone: 'argent', titre: 'Le budget de la commune', href: '/budgets',
+    { icone: 'argent', titre: 'Le budget de la commune', href: '/budgets', bloc: 'argent.resume',
       sub: 'Recettes, dépenses, épargne, dette, en clair, pas en jargon comptable.',
       valeur: montant(data.recettes), unite: `de recettes de fonctionnement en ${data.annee}` },
-    { icone: 'subventions', titre: 'Subventions & flux financiers', href: '/finances',
+    { icone: 'subventions', titre: 'Subventions & flux financiers', href: '/finances', bloc: 'argent.subventions',
       sub: "Qui reçoit l'argent public : subventions, dotations, cessions de patrimoine.",
       valeur: nombre(data.beneficiaires), unite: 'bénéficiaires recensés' },
-    { icone: 'marches', titre: 'Marchés publics', href: '/marches',
+    { icone: 'marches', titre: 'Marchés publics', href: '/marches', bloc: 'argent.marches',
       sub: 'Qui obtient les marchés de la commune : travaux, études, fournitures.',
       valeur: nombre(data.marches),
       unite: `marché${data.marches > 1 ? 's' : ''} attribué${data.marches > 1 ? 's' : ''}`
         + (data.avis ? ` · ${nombre(data.avis)} avis publiés` : '') },
-    { icone: 'urbanisme', titre: 'Foncier & urbanisme', href: '/urbanisme',
+    { icone: 'urbanisme', titre: 'Foncier & urbanisme', href: '/urbanisme', bloc: 'argent.foncier',
       sub: "Mutations immobilières (DVF) et le document d'urbanisme qui règle la construction.",
       valeur: nombre(data.dvf), unite: data.dvfPeriode ? `transactions · ${data.dvfPeriode}` : 'transactions' },
     { icone: 'comprendre', titre: 'Comprendre le budget', href: '/comprendre/budget',
@@ -72,6 +73,10 @@
       </a>
     {/each}
   </div>
+  <!-- Une ligne pour toute la grille : un repli sous chaque carte doublerait
+       la page pour un détail que peu ouvrent. La fiche pédagogique n'a pas de
+       chiffre, donc pas de source. -->
+  <SourcesLimites blocs={cartes.filter((c) => c.bloc).map((c) => c.bloc)} />
 </section>
 
 <style>

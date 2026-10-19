@@ -171,6 +171,54 @@ def _rattraper_colonnes(conn) -> None:
         print(f"[db] colonne ajoutée : {table}.{colonne}")
 
 
+# 17/10/2026 — Le formulaire de saisie propose depuis le 23/08 cinq états pour
+# un flux (demandé, voté, engagé, payé, annulé : collectors/etat_flux.py), mais
+# la contrainte de `financial_flows.statut` n'admettait que 'realise' et
+# 'demande'. Toute saisie d'un autre état était écrite dans le fichier de
+# saisies, refusée par la base, puis retentée à chaque passe.
+STATUTS_FLUX = ("realise", "demande", "vote", "engage", "paye", "annule")
+_CHECK_STATUT_ANCIEN = re.compile(
+    r"CHECK\s*\(\s*statut\s+IN\s*\(\s*'realise'\s*,\s*'demande'\s*\)\s*\)", re.I)
+
+
+def elargir_statut_flux(conn) -> bool:
+    """Élargit la contrainte de `financial_flows.statut` d'une base existante.
+
+    `CREATE TABLE IF NOT EXISTS` ne touche pas une table présente, et SQLite ne
+    modifie pas un CHECK par ALTER TABLE. Élargir une contrainte ne change rien
+    au format sur disque et les lignes en place la respectent déjà : c'est le
+    cas que la documentation de SQLite traite par `writable_schema`
+    (lang_altertable.html, « Making Other Kinds Of Table Schema Changes »),
+    sans recopier la table, ses index ni les vues qui la lisent.
+    Rend True si la base a été modifiée.
+    """
+    ligne = conn.execute("SELECT sql FROM sqlite_master "
+                         "WHERE type='table' AND name='financial_flows'").fetchone()
+    if not ligne or not _CHECK_STATUT_ANCIEN.search(ligne[0]):
+        return False
+    valeurs = ",".join(f"'{s}'" for s in STATUTS_FLUX)
+    nouveau = _CHECK_STATUT_ANCIEN.sub(f"CHECK(statut IN ({valeurs}))", ligne[0], count=1)
+    # Le texte réécrit doit se relire avant d'entrer dans le schéma : un schéma
+    # illisible rendrait la base inouvrable.
+    sqlite3.connect(":memory:").execute(nouveau).connection.close()
+    conn.commit()
+    version = conn.execute("PRAGMA schema_version").fetchone()[0]
+    conn.execute("PRAGMA writable_schema=ON")
+    try:
+        conn.execute("UPDATE sqlite_master SET sql=? "
+                     "WHERE type='table' AND name='financial_flows'", (nouveau,))
+        # Les autres connexions ouvertes relisent le schéma à leur prochaine requête.
+        conn.execute(f"PRAGMA schema_version={version + 1}")
+        conn.commit()
+    finally:
+        conn.execute("PRAGMA writable_schema=OFF")
+    verdict = conn.execute("PRAGMA integrity_check(financial_flows)").fetchone()[0]
+    if verdict != "ok":
+        raise RuntimeError(f"[db] financial_flows après élargissement : {verdict}")
+    print("[db] contrainte élargie : financial_flows.statut")
+    return True
+
+
 def init_db():
     """Crée le schéma si absent, et rattrape les colonnes ajoutées depuis."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -181,6 +229,7 @@ def init_db():
         _rattraper_colonnes(conn)
         _rattraper_index(conn)
         conn.commit()
+        elargir_statut_flux(conn)
         print(f"[db] Schéma initialisé → {DB_PATH}")
     finally:
         conn.close()
