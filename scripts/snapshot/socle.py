@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,7 +46,18 @@ def load_rules(path: Path = RULES_PATH) -> dict:
     missing = [key for key in required if key not in data]
     if missing:
         raise ValueError(f"publication_rules.json incomplet: {', '.join(missing)}")
+    # Le site de la commune n'est le site d'aucune entité tierce : générique
+    # pour l'instance, écrit ou non dans les règles (cf. verify_snapshot).
+    commune = _domaine(URL_COMMUNE)
+    generiques = data["urls"].setdefault("exclude_generic_domains", [])
+    if commune and commune not in generiques:
+        generiques.append(commune)
     return data
+
+
+def _domaine(url: str) -> str:
+    m = re.match(r"https?://([^/]+)", url or "")
+    return m.group(1).lower().removeprefix("www.") if m else ""
 
 
 RULES = load_rules()

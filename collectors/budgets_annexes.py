@@ -9,6 +9,9 @@ détail, pour qu'une dette qui change de budget se lise avec le nom du budget.
 Par budget annexe (`cbudg` ≠ 1) et par exercice :
   - encours de dette : comptes 16x hors 165 (cautionnements reçus) et 169, solde
     créditeur net ; None quand le budget n'a AUCUN de ces comptes (absence ≠ zéro) ;
+  - cautionnements reçus (compte 165), à part : l'OFGL les compte dans son
+    « Encours de dette », et le détail par budget doit pouvoir retomber sur son
+    total (les dépôts des locataires du parc locatif, 18 579 € en 2025) ;
   - produits / charges de fonctionnement : classes 7 et 6, soldes nets ;
   - solde de fonctionnement : produits − charges.
 
@@ -61,6 +64,7 @@ def ensure_table(conn):
             nomenclature            TEXT,
             entity_id               INTEGER REFERENCES entities(id) ON DELETE SET NULL,
             encours_dette           REAL,
+            cautions                REAL,
             produits_fonctionnement REAL,
             charges_fonctionnement  REAL,
             solde_fonctionnement    REAL,
@@ -69,6 +73,10 @@ def ensure_table(conn):
             UNIQUE(year, budget)
         )
     """)
+    # Base d'avant la colonne `cautions` (21/10/2026).
+    colonnes = {r[1] for r in conn.execute("PRAGMA table_info(budget_annexe_balance)")}
+    if "cautions" not in colonnes:
+        conn.execute("ALTER TABLE budget_annexe_balance ADD COLUMN cautions REAL")
     conn.commit()
 
 
@@ -117,11 +125,14 @@ def synthese(records: list[dict]) -> dict[str, dict]:
         compte = str(r.get("compte", ""))
         b = budgets.setdefault(r["lbudg"], {
             "nomenclature": r.get("nomen"),
-            "encours_dette": None, "produits": 0.0, "charges": 0.0, "a_des_comptes": False,
+            "encours_dette": None, "cautions": None, "produits": 0.0, "charges": 0.0,
+            "a_des_comptes": False,
         })
         sd, sc = _num(r.get("sd")), _num(r.get("sc"))
         if compte.startswith("16") and not compte.startswith(("165", "169")):
             b["encours_dette"] = (b["encours_dette"] or 0.0) + sc - sd
+        elif compte.startswith("165"):
+            b["cautions"] = (b["cautions"] or 0.0) + sc - sd
         elif compte.startswith("7"):
             b["produits"] += sc - sd
         elif compte.startswith("6"):
@@ -203,9 +214,10 @@ def import_year(conn, year: int, decl: dict[str, str], dry_run: bool = False) ->
     for nom, b in budgets.items():
         conn.execute(
             "INSERT INTO budget_annexe_balance (year, budget, nomenclature, entity_id,"
-            " encours_dette, produits_fonctionnement, charges_fonctionnement,"
-            " solde_fonctionnement, source) VALUES (?,?,?,?,?,?,?,?,?)",
+            " encours_dette, cautions, produits_fonctionnement, charges_fonctionnement,"
+            " solde_fonctionnement, source) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (year, nom, b["nomenclature"], ids.get(nom), None if b["encours_dette"] is None else round(b["encours_dette"], 2),
+             None if b["cautions"] is None else round(b["cautions"], 2),
              round(b["produits"], 2), round(b["charges"], 2), round(b["solde"], 2), SOURCE))
     conn.commit()
     return len(budgets)

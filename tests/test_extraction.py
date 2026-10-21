@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from collectors import extraction
 
 
@@ -173,3 +175,29 @@ class TestExtraction:
         automatique tombe."""
         for objet, (forme, _) in extraction.GABARITS.items():
             assert "citation" in forme, objet
+
+
+class TestTraceIA:
+    """Charte IA, engagement 4 : quel modèle, sous quelle version exacte."""
+
+    def test_rien_de_declare_rien_de_garde(self):
+        assert extraction.trace_ia(None) is None
+        assert extraction.trace_ia({}) is None
+
+    def test_une_trace_complete_passe_telle_quelle(self):
+        t = {"modele": "gemma4:26b", "empreinte": "5571076f3d70", "locale": True}
+        assert extraction.trace_ia(t) == t
+
+    def test_le_nom_seul_suffit(self):
+        assert extraction.trace_ia({"modele": " gemma4:26b "}) == {"modele": "gemma4:26b"}
+
+    @pytest.mark.parametrize("brute", [
+        "gemma4:26b",                                       # pas un objet
+        {"empreinte": "5571076f3d70"},                      # pas de modèle
+        {"modele": "gemma4:26b", "empreinte": "pas-hexa"},
+        {"modele": "gemma4:26b", "locale": "oui"},
+        {"modele": "gemma4:26b", "autre": 1},               # clé inconnue
+    ])
+    def test_une_trace_mal_formee_est_refusee(self, brute):
+        with pytest.raises(ValueError):
+            extraction.trace_ia(brute)

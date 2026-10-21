@@ -15,12 +15,34 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Cadence plancher des jobs lourds sur le moteur : allégée le 20/10, la CI ne
+  # les jouait plus qu'à la main, et personne ne l'a fait — 30 commits déployés
+  # sans eux du 19 au 21/10/2026. Lundi 04:17 UTC, ~20 min par semaine.
+  schedule:
+    - cron: "17 4 * * 1"
+
+# Un seul dépôt paie ses minutes : `vigie-civique/moteur`, privé (3 000 min par
+# mois, épuisées le 20/10/2026 à 19 min facturées par passage). Le même fichier
+# part tel quel dans le miroir public `vigie-commune`, où tout est gratuit — et
+# chaque synchro y passe par une PR. D'où deux régimes, décidés par le dépôt :
+#   - sur le moteur, une PR comme un push sur main ne jouent que `tests-deps`
+#     (la suite entière) et `generique` ; le reste se lance à la main
+#     (workflow_dispatch) et chaque lundi (schedule). Le push sur main DOIT
+#     jouer quelque chose : `vigie_atelier_deployer.sh` exige « completed
+#     success » sur la révision qu'il déploie, et un passage tout sauté
+#     conclut « skipped » ;
+#   - partout ailleurs (miroir, fork, clone), tout tourne, comme avant.
+# Le test est `!= moteur`, pas `== vigie-commune` : un fork joue tout.
+concurrency:
+  group: controles-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
   tests:
+    if: github.repository != 'vigie-civique/moteur' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -82,6 +104,7 @@ jobs:
     # `--only-binary` : un poste Windows n'a pas de compilateur. Une dépendance
     # sans roue pour l'une de ces versions (numpy 1.26 n'en avait pas en 3.13)
     # doit échouer ici, pas chez la personne qui installe.
+    if: github.repository != 'vigie-civique/moteur' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -127,6 +150,7 @@ jobs:
     # Fabrique l'archive distribuable sur un dépôt sans instance ni base : c'est
     # l'état d'un clone public. Une archive qui ne se construit pas là ne se
     # construira pas chez celui qui la reprend.
+    if: github.repository != 'vigie-civique/moteur' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -143,6 +167,7 @@ jobs:
     # schéma réel, snapshot, contrôle d'étanchéité, build. Elle ne publie rien,
     # elle vérifie que rien ne casse entre la base et le HTML — c'est le
     # parcours qu'un dépôt fraîchement cloné doit pouvoir suivre.
+    if: github.repository != 'vigie-civique/moteur' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -337,6 +362,7 @@ jobs:
     # Une faute de syntaxe dans un composant, ou une couleur écrite en dur (le
     # build commence par `verifier_couleurs.mjs`, qui sort en 1), n'apparaissait
     # qu'au déploiement sur le serveur — là où le script revient en arrière.
+    if: github.repository != 'vigie-civique/moteur' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -370,6 +396,7 @@ jobs:
     # nginx le charge-t-il ? Un modèle qu'on recopie sur un serveur sans l'avoir
     # jamais donné à nginx casse le jour de l'installation. La version est celle
     # de Debian 12, où `listen … http2` n'est pas encore déprécié.
+    if: github.repository != 'vigie-civique/moteur' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -399,6 +426,7 @@ jobs:
     #
     # Les paquets de PRODUCTION seulement côté JavaScript : les deux sites sont
     # statiques, les outils de build ne sont pas servis.
+    if: github.repository != 'vigie-civique/moteur' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

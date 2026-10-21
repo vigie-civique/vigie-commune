@@ -179,3 +179,59 @@ def test_un_mot_arrete_la_lecture_des_montants(bv):
     valeurs = {a["agregat"]: a["value"] for a in bv.agregats_du_tableau(corps, "fonctionnement")}
     assert valeurs["Recettes de fonctionnement"] == 2459773.03
     assert valeurs["Excédent net de fonctionnement"] == 188989.44
+
+
+# ── PV du 03/03/2026 (Lasalle) : trois défauts d'un même document ────────────
+
+FIN_DE_SEANCE = "\n".join([
+    # Mise en forme du PV HTML : une cellule par ligne.
+    "Budget PARC LOCATIF", "PARC LOCATIF SECTION D'INVESTISSEMENT - DEPENSES",
+    "Chap./art", "Intitulé", "CA 2025", "BP 2026",
+    ".001", "Solde d'exécution de la section d'invest.", "52 521.80", "44 761.02",
+    "16", "Emprunts et dettes assimilées", "33 271.45", "35 000.00",
+    "TOTAL DES DEPENSES D'INVEST EXERCICE", "98 676.48", "108 961.02",
+    "PARC LOCATIF SECTION D'INVESTISSEMENT - RECETTES",
+    "Chap/art", "Intitulé", "CA 2025", "BP 2026",
+    ".021", "Virement de la SF", "0.00", "63 300.00",
+    "TOTAL DES RECETTES D'INVEST EXERCICE\u00a0", "53 915.46", "108 961.02",
+    "SOLDE D'EXECUTION", "-44 761.02", "0.00",
+    "Budget centre de création et de formation La Cure",
+    "CURE SECTION DE FONCTIONNEMENT - DEPENSES",
+    "Chap/art", "Intitulé", "CA 2025", "BP 2026",
+    ".012", "Charges de personnel, frais assimilés", "29 106.54", "30 000.00",
+    "TOTAL DES DEPENSES FONCT. EXERCICE", "111 146.70", "162 320.90",
+    "CURE SECTION DE FONCTIONNEMENT - RECETTES",
+    "Chap/art", "Intitulé", "CA 2025", "BP 2026",
+    "TOTAL DES RECETTES FONCT. EXERCICE", "111 146.70", "162 320.90",
+    "Avenant n°3 à la convention de délégation eau et assainissement :",
+    "dépenses de fonctionnement", "chapitre", "libellé", "montant HT", "montant TTC",
+    "011", "Charges à caractère général", "39 400", "45 300",
+    "012", "Charges de personnel", "25 000", "25 000", "total", "64 400", "70 300",
+])
+
+
+def _lus(bv):
+    lus = {}
+    for t in bv.tableaux("", FIN_DE_SEANCE):
+        for a in bv.agregats_du_tableau(t["corps"], t["section"]):
+            lus.setdefault((t["scope"], a["agregat"]), []).append(a["value"])
+    return lus
+
+
+def test_l_entete_chap_point_barre_art_est_une_ancre(bv):
+    """« Chap./art » n'ouvrait pas de tableau : le total des dépenses
+    d'investissement du parc locatif était rangé sous le budget précédent."""
+    lus = _lus(bv)
+    assert lus[("parc locatif", "Dépenses d'investissement")] == [108961.02]
+
+
+def test_l_espace_insecable_ne_cache_pas_le_total(bv):
+    assert _lus(bv)[("parc locatif", "Recettes d'investissement")] == [108961.02]
+
+
+def test_le_dernier_tableau_s_arrete_a_son_total(bv):
+    """La délibération suivante n'appartient pas au dernier tableau : ses
+    « 012 charges de personnel » ne sont pas ceux de La Cure."""
+    lus = _lus(bv)
+    assert lus[("cure", "Charges de personnel")] == [30000.0]
+    assert ("cure", "Charges à caractère général") not in lus

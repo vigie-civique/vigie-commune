@@ -1,8 +1,10 @@
 <script>
-  import { COMMUNE, COMMUNE_DE, INSEE, SITE_NOM } from '#lib/instance.js'
+  import { COMMUNE, COMMUNE_DE, INSEE, SITE_NOM, NOMS_BUDGETS } from '#lib/instance.js'
   import Niveau from '#lib/components/Niveau.svelte'
   import SourceAbsente from '#lib/components/SourceAbsente.svelte'
   import { euros } from '#lib/data.js'
+  import Perimetre from './Perimetre.svelte'
+  import Repartition from './Repartition.svelte'
 
   // Rendu au build par +page.server.js.
   export let data
@@ -32,6 +34,56 @@
   $: voteRows = vote.filter(r => r.year === year)
   $: votePrincipal = voteRows.filter(r => r.scope === 'principal')
   $: voteAnnexes = voteRows.filter(r => r.scope !== 'principal')
+  // Une carte par budget annexe. Le collecteur verse plusieurs agrégats par
+  // budget : les lister sous le seul nom du budget donnait « aj 181 k€ / aj
+  // 105 k€ / aj 181 k€ », lu comme des doublons. Une section votée est
+  // équilibrée : recettes = dépenses s'écrit alors une fois.
+  const SECTIONS_VOTE = [
+    { titre: 'Fonctionnement', rec: 'Recettes de fonctionnement', dep: 'Dépenses de fonctionnement' },
+    { titre: 'Investissement', rec: "Recettes d'investissement", dep: "Dépenses d'investissement" },
+  ]
+  const DONT_VOTE = [
+    { agregat: 'Charges de personnel', titre: 'dont personnel' },
+    { agregat: 'Charges à caractère général', titre: 'dont charges générales' },
+  ]
+  $: voteCartes = [...new Set(voteAnnexes.map(r => r.scope))].map(scope => {
+    const rows = voteAnnexes.filter(r => r.scope === scope)
+    const de = (agregat) => rows.find(r => r.agregat === agregat) || null
+    const lues = new Set()
+    const lire = (agregat) => { const r = de(agregat); if (r) lues.add(r); return r }
+    const sections = SECTIONS_VOTE.map(s => ({ titre: s.titre, rec: lire(s.rec), dep: lire(s.dep) }))
+      .filter(s => s.rec || s.dep)
+    const dont = DONT_VOTE.map(d => ({ titre: d.titre, r: lire(d.agregat) })).filter(d => d.r)
+    return {
+      nom: nomBudget(scope),
+      sections,
+      dont,
+      autres: rows.filter(r => !lues.has(r)),
+      notes: [...new Set(rows.map(r => r.note).filter(Boolean))],
+      total: sections.find(s => s.titre === 'Fonctionnement')?.dep?.value ?? 0,
+    }
+  }).sort((a, b) => b.total - a.total)
+  const equilibre = (s) => s.rec && s.dep && s.rec.value === s.dep.value
+  // Le « solde d'exécution » d'un tableau voté inclut le résultat reporté et le
+  // virement entre sections : ce n'est pas l'excédent de l'année.
+  const LIBELLES_VOTE = {
+    'Excédent net de fonctionnement': 'Solde de fonctionnement, reports compris',
+    "Solde d'exécution d'investissement": "Solde d'investissement, reports compris",
+  }
+
+  // Un même budget s'écrit « aj » dans un PV et « CENTRE DE LOISIRS LASALLE »
+  // dans la balance DGFiP : `noms_budgets` (instance.json) donne le nom public
+  // de l'un et de l'autre. Sans entrée : le nom tel qu'écrit, sans le nom de la
+  // commune et sans capitales — les sigles courts (« CG ») gardés.
+  const MOTS_COURTS = new Set(['et', 'de', 'du', 'des', 'la', 'le', 'les', 'en'])
+  function nomBudget(brut) {
+    const cle = (brut || '').toLowerCase().trim()
+    if (NOMS_BUDGETS?.[cle]) return NOMS_BUDGETS[cle]
+    const sansCommune = cle.endsWith(' ' + COMMUNE.toLowerCase()) ? brut.trim().slice(0, -COMMUNE.length - 1) : brut.trim()
+    const mots = sansCommune.split(/\s+/).map(m => (m.length <= 2 && !MOTS_COURTS.has(m.toLowerCase()) && m === m.toUpperCase()) ? m : m.toLowerCase())
+    const s = mots.join(' ')
+    return s.charAt(0).toUpperCase() + s.slice(1)
+  }
   $: voteSource = voteRows[0]?.source ?? ''
   $: voteSourceUrl = voteRows[0]?.source_url ?? ''
   $: voteRec = votePrincipal.find(r => r.agregat === 'Recettes de fonctionnement')?.value ?? null
@@ -130,20 +182,70 @@
   let showPerHab = false
   $: ofglIndex = (() => { const m = new Map(); for (const r of ofgl) m.set(r.agregat + '|' + r.year, r); return m })()
   $: ofglCell = (name, y) => ofglIndex.get(name + '|' + y) || null
+  // ─── Périmètre : budget principal, budgets annexes, tous budgets ──────────────
+  // Une ligne par agrégat, et le périmètre choisi une fois pour les tuiles et le
+  // tableau : deux lignes « — budget principal » / « — budgets annexes » par
+  // agrégat doublaient le tableau et tronquaient les libellés.
+  let perimetre = 'principal'
+  $: if (!aDesAnnexes) perimetre = 'principal'
+  // Ce qui s'additionne sans rien compter deux fois. La subvention d'équilibre
+  // que le principal verse à une annexe est une dépense d'un côté, une recette
+  // de l'autre : elle s'annule dans l'épargne, ne touche ni la dette ni le
+  // personnel, mais gonflerait recettes et dépenses.
+  const ADDITIONNABLES = new Set(['Epargne brute', 'Epargne nette', 'Epargne de gestion',
+    'Encours de dette', 'Annuité de la dette', 'Charges financières', 'Frais de personnel', "Dépenses d'équipement"])
+  const NON_ADD = { nonAdditionnable: true }
+  // Comptes consolidés OFGL (collectors/ofgl.py) : le total « tous budgets »
+  // dont les flux entre budgets sont retirés, et le montant de ces flux.
+  const SUFFIXE_TOUS = ' - tous budgets'
+  const SUFFIXE_FLUX = ' - flux entre budgets'
+  $: aUneAnnexe = (name) => ofglYears.some(y => ofglCell(name + SUFFIXE_ANNEXES, y))
+  $: aUnConsolide = (name) => ofglYears.some(y => ofglCell(name + SUFFIXE_TOUS, y))
+  // { montant, euros_par_habitant, flux? }, null (pas de donnée) ou NON_ADD.
+  $: valeur = (name, y, p) => {
+    const pr = ofglCell(name, y), an = ofglCell(name + SUFFIXE_ANNEXES, y)
+    if (p === 'principal') return pr
+    if (p === 'annexes') return an
+    if (!aUneAnnexe(name)) return pr
+    if (aUnConsolide(name)) {
+      const t = ofglCell(name + SUFFIXE_TOUS, y)
+      return t ? { ...t, flux: ofglCell(name + SUFFIXE_FLUX, y)?.montant ?? 0 } : null
+    }
+    // Sans consolidé publié : la somme, seulement là où elle ne compte rien deux fois.
+    if (!ADDITIONNABLES.has(name)) return NON_ADD
+    if (!pr || !an) return null
+    const h = (pr.euros_par_habitant == null || an.euros_par_habitant == null)
+      ? null : pr.euros_par_habitant + an.euros_par_habitant
+    return { montant: pr.montant + an.montant, euros_par_habitant: h }
+  }
+  const lisible = (v) => v && v !== NON_ADD
   // Un agrégat n'est affiché que s'il a au moins une valeur sur la période.
   $: ofglGroupsShown = OFGL_GROUPS
-    .map(g => ({
-      title: g.title,
-      items: g.items
-        .flatMap(name => [name, name + SUFFIXE_ANNEXES])
-        .filter(name => ofglYears.some(y => ofglCell(name, y))),
-    }))
+    .map(g => ({ title: g.title, items: g.items.filter(n => ofglYears.some(y => lisible(valeur(n, y, perimetre)))) }))
     .filter(g => g.items.length)
-  // Le budget principal et les annexes ne se lisent pas sur la même ligne : dès
-  // que la commune a des annexes, le libellé dit de quel périmètre on parle.
-  $: etiquette = (name) => name.endsWith(SUFFIXE_ANNEXES)
-    ? name.slice(0, -SUFFIXE_ANNEXES.length) + ' — budgets annexes'
-    : (aDesAnnexes && ofglYears.some(y => ofglCell(name + SUFFIXE_ANNEXES, y)) ? name + ' — budget principal' : name)
+  $: nonAdditionnes = perimetre === 'tous'
+    ? OFGL_GROUPS.flatMap(g => g.items).filter(n => aUneAnnexe(n) && !aUnConsolide(n) && !ADDITIONNABLES.has(n)) : []
+  $: aDesConsolides = OFGL_GROUPS.some(g => g.items.some(n => aUnConsolide(n)))
+  $: tousConsolide = perimetre === 'tous' && aDesConsolides
+  // « Epargne », « l'Etat » : graphie de l'OFGL, gardée comme clé, pas à l'écran.
+  const libelleAgregat = (n) => n.replace(/^Epargne/, 'Épargne').replace("l'Etat", "l'État")
+  $: libellePerimetre = { principal: 'budget principal', annexes: 'budgets annexes', tous: 'tous budgets' }[perimetre]
+  // Évolution sur un an, en clair, sur la colonne de l'exercice choisi. Pas de
+  // pourcentage sur une base nulle ou négative : il ne voudrait rien dire.
+  $: matriceEvol = ofglYears.includes(year) && ofglYears.includes(year - 1)
+  $: evolLigne = (name) => {
+    const a = valeur(name, year, perimetre), b = valeur(name, year - 1, perimetre)
+    if (!lisible(a) || !lisible(b) || !(b.montant > 0) || a.montant == null) return null
+    return Math.round(1000 * (a.montant - b.montant) / b.montant) / 10
+  }
+  // Sur téléphone, le tableau n'affiche que l'exercice et le précédent.
+  let toutesAnnees = false
+  const parHab = (v) => v == null ? '-' : Math.round(v).toLocaleString('fr-FR').replace('-', '−') + ' €'
+
+  // Tuiles : le principal garde son repli DGFiP ; les autres périmètres lisent OFGL.
+  $: tRec = perimetre === 'principal' ? { montant: recF, euros_par_habitant: recFH } : valeur('Recettes de fonctionnement', year, perimetre)
+  $: tDep = perimetre === 'principal' ? { montant: depF, euros_par_habitant: depFH } : valeur('Dépenses de fonctionnement', year, perimetre)
+  $: tEp  = perimetre === 'principal' ? { montant: epargne, euros_par_habitant: epargneH } : valeur('Epargne brute', year, perimetre)
 
   // ─── Budgets annexes : synthèse par structure et par année ─────────────────────
   const pickRow = (rows, re) => rows.find(r => re.test(r.libelle || ''))
@@ -156,7 +258,7 @@
       if (!yrs.has(r.year)) yrs.set(r.year, [])
       yrs.get(r.year).push(r)
     }
-    return [...m.entries()].map(([name, yrs]) => {
+    const structs = [...m.entries()].map(([name, yrs]) => {
       const years = [...yrs.values()].map(rows => {
         // Deux soldes coexistent : celui du fonctionnement et l'encours de dette
         // (section « dette »), que la table range aussi sous `sens = solde`.
@@ -168,6 +270,7 @@
           soldeVal: solde ? solde.montant : null,
           soldeLbl: solde ? (solde.libelle || '') : '',
           detteVal: dette ? dette.montant : null,
+          cautions: dette?.cautions ?? null,
           subvComm: subv ? subv.montant : null,
           source: rows.find(r => r.source)?.source || '',
           entityId: rows.find(r => r.entity_id)?.entity_id ?? null,
@@ -183,11 +286,70 @@
         dernier: years[years.length - 1].year,
         suite: annexe.find(r => r.entity_name === name && r.poursuivi_sous)?.poursuivi_sous ?? null,
       }
-    }).sort((a, b) => a.name.localeCompare(b.name))
+    }).map(s => {
+      const d = [...s.years].reverse().find(y => y.detteVal != null)
+      return { ...s, nom: nomBudget(s.name), detteFin: d ? d.detteVal : null, detteAn: d ? d.year : null }
+    })
+    // Par dette au dernier exercice, puis par nom ; un budget poursuivi sous un
+    // autre nom se place juste avant sa suite : c'est le même service.
+    const tries = structs.sort((a, b) => (b.detteFin ?? -1) - (a.detteFin ?? -1) || a.nom.localeCompare(b.nom))
+    const suiteDe = new Map(tries.filter(s => s.suite).map(s => [s.suite, s]))
+    const ordre = []
+    for (const s of tries) {
+      if (s.suite && tries.some(t => t.name === s.suite)) continue
+      const pred = suiteDe.get(s.name)
+      if (pred) ordre.push(pred)
+      ordre.push({ ...s, precede: pred ? pred.name : null })
+    }
+    for (const s of tries) if (!ordre.some(o => o.name === s.name)) ordre.push(s)
+    return ordre
   })()
   // Dernier exercice où l'un des budgets annexes apparaît : un budget qui
   // s'arrête avant se dit, sans en deviner la raison.
   $: derniereAnneeAnnexes = annexeByStruct.length ? Math.max(...annexeByStruct.map(s => s.dernier)) : null
+
+  // ─── Dette par budget ───────────────────────────────────────────────────────────
+  // La dette s'additionne sans double compte : c'est le seul « tous budgets »
+  // qui se montre en total. Détail par annexe quand la balance DGFiP le donne
+  // pour l'exercice, sinon les annexes en un bloc (OFGL).
+  $: detteAnnexesDetail = annexeByStruct
+    .map(s => { const y = s.years.find(y => y.year === year)
+                return { nom: s.nom, href: s.entityId ? `/entite/${s.entityId}` : null,
+                         montant: y?.detteVal ?? null, cautions: y?.cautions ?? 0 } })
+    .filter(a => a.montant > 0)
+    .sort((a, b) => b.montant - a.montant)
+  $: detteCautions = detteAnnexesDetail.reduce((s, a) => s + (a.cautions || 0), 0)
+  $: detteParts = dettePrincipal == null ? [] : [
+    { nom: 'Budget principal', montant: dettePrincipal },
+    ...(detteAnnexesDetail.length ? detteAnnexesDetail
+        : (ofglAnnexes && detteAnnexes > 0 ? [{ nom: 'Budgets annexes', montant: detteAnnexes }] : [])),
+  ]
+  // Deux sources pour les annexes (balances DGFiP ici, agrégat OFGL dans la
+  // tuile) : si elles divergent, d'un euro ou d'un million, la page le dit au
+  // lieu de laisser deux totaux. Un seuil de 2 % taisait les 18 579 € de
+  // cautions que l'OFGL compte et que le détail ne comptait pas.
+  $: ecartDetteSources = (detteAnnexesDetail.length && ofglAnnexes && detteAnnexes)
+    ? detteAnnexesDetail.reduce((s, a) => s + a.montant, 0) - detteAnnexes : 0
+
+  // Budget voté : dépenses de fonctionnement par budget, sans total — la
+  // subvention d'équilibre y serait comptée deux fois.
+  $: voteParts = voteDep ? [
+    { nom: 'Budget principal', montant: voteDep },
+    ...voteCartes.map(c => ({ nom: c.nom, montant: c.sections.find(s => s.titre === 'Fonctionnement')?.dep?.value ?? 0 }))
+      .filter(p => p.montant > 0),
+  ] : []
+
+  // ─── Sommaire : les sections que l'année affichée fait exister ─────────────────
+  // La page est longue sur téléphone ; cinq ancres, dans l'ordre des sections.
+  $: sommaire = [
+    { id: 'essentiel', titre: "L'essentiel", ok: true },
+    { id: 'recettes-depenses', titre: 'Recettes et dépenses',
+      ok: isVoteYear ? Boolean((voteRec && voteDep) || voteParts.length > 1) : true },
+    { id: 'dette', titre: 'La dette', ok: !isVoteYear && dette != null },
+    { id: 'evolution', titre: "L'évolution", ok: epargneSerie.length > 1 || ofglGroupsShown.length > 0 },
+    { id: 'annexes', titre: 'Les budgets annexes',
+      ok: annexeByStruct.length > 0 || (isVoteYear && voteAnnexes.length > 0) },
+  ].filter(s => year && s.ok)
 
   // ─── Formatage ─────────────────────────────────────────────────────────────────
   function eurosC(n) {
@@ -269,11 +431,20 @@
       <p class="sub">Ce que la commune perçoit, dépense, épargne et doit, en un coup d'œil.</p>
     </div>
     {#if years.length}{' '}
-      <label class="year">Exercice
-        <select bind:value={year}>{#each years as y}<option value={y}>{y}{isVoteOnly(y) ? ' · voté' : ''}</option>{/each}</select>
+      <label class="year">Année affichée
+        <select bind:value={year}>{#each years as y}<option value={y}>{y}{isVoteOnly(y) ? ' · budget voté (prévision)' : ''}</option>{/each}</select>
       </label>
     {' '}{/if}
   </header>
+  {#if sommaire.length > 1}
+    <nav class="sommaire" aria-label="Sections de la page">
+      {#each sommaire as s}<a href="#{s.id}">{s.titre}</a>{/each}
+    </nav>
+  {/if}
+  {#if years.length}
+    <p class="pilote">L'année choisie pilote la phrase{isVoteYear ? ' et les chiffres-clés' : ', les chiffres-clés et la dette par budget'}. Le tableau année par année et les budgets annexes montrent toutes les années.</p>
+  {/if}
+  {#if aDesAnnexes && (ofgl.length || annuel.length)}<Perimetre bind:value={perimetre} consolide={aDesConsolides} />{/if}
 
   {#if !ofgl.length && !annuel.length}<p class="muted">Aucune donnée budgétaire.</p>{/if}
 
@@ -284,6 +455,7 @@
 
   {#if year}
     {#if isVoteYear}
+      <h2 id="essentiel">L'essentiel</h2>
       <!-- Budget primitif VOTÉ (prévisionnel) — source unique provisoire : CR du CM -->
       <div class="votebanner">
         <b>Budget primitif voté {year}</b> : chiffres <b>prévisionnels</b> adoptés par le conseil municipal,
@@ -291,8 +463,21 @@
         {voteSource}{#if voteSourceUrl}{' '} · <a href={voteSourceUrl} target="_blank" rel="noopener">voir le CR<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}.
       </div>
 
+      <div class="tiles">
+        {#each votePrincipal as r}
+          <div class="tile vote">
+            <span class="tlabel">{LIBELLES_VOTE[r.agregat] ?? r.agregat}</span>
+            <span class="tval">{fmtVote(r)}</span>
+            {#if r.note}<span class="tsub">{r.note}</span>{/if}
+          </div>
+        {/each}
+      </div>
+
+      <p class="hint">Ces montants proviennent exclusivement de la délibération budgétaire ; ils seront remplacés par le réalisé (comptes administratifs / OFGL) dès sa publication (~18 mois plus tard).</p>
+
+      {#if (voteRec && voteDep) || voteParts.length > 1}
+        <h2 id="recettes-depenses">Recettes et dépenses</h2>
       {#if voteRec && voteDep}
-        <h2>L'équilibre du fonctionnement (voté)</h2>
         <div class="equil">
           <div class="erow">
             <span class="ekey"><i class="sw in"></i> Recettes</span>
@@ -307,33 +492,17 @@
         </div>
       {/if}
 
-      <h2>Chiffres-clés du budget voté</h2>
-      <div class="tiles">
-        {#each votePrincipal as r}
-          <div class="tile vote">
-            <span class="tlabel">{r.agregat}</span>
-            <span class="tval">{fmtVote(r)}</span>
-            {#if r.note}<span class="tsub">{r.note}</span>{/if}
-          </div>
-        {/each}
-      </div>
-
-      {#if voteAnnexes.length}
-        <h3>Budgets annexes votés {year}</h3>
-        <ul class="votelist">
-          {#each voteAnnexes as r}
-            <li>
-              <span class="vname">{r.scope}</span>
-              <span class="vval">{fmtVote(r)}</span>
-              {#if r.note}<span class="vnote">{r.note}</span>{/if}
-            </li>
-          {/each}
-        </ul>
+      {#if voteParts.length > 1}
+        <h3>Dépenses de fonctionnement votées, par budget</h3>
+        <p class="hint">Part de chaque budget dans les dépenses de fonctionnement votées. Le budget principal verse une partie de son argent aux budgets annexes (subvention d'équilibre) : la même somme apparaît des deux côtés, d'où l'absence de total.</p>
+        <Repartition parts={voteParts} format={eurosC} total={false}
+                     titre="Budget voté {year} : dépenses de fonctionnement par budget" />
       {/if}
 
-      <p class="hint">Ces montants proviennent exclusivement de la délibération budgétaire ; ils seront remplacés par le réalisé (comptes administratifs / OFGL) dès sa publication (~18 mois plus tard).</p>
+      {/if}
     {:else}
-    <!-- 1 ─ Synthèse en une phrase -->
+    <h2 id="essentiel">L'essentiel</h2>
+    <!-- Synthèse en une phrase -->
     <p class="lede">
       En <b>{year}</b>{#if population}, {COMMUNE} (<b>{population.toLocaleString('fr-FR')}</b> hab.){/if}
       a perçu <b class="in">{eurosC(recF)}</b> de recettes de fonctionnement{#if aDesAnnexes}{' '}(budget principal){/if}
@@ -365,26 +534,142 @@
         {#if evolRec1 != null}recettes de fonctionnement{#if aDesAnnexes}{' '} (budget principal){/if} <b>{signe(evolRec1)}</b>{/if}
         {#if evolDep1 != null}{' '} · dépenses de fonctionnement <b>{signe(evolDep1)}</b>{/if}
         {#if evolDette1 != null}{' '} · dette{#if ofglAnnexes}{' '} (tous budgets){/if} <b>{signe(evolDette1)}</b>{/if}
-        <!-- Cette phrase ne regardait que la trajectoire longue, et ignorait
-             l'exercice affiché juste avant elle : sur 2025, la page écrivait
-             « dette -4 % » puis, trois mots plus loin, « multipliée par 3,4 ».
-             Les deux chiffres étaient justes et la page se contredisait quand
-             même. Quand la dette recule sur l'exercice, c'est ce recul qui se
-             dit en premier ; l'échelle longue vient ensuite, comme mesure de ce
-             qui reste à rembourser. -->
-        {#if detteFacteur && detteFacteur > 1.5 && detteMin}
-          <br />
+        <span class="courants">Montants en euros courants, non corrigés de l'inflation&nbsp;: une hausse de quelques pour cent sur un an ne signifie pas une hausse en pouvoir d'achat.</span>
+      </p>
+
+    {/if}
+
+    <!-- Distinction importante : ces montants ne sont PAS nos calculs. Ce sont
+         les agrégats publiés par l'Observatoire des finances locales à partir
+         des comptes de la commune. Les étiqueter « calcul » les affaiblirait à
+         tort — ils sont plus solides que ce que nous savons produire. -->
+    <Niveau type="fait" compact source="Agrégats publiés par OFGL / DGFiP, d'après les comptes de la commune" />
+    <div class="tiles">
+      {#each [{ cls: 'in', label: 'Recettes de fonctionnement', t: tRec }, { cls: 'out', label: 'Dépenses de fonctionnement', t: tDep }, { cls: 'save', label: 'Épargne brute', t: tEp }] as k}
+        <div class="tile {k.cls}">
+          <span class="tlabel">{k.label}{#if aDesAnnexes}<span class="tperim">{libellePerimetre}</span>{/if}</span>
+          {#if k.t === NON_ADD}{' '}
+            <span class="tval">—</span>
+            <span class="tsub">pas de total : la même somme serait comptée deux fois</span>
+          {' '}{:else}{' '}
+            <span class="tval">{eurosS(k.t?.montant ?? null)}</span>
+            <span class="tsub">{perHab(k.t?.euros_par_habitant ?? null)}{#if k.t?.flux}{' '}· flux entre budgets retirés : {eurosC(k.t.flux)}{/if}</span>
+          {' '}{/if}
+        </div>
+      {/each}
+      <div class="tile debt">
+        <span class="tlabel">Dette (encours{#if ofglAnnexes}, tous budgets{:else if annexesAbsentes}, budget principal seul{/if})</span>
+        <span class="tval">{eurosC(dette)}</span>
+        <span class="tsub">{perHab(detteH)}{#if anneesDesendettement != null}{' '} · {anneesDesendettement.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} ans d'épargne brute (tous budgets){/if}</span>
+      </div>
+    </div>
+
+    <h2 id="recettes-depenses">Recettes et dépenses</h2>
+    <!-- L'équilibre en tête : recettes moins dépenses, l'épargne. -->
+    {#if recF && depF}
+      <p class="hint">Ce qui reste entre recettes et dépenses courantes forme l'épargne : la capacité de la commune à investir sans emprunter.</p>
+      <div class="equil">
+        <div class="erow">
+          <span class="ekey"><i class="sw in"></i> Recettes</span>
+          <div class="etrack"><div class="efill in" style="width:{100 * recF / equilScale}%"></div></div>
+          <span class="eval">{eurosC(recF)}</span>
+        </div>
+        <div class="erow">
+          <span class="ekey"><i class="sw out"></i> Dépenses</span>
+          <div class="etrack"><div class="efill out" style="width:{100 * depF / equilScale}%"></div></div>
+          <span class="eval">{eurosC(depF)}</span>
+        </div>
+        {#if epargne != null}
+          <div class="erow save-row">
+            <span class="ekey"><i class="sw save"></i> Épargne</span>
+            <div class="etrack"><div class="efill save" style="width:{100 * Math.max(epargne, 0) / equilScale}%"></div></div>
+            <span class="eval">{eurosC(epargne)}</span>
+          </div>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- Le détail DGFiP par compte. -->
+    {#if !hasDetail}
+      <p class="note">Le détail comptable par poste (« où va / d'où vient l'argent ») n'est pas encore publié pour {year} : la DGFiP diffuse les comptes détaillés avec environ 18 mois de décalage. Les chiffres-clés et l'épargne ci-dessus proviennent des agrégats OFGL, disponibles plus tôt.{#if lastDetailYear}{' '}Dernier exercice détaillé : <b>{lastDetailYear}</b>.{/if}</p>
+    {/if}
+    <div class="cols">
+      {#if depRows.length}
+        <div class="col">
+          <h3 class="out-h">Où va l'argent</h3>
+          <p class="hint">Dépenses de fonctionnement {year} : {eurosC(depTotalDG)}</p>
+          <ul class="bars">
+            {#each depRows as r}
+              <li>
+                <span class="blabel" title={r.libelle}>{r.libelle}</span>
+                <span class="btrack"><span class="bfill out" style="width:{100 * r.montant / depMax}%"></span></span>
+                <span class="bval">{eurosC(r.montant)}</span>
+                <span class="bpct">{pct(r.montant, depTotalDG)}</span>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
+
+      {#if recRows.length}
+        <div class="col">
+          <h3 class="in-h">D'où vient l'argent</h3>
+          <p class="hint">Recettes de fonctionnement {year} : {eurosC(recTotalDG)}</p>
+          <ul class="bars">
+            {#each recRows as r}
+              <li>
+                <span class="blabel" title={r.libelle}>{r.libelle}</span>
+                <span class="btrack"><span class="bfill in" style="width:{100 * r.montant / recMax}%"></span></span>
+                <span class="bval">{eurosC(r.montant)}</span>
+                <span class="bpct">{pct(r.montant, recTotalDG)}</span>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
+    </div>
+
+    {#if gV("Concours de l'Etat") != null}
+      <p class="hint">Concours de l'État (dotations et compensations) : <b>{eurosC(gV("Concours de l'Etat"))}</b>, {perHab(gH("Concours de l'Etat"))}.</p>
+    {/if}
+
+    {#if dette != null}
+    <h2 id="dette">La dette</h2>
+    {#if detteParts.length > 1}
+      <h3>Au 31 décembre {year}, par budget</h3>
+      <p class="hint">La dette de la commune, c'est celle de tous ses budgets : elles s'additionnent sans qu'aucune soit comptée deux fois.</p>
+      <Repartition parts={detteParts} format={eurosC} titre="Dette au 31 décembre {year}, par budget" />
+      {#if detteCautions > 0}
+        <p class="hint">Dette des budgets annexes y compris {eurosC(detteCautions)} de dépôts et cautionnements reçus (des locataires, par exemple), que l'OFGL compte aussi dans l'encours.</p>
+      {/if}
+      {#if Math.abs(ecartDetteSources) >= 1}
+        <p class="note">Le détail par budget annexe vient des balances DGFiP ; il s'écarte de {eurosC(Math.abs(ecartDetteSources))} du total des budgets annexes publié par l'OFGL ({eurosC(detteAnnexes)}), repris dans la tuile « Dette » de la section « L'essentiel ».</p>
+      {/if}
+    {/if}
+
+    <div class="tiles small">
+      <div class="tile"><span class="tlabel">Annuité de la dette{#if aDesAnnexes}{' '} (budget principal){/if}</span><span class="tval">{eurosC(annuite)}</span><span class="tsub">{perHab(gH('Annuité de la dette'))}</span></div>
+      <div class="tile"><span class="tlabel">Épargne nette{#if aDesAnnexes}{' '} (budget principal){/if}</span><span class="tval">{eurosC(epargneNette)}</span><span class="tsub">{perHab(gH('Epargne nette'))}</span></div>
+      <div class="tile"><span class="tlabel">Dépenses d'équipement</span><span class="tval">{eurosC(equipement)}</span><span class="tsub">{perHab(gH("Dépenses d'équipement"))}</span></div>
+    </div>
+      <!-- Cette phrase ne regardait que la trajectoire longue, et ignorait
+           l'exercice affiché juste avant elle : sur 2025, la page écrivait
+           « dette -4 % » puis, trois mots plus loin, « multipliée par 3,4 ».
+           Les deux chiffres étaient justes et la page se contredisait quand
+           même. Quand la dette recule sur l'exercice, c'est ce recul qui se
+           dit en premier ; l'échelle longue vient ensuite, comme mesure de ce
+           qui reste à rembourser. -->
+      {#if detteFacteur && detteFacteur > 1.5 && detteMin}
+        <p class="evolution">
           {#if evolDette1 != null && evolDette1 < 0}{' '}
-            Elle recule sur l'exercice, mais reste <b>{facteurDette}</b> fois
+            Sur {year}, la dette recule ({signe(evolDette1)}), mais reste <b>{facteurDette}</b> fois
             son point bas de {detteMin[0]} ({eurosC(detteMin[1])}).
           {' '}{:else}{' '}
             La dette a été multipliée par <b>{facteurDette}</b> depuis
             son point bas de {detteMin[0]} ({eurosC(detteMin[1])}).
           {' '}{/if}
-        {/if}
-        <span class="courants">Montants en euros courants, non corrigés de l'inflation&nbsp;: une hausse de quelques pour cent sur un an ne signifie pas une hausse en pouvoir d'achat.</span>
-      </p>
-
+        </p>
+      {/if}
       {#if mouvementDette}
         <p class="lecture">
           <b>Budget principal et budgets annexes.</b>
@@ -415,113 +700,13 @@
         </p>
       {/if}
     {/if}
-
-    <!-- 2 ─ Chiffres-clés -->
-    <!-- Distinction importante : ces montants ne sont PAS nos calculs. Ce sont
-         les agrégats publiés par l'Observatoire des finances locales à partir
-         des comptes de la commune. Les étiqueter « calcul » les affaiblirait à
-         tort — ils sont plus solides que ce que nous savons produire. -->
-    <Niveau type="fait" compact source="Agrégats publiés par OFGL / DGFiP, d'après les comptes de la commune" />
-    <div class="tiles">
-      <div class="tile in">
-        <span class="tlabel">Recettes de fonctionnement{#if aDesAnnexes}{' '} (budget principal){/if}</span>
-        <span class="tval">{eurosC(recF)}</span>
-        <span class="tsub">{perHab(recFH)}</span>
-      </div>
-      <div class="tile out">
-        <span class="tlabel">Dépenses de fonctionnement{#if aDesAnnexes}{' '} (budget principal){/if}</span>
-        <span class="tval">{eurosC(depF)}</span>
-        <span class="tsub">{perHab(depFH)}</span>
-      </div>
-      <div class="tile save">
-        <span class="tlabel">Épargne brute{#if aDesAnnexes}{' '} (budget principal){/if}</span>
-        <span class="tval">{eurosC(epargne)}</span>
-        <span class="tsub">{perHab(epargneH)}{#if epargneTous != null}{' '} · {eurosC(epargneTous)} tous budgets{/if}</span>
-      </div>
-      <div class="tile debt">
-        <span class="tlabel">Dette (encours{#if ofglAnnexes}, tous budgets{:else if annexesAbsentes}, budget principal seul{/if})</span>
-        <span class="tval">{eurosC(dette)}</span>
-        <span class="tsub">{perHab(detteH)}{#if anneesDesendettement != null}{' '} · {anneesDesendettement.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} ans d'épargne brute (tous budgets){/if}</span>
-      </div>
-    </div>
-
-    <!-- 3 ─ Équilibre du fonctionnement -->
-    {#if recF && depF}
-      <h2>L'équilibre du fonctionnement</h2>
-      <p class="hint">Ce qui reste entre recettes et dépenses courantes forme l'épargne : la capacité de la commune à investir sans emprunter.</p>
-      <div class="equil">
-        <div class="erow">
-          <span class="ekey"><i class="sw in"></i> Recettes</span>
-          <div class="etrack"><div class="efill in" style="width:{100 * recF / equilScale}%"></div></div>
-          <span class="eval">{eurosC(recF)}</span>
-        </div>
-        <div class="erow">
-          <span class="ekey"><i class="sw out"></i> Dépenses</span>
-          <div class="etrack"><div class="efill out" style="width:{100 * depF / equilScale}%"></div></div>
-          <span class="eval">{eurosC(depF)}</span>
-        </div>
-        {#if epargne != null}
-          <div class="erow save-row">
-            <span class="ekey"><i class="sw save"></i> Épargne</span>
-            <div class="etrack"><div class="efill save" style="width:{100 * Math.max(epargne, 0) / equilScale}%"></div></div>
-            <span class="eval">{eurosC(epargne)}</span>
-          </div>
-        {/if}
-      </div>
     {/if}
 
-    <!-- 4 ─ Où va l'argent / D'où vient l'argent (détail DGFiP par compte) -->
-    {#if !hasDetail}
-      <p class="note">Le détail comptable par poste (« où va / d'où vient l'argent ») n'est pas encore publié pour {year} : la DGFiP diffuse les comptes détaillés avec environ 18 mois de décalage. Les chiffres-clés et l'épargne ci-dessus proviennent des agrégats OFGL, disponibles plus tôt.{#if lastDetailYear}{' '}Dernier exercice détaillé : <b>{lastDetailYear}</b>.{/if}</p>
+    {#if epargneSerie.length > 1 || ofglGroupsShown.length}
+      <h2 id="evolution">L'évolution</h2>
     {/if}
-    <div class="cols">
-      {#if depRows.length}
-        <div class="col">
-          <h2 class="out-h">Où va l'argent</h2>
-          <p class="hint">Dépenses de fonctionnement {year} : {eurosC(depTotalDG)}</p>
-          <ul class="bars">
-            {#each depRows as r}
-              <li>
-                <span class="blabel" title={r.libelle}>{r.libelle}</span>
-                <span class="btrack"><span class="bfill out" style="width:{100 * r.montant / depMax}%"></span></span>
-                <span class="bval">{eurosC(r.montant)}</span>
-                <span class="bpct">{pct(r.montant, depTotalDG)}</span>
-              </li>
-            {/each}
-          </ul>
-        </div>
-      {/if}
-
-      {#if recRows.length}
-        <div class="col">
-          <h2 class="in-h">D'où vient l'argent</h2>
-          <p class="hint">Recettes de fonctionnement {year} : {eurosC(recTotalDG)}</p>
-          <ul class="bars">
-            {#each recRows as r}
-              <li>
-                <span class="blabel" title={r.libelle}>{r.libelle}</span>
-                <span class="btrack"><span class="bfill in" style="width:{100 * r.montant / recMax}%"></span></span>
-                <span class="bval">{eurosC(r.montant)}</span>
-                <span class="bpct">{pct(r.montant, recTotalDG)}</span>
-              </li>
-            {/each}
-          </ul>
-        </div>
-      {/if}
-    </div>
-
-    <!-- 5 ─ Dette, épargne, investissement -->
-    <h2>Dette &amp; capacité d'action</h2>
-    <div class="tiles small">
-      <div class="tile"><span class="tlabel">Annuité de la dette{#if aDesAnnexes}{' '} (budget principal){/if}</span><span class="tval">{eurosC(annuite)}</span><span class="tsub">{perHab(gH('Annuité de la dette'))}</span></div>
-      <div class="tile"><span class="tlabel">Épargne nette{#if aDesAnnexes}{' '} (budget principal){/if}</span><span class="tval">{eurosC(epargneNette)}</span><span class="tsub">{perHab(gH('Epargne nette'))}</span></div>
-      <div class="tile"><span class="tlabel">Dépenses d'équipement</span><span class="tval">{eurosC(equipement)}</span><span class="tsub">{perHab(gH("Dépenses d'équipement"))}</span></div>
-      <div class="tile"><span class="tlabel">Concours de l'État</span><span class="tval">{eurosC(gV("Concours de l'Etat"))}</span><span class="tsub">{perHab(gH("Concours de l'Etat"))}</span></div>
-    </div>
-    {/if}
-
     {#if epargneSerie.length > 1}
-      <h3>Évolution de l'épargne brute</h3>
+      <h3>Épargne brute</h3>
       <div class="trend">
         {#each epargneSerie as d}
           <div class="tcol" class:cur={d.year === year} title="{d.year} : {eurosC(d.val)}">
@@ -533,56 +718,118 @@
       </div>
     {/if}
 
-    <!-- 6 ─ Agrégats OFGL : vue annualisée par thème -->
+    <!-- Agrégats OFGL : vue annualisée par thème -->
     {#if ofglGroupsShown.length}
       <div class="secthead">
-        <h3>Agrégats financiers, année par année</h3>
+        <h3>Année par année</h3>
         <div class="seg">
           <button class:on={!showPerHab} aria-pressed={!showPerHab} on:click={() => showPerHab = false}>Montant</button>
           <button class:on={showPerHab} aria-pressed={showPerHab} on:click={() => showPerHab = true}>€/hab.</button>
         </div>
       </div>
-      <p class="hint">Les grands équilibres financiers de la commune sur {Math.min(...ofglYears)}–{Math.max(...ofglYears)} (source OFGL). Colonne <b>{year}</b> surlignée.</p>
+      <p class="hint">Les grands équilibres financiers de la commune sur {Math.min(...ofglYears)}–{Math.max(...ofglYears)} (source OFGL), toutes les années quelle que soit l'année affichée. Colonne <b>{year}</b> surlignée.{#if aDesAnnexes}{' '}Périmètre : <b>{libellePerimetre}</b> (<a href="#perimetre">changer</a>).{/if}{#if tousConsolide}{' '}En « tous budgets », les comptes consolidés de l'OFGL : les flux entre budgets sont retirés, et rien n'est compté deux fois.{/if}</p>
+      {#if nonAdditionnes.length}
+        <p class="hint">Absents en « tous budgets », parce que la même somme y serait comptée deux fois : {nonAdditionnes.map(n => /^[A-Z]{2}/.test(n) ? n : n.charAt(0).toLowerCase() + n.slice(1)).join(', ')}. Ils se lisent budget par budget.</p>
+      {/if}
       <div class="scrollx">
-        <table class="matrix">
-          <caption class="visually-hidden">Agrégats financiers, année par année</caption>
+        <table class="matrix" class:toutes={toutesAnnees || !matriceEvol}>
+          <caption class="visually-hidden">Agrégats financiers, année par année ({libellePerimetre})</caption>
           <thead>
-            <tr><th scope="col" class="ag">Agrégat</th>{#each ofglYears as y}<th scope="col" class="r" class:cur={y === year}>{y}</th>{/each}</tr>
+            <tr>
+              <th scope="col" class="ag">Agrégat</th>
+              {#each ofglYears as y}<th scope="col" class="r" class:cur={y === year} class:hors={y !== year && y !== year - 1}>{y}</th>{/each}
+              {#if matriceEvol}<th scope="col" class="r">Évolution</th>{/if}
+            </tr>
           </thead>
           <tbody>
             {#each ofglGroupsShown as g}
-              <tr class="grp"><td colspan={ofglYears.length + 1}>{g.title}</td></tr>
+              <tr class="grp"><td colspan={ofglYears.length + 2}>{g.title}</td></tr>
               {#each g.items as name}
+                {@const ev = evolLigne(name)}
                 <tr>
-                  <td class="ag" title={etiquette(name)}>{etiquette(name)}</td>
+                  <th scope="row" class="ag">{libelleAgregat(name)}</th>
                   {#each ofglYears as y}
-                    {@const c = ofglCell(name, y)}
-                    <td class="r" class:cur={y === year}>
-                      {#if c}{showPerHab ? (c.euros_par_habitant != null ? Math.round(c.euros_par_habitant) + ' €' : '-') : eurosC(c.montant)}{:else}·{/if}
+                    {@const c = valeur(name, y, perimetre)}
+                    {@const v = lisible(c) ? (showPerHab ? c.euros_par_habitant : c.montant) : null}
+                    <td class="r" class:cur={y === year} class:hors={y !== year && y !== year - 1} class:neg={v != null && v < 0}>
+                      {#if v != null}{showPerHab ? parHab(v) : eurosS(v)}{:else}·{/if}
                     </td>
                   {/each}
+                  {#if matriceEvol}<td class="r evol">{ev != null ? `${signe(ev)} vs ${year - 1}` : '·'}</td>{/if}
                 </tr>
               {/each}
             {/each}
           </tbody>
         </table>
       </div>
+      {#if matriceEvol}{' '}
+        <button type="button" class="voir-tout" aria-pressed={toutesAnnees} on:click={() => toutesAnnees = !toutesAnnees}>
+          {toutesAnnees ? `Seulement ${year - 1} et ${year}` : 'Voir toutes les années'}
+        </button>
+      {' '}{/if}
     {/if}
 
-    <!-- 7 ─ Budgets annexes : synthèse par structure et par année -->
+
+    {#if annexeByStruct.length || (isVoteYear && voteAnnexes.length)}
+      <h2 id="annexes">Les budgets annexes</h2>
+    {/if}
+    {#if isVoteYear}
+      {#if voteAnnexes.length}
+        <h3>Votés pour {year}</h3>
+        <p class="hint">Un budget voté est équilibré section par section : quand les recettes égalent les dépenses, le montant n'est écrit qu'une fois.</p>
+        <div class="votecards">
+          {#each voteCartes as c}
+            <div class="votecard">
+              <h4>{c.nom}</h4>
+              <dl>
+                {#each c.sections as s}
+                  <dt>{s.titre}</dt>
+                  {#if equilibre(s)}
+                    <dd><b>{fmtVote(s.dep)}</b> <span class="vnote">équilibré</span></dd>
+                  {:else}
+                    <dd>
+                      {#if s.rec}<span>recettes <b>{fmtVote(s.rec)}</b></span>{/if}
+                      {#if s.dep}<span>dépenses <b>{fmtVote(s.dep)}</b></span>{/if}
+                    </dd>
+                  {/if}
+                {/each}
+                {#each c.dont as d}
+                  <dt class="dont">{d.titre}</dt><dd>{fmtVote(d.r)}</dd>
+                {/each}
+                {#each c.autres as r}
+                  <dt class="dont">{LIBELLES_VOTE[r.agregat] ?? r.agregat}</dt><dd>{fmtVote(r)}</dd>
+                {/each}
+              </dl>
+              {#each c.notes as n}<p class="vnote">{n}</p>{/each}
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+    {/if}
+    <!-- Budgets annexes : synthèse par structure et par année -->
     {#if annexeByStruct.length}
-      <h3>Budgets annexes, par structure</h3>
-      <p class="hint">Régies et budgets rattachés (hors budget principal), un par un, année par année : dette en fin d'exercice, et produits moins charges de fonctionnement lorsque la balance DGFiP les donne.</p>
+      {#if isVoteYear && voteAnnexes.length}<h3>Comptes, année par année</h3>{/if}
+      <p class="hint">{annexeByStruct.length} budgets annexes. Chacun tient ses propres comptes ; ouvrez-en un pour voir ses années (balance DGFiP), toutes les années quelle que soit l'année affichée.</p>
       {#each annexeByStruct as s}
-        <div class="annexe-struct">
-          <h4>{#if s.entityId}<a href="/entite/{s.entityId}">{s.name}</a>{:else}{s.name}{/if}</h4>
+        <details class="annexe-struct">
+          <summary>
+            <span class="anom">{s.nom}</span>
+            <span class="aresume">
+              {#if s.detteFin != null}dette {eurosC(s.detteFin)} fin {s.detteAn}{:else}sans emprunt{/if}{#if s.dernier < derniereAnneeAnnexes}{' '}· jusqu'en {s.dernier}{/if}
+            </span>
+          </summary>
+          <p class="adgfip">Libellé DGFiP : {#if s.entityId}<a href="/entite/{s.entityId}">{s.name}</a>{:else}{s.name}{/if}</p>
+          {#if s.precede}
+            <p class="hint">Suite de « {nomBudget(s.precede)} » : comptes publiés sous ce nom à partir de {s.years[0].year}.</p>
+          {/if}
           {#if s.dernier < derniereAnneeAnnexes}
-            <p class="hint">Aucun compte publié pour ce budget après {s.dernier}{#if s.suite}{' '} ; poursuivi sous le nom « {s.suite} »{/if}.</p>
+            <p class="hint">Aucun compte publié pour ce budget après {s.dernier}{#if s.suite}{' '} ; poursuivi sous le nom « {nomBudget(s.suite)} », juste en dessous{/if}.</p>
           {/if}
           <div class="scrollx">
             <table class="annexe">
-              <caption class="visually-hidden">Comptes de {s.name}, année par année</caption>
-              <thead><tr><th scope="col">Année</th>{#if s.aDette}<th scope="col" class="r" title="Emprunts, balance DGFiP ; « - » : aucun compte de dette dans la balance">Encours de dette</th>{/if}<th scope="col" class="r">Solde de fonctionnement</th>{#if s.aSubv}<th scope="col" class="r">Subvention communale</th>{/if}<th scope="col">Source</th></tr></thead>
+              <caption class="visually-hidden">Comptes de {s.nom}, année par année</caption>
+              <thead><tr><th scope="col">Année</th>{#if s.aDette}<th scope="col" class="r" title="Emprunts et cautionnements reçus, balance DGFiP ; « - » : aucun compte de dette dans la balance">Encours de dette</th>{/if}<th scope="col" class="r">Solde de fonctionnement</th>{#if s.aSubv}<th scope="col" class="r">Subvention communale</th>{/if}<th scope="col">Source</th></tr></thead>
               <tbody>
                 {#each s.years as y}
                   <tr>
@@ -590,9 +837,9 @@
                     {#if s.aDette}<td class="r">{y.detteVal != null ? eurosC(y.detteVal) : '-'}</td>{/if}
                     <td class="r">
                       {#if y.soldeVal != null}{' '}
-                        <span class:neg={y.soldeVal < 0} class:pos={y.soldeVal >= 0}>{eurosC(y.soldeVal)}</span>
+                        <span class:neg={y.soldeVal < 0} class:pos={y.soldeVal >= 0}>{eurosS(y.soldeVal)}</span>
                         {#if y.soldeLbl}<span class="sublbl">{y.soldeLbl}</span>{/if}
-                      {:else}-{/if}
+                      {' '}{:else}-{/if}
                     </td>
                     {#if s.aSubv}<td class="r">{y.subvComm != null ? eurosC(y.subvComm) : '-'}</td>{/if}
                     <td class="src">{y.source}</td>
@@ -604,7 +851,7 @@
           <details class="raw">
             <summary>Détail ligne à ligne</summary>
             <table>
-              <caption class="visually-hidden">Comptes de {s.name}, détail ligne à ligne</caption>
+              <caption class="visually-hidden">Comptes de {s.nom}, détail ligne à ligne</caption>
               <thead><tr><th scope="col">Année</th><th scope="col">Section</th><th scope="col">Sens</th><th scope="col">Libellé</th><th scope="col" class="r">Montant</th></tr></thead>
               <tbody>
                 {#each s.years as y}{#each y.rows as r}
@@ -613,7 +860,7 @@
               </tbody>
             </table>
           </details>
-        </div>
+        </details>
       {/each}
     {/if}
 
@@ -726,13 +973,30 @@
   .seg button.on { background: var(--ardoise); color: #fff; }
   .scrollx { overflow-x: auto; }
   table.matrix { min-width: 640px; }
-  table.matrix th.ag, table.matrix td.ag { text-align: left; white-space: nowrap; max-width: 260px; overflow: hidden; text-overflow: ellipsis; position: sticky; left: 0; background: #fff; }
+  table.matrix th.ag { text-align: left; white-space: normal; min-width: 150px; max-width: 220px; position: sticky; left: 0; background: #fff; color: var(--gris); font-weight: 400; font-size: .82rem; }
+  table.matrix thead th.ag { font-weight: 600; font-size: .78rem; }
   table.matrix th { font-size: .78rem; }
+  table.matrix td.neg { color: var(--depense); font-weight: 600; }
+  table.matrix td.evol { color: var(--gris); font-size: .78rem; }
+  .voir-tout { display: none; margin: .5rem 0 0; min-height: 44px; padding: .4rem .9rem; border: 1px solid var(--trait); border-radius: 8px; background: #fff; color: var(--ardoise); font-size: .85rem; cursor: pointer; }
+  .tperim { display: block; text-transform: none; font-weight: 400; letter-spacing: 0; color: var(--gris-clair); }
   table.matrix td { font-size: .82rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
   table.matrix .grp td { background: var(--trait-pale); font-weight: 700; font-size: .74rem; text-transform: uppercase; letter-spacing: .03em; color: var(--gris); }
   table.matrix th.cur, table.matrix td.cur { background: var(--ardoise-pale); }
-  table.matrix td.ag { color: var(--gris); }
-  .annexe-struct { margin: .5rem 0 1.25rem; }
+  .annexe-struct { margin: 0; padding: 0; border: none; border-bottom: 1px solid var(--trait); }
+  .annexe-struct > summary { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: .25rem 1rem; min-height: 44px; padding: .6rem .25rem; color: var(--encre); font-weight: 400; }
+  .annexe-struct > summary .anom { font-weight: 600; }
+  .annexe-struct > summary .aresume { font-size: .82rem; color: var(--gris); font-variant-numeric: tabular-nums; }
+  .annexe-struct[open] { padding-bottom: .9rem; }
+  .adgfip { margin: .1rem 0 .5rem; font-size: .76rem; color: var(--gris-clair); }
+  .adgfip a { color: var(--ardoise); }
+  .sommaire { display: flex; flex-wrap: wrap; gap: .25rem 1.1rem; margin: .9rem 0 0; font-size: .88rem; }
+  .sommaire a { display: inline-flex; align-items: center; min-height: 44px; color: var(--ardoise); text-decoration: none; border-bottom: 1px solid transparent; }
+  .sommaire a:hover { border-bottom-color: var(--ardoise); }
+  .sommaire a:focus-visible { outline: 2px solid var(--ardoise); outline-offset: 2px; }
+  h2[id] { margin-top: 2.5rem; padding-top: 1.1rem; border-top: 1px solid var(--trait); scroll-margin-top: 4.5rem; }
+  h2#essentiel { margin-top: 1.5rem; }
+  .pilote { margin: .4rem 0 0; font-size: .8rem; color: var(--gris); max-width: 70ch; }
   table.annexe { min-width: 520px; font-size: .85rem; }
   table.annexe .neg { color: var(--depense); font-weight: 700; }
   table.annexe .pos { color: var(--recette); font-weight: 700; }
@@ -748,16 +1012,24 @@
   .votebanner { background: #eef2ff; border: 1px solid #c7d2fe; border-left: 3px solid var(--ardoise-fonce); color: var(--ardoise-fonce); border-radius: 8px; padding: .7rem .9rem; font-size: .88rem; line-height: 1.5; margin: 1.25rem 0 1.5rem; }
   .votebanner a { color: var(--ardoise-fonce); font-weight: 600; }
   .tile.vote { border-top-color: var(--ardoise); }
-  .votelist { list-style: none; padding: 0; margin: .25rem 0 1rem; display: flex; flex-direction: column; gap: .4rem; }
-  .votelist li { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: baseline; column-gap: .8rem; row-gap: .1rem; border-bottom: 1px solid var(--ardoise-pale); padding: .35rem 0; }
-  .votelist .vname { font-weight: 600; color: var(--encre); font-size: .9rem; }
-  .votelist .vval { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--ardoise-fonce); }
-  .votelist .vnote { grid-column: 1 / -1; font-size: .78rem; color: var(--gris-clair); }
+  .votecards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: .75rem; margin: .25rem 0 1rem; }
+  .votecard { background: #fff; border: 1px solid var(--trait); border-top: 3px solid var(--ardoise); border-radius: 8px; padding: .75rem .9rem; }
+  .votecard h4 { margin: 0 0 .5rem; }
+  .votecard dl { display: grid; grid-template-columns: auto 1fr; column-gap: .8rem; row-gap: .3rem; margin: 0; font-size: .85rem; }
+  .votecard dt { color: var(--gris); }
+  .votecard dt.dont { padding-left: .6rem; font-size: .8rem; color: var(--gris-clair); }
+  .votecard dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; color: var(--ardoise-fonce); display: flex; flex-direction: column; align-items: flex-end; }
+  .votecard dd b { font-weight: 700; }
+  .votecard dd > span, .votecard dd b { white-space: nowrap; }
+  .vnote { font-size: .76rem; color: var(--gris-clair); font-weight: 400; margin: .3rem 0 0; }
   .note b { font-weight: 700; }
   .foot { color: var(--gris-clair); font-size: .78rem; margin-top: 1.5rem; }
 
   @media (max-width: 720px) {
     .tiles { grid-template-columns: repeat(2, 1fr); }
     .cols { grid-template-columns: 1fr; gap: 1.25rem; }
+    table.matrix { min-width: 0; }
+    table.matrix:not(.toutes) .hors { display: none; }
+    .voir-tout { display: inline-block; }
   }
 </style>

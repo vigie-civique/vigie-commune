@@ -59,6 +59,11 @@ PDF_DIR = ROOT / "data" / "pv"
 
 # En dessous : PDF scanné sans couche texte → relève de cm_ocr, pas d'ici.
 MIN_TEXT_CHARS = 400
+# Et par page : une liasse scannée porte souvent ses cachets de télétransmission
+# en couche texte — 2 402 caractères pour 34 pages au CM de Lasalle du
+# 15/10/2026, au-dessus du seuil global, si bien que le document passait pour lu
+# et rendait 5 délibérations sur 18. Une page rédigée en porte vingt fois plus.
+MIN_CHARS_PAR_PAGE = 100
 
 # Ce qui change entre les deux portées : le type d'événement, l'ordre d'écriture
 # des noms dans le document, et l'intitulé de la séance. Rien d'autre.
@@ -208,6 +213,62 @@ def texte_pdf(chemin: Path) -> str:
         return ""
 
 
+def _trop_mince(chemin: Path, texte: str) -> bool:
+    """La couche texte est-elle trop mince pour avoir été lue ? Globalement,
+    ou en moyenne par page (cf. MIN_CHARS_PAR_PAGE)."""
+    if len(texte) < MIN_TEXT_CHARS:
+        return True
+    try:
+        with pdfplumber.open(str(chemin)) as pdf:
+            pages = len(pdf.pages)
+    except Exception:
+        return False
+    return len(texte) < MIN_CHARS_PAR_PAGE * pages
+
+
+def _pages_natives(chemin: Path) -> list[str]:
+    """La couche texte de l'ORIGINAL, une entrée par page, cachets compris.
+
+    pdftotext, et non pdfplumber : le cachet de télétransmission (« ID :
+    030-…-DEL2610_01-DE ») est souvent une ANNOTATION posée sur un scan, que
+    pdfplumber ne lit pas. [] si l'outil manque ou échoue.
+    """
+    if not shutil.which("pdftotext"):
+        return []
+    try:
+        sortie = subprocess.run(["pdftotext", "-q", str(chemin), "-"],
+                                capture_output=True, text=True, timeout=120).stdout
+    except (subprocess.SubprocessError, OSError):
+        return []
+    return sortie.split("\f")
+
+
+def _texte_ocerise(original: Path, cible: Path) -> str:
+    """Le texte du PDF océrisé, la couche native de l'original en tête de page.
+
+    `--force-ocr` rastérise la page entière pour la relire, cachet compris, et
+    le cachet relu sort abîmé : « 1ÈAS-DEL2610.01-DE », « 080-21000
+    1407.20261015-DEL2610_02-DE ». Or c'est lui qui découpe une liasse
+    (`pv_parsers._actes_teletransmis`). Le CM de Lasalle du 15/10/2026 rendait
+    5 délibérations sur 18 au serveur ; celui du 10/09/2026, 9 sur 16. Avec la
+    couche native remise en tête de chaque page : 18 sur 18, 16 sur 16, sans
+    renoncer à la relecture forcée du corps, mesurée meilleure (`cm_ocr`).
+
+    Un scan pur n'a pas de couche native : son texte ne change pas.
+    """
+    natives = _pages_natives(original)
+    if not any(p.strip() for p in natives):
+        return texte_pdf(cible)
+    try:
+        with pdfplumber.open(str(cible)) as pdf:
+            relues = [(p.extract_text() or "") for p in pdf.pages]
+    except Exception as e:
+        print(f"  [pv][erreur] lecture {cible.name} → {e}")
+        return ""
+    return "\n".join(f"{n.strip()}\n{r}" if n.strip() else r
+                     for n, r in zip(natives, relues))
+
+
 def lire_document(doc, avec_ocr: bool = False) -> tuple[str, str, bool] | None:
     """(texte, format, océrisé) — ou rien si le document est hors d'atteinte.
 
@@ -218,7 +279,7 @@ def lire_document(doc, avec_ocr: bool = False) -> tuple[str, str, bool] | None:
     cache = _cible_cache(doc.url)
     if cache.exists() and cache.stat().st_size > 0:
         texte = texte_pdf(cache)
-        if len(texte) < MIN_TEXT_CHARS and avec_ocr:
+        if avec_ocr and _trop_mince(cache, texte):
             texte = ocr(cache)
             return texte, "pdf", bool(texte)
         return texte, "pdf", False
@@ -233,7 +294,7 @@ def lire_document(doc, avec_ocr: bool = False) -> tuple[str, str, bool] | None:
     PDF_DIR.mkdir(parents=True, exist_ok=True)
     cache.write_bytes(raw)
     texte = texte_pdf(cache)
-    if len(texte) < MIN_TEXT_CHARS and avec_ocr:
+    if avec_ocr and _trop_mince(cache, texte):
         texte = ocr(cache)
         return texte, "pdf", bool(texte)
     return texte, "pdf", False
@@ -500,7 +561,7 @@ def ocr(chemin: Path, langue: str = "fra") -> str:
     if (garde := texte_garde(cible)) is not None:
         return garde
     if cible.exists() and cible.stat().st_size > 0:
-        return garder_texte(cible, texte_pdf(cible))
+        return garder_texte(cible, _texte_ocerise(chemin, cible))
     if not shutil.which("ocrmypdf"):
         print("  [ocr] ocrmypdf introuvable — `brew install ocrmypdf`")
         return ""
@@ -520,7 +581,7 @@ def ocr(chemin: Path, langue: str = "fra") -> str:
     except (subprocess.SubprocessError, OSError) as e:
         print(f"  [ocr][échec] {chemin.name} → {e}")
         return ""
-    return garder_texte(cible, texte_pdf(cible))
+    return garder_texte(cible, _texte_ocerise(chemin, cible))
 
 
 # « Séance du 25 juin 2026 », dans l'en-tête d'un acte. Repli de deuxième rang :

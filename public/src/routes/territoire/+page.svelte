@@ -31,6 +31,11 @@
   // Qualifié au build (`export_lovac`) : chaque valeur est un nombre, « s »
   // sous le secret statistique, ou absente. « s » ne se lit jamais comme zéro.
   $: lovac = data.lovac
+  // Qualifié au build (`export_guichets`) : chaque type retenu sort, même
+  // sans guichet — l'annuaire ne rattache pas tout, et « aucun rattaché »
+  // ne veut pas dire « aucun ».
+  $: guichets = data.guichets
+  $: guichetsDate = guichets?.date_fichier?.split('-').reverse().join('/')
   $: lovacSerie = lovac?.serie || []
   $: lovacDernier = lovacSerie.at(-1)
   $: lovacMax = Math.max(...lovacSerie.map(m => typeof m.vacants === 'number' ? m.vacants : 0), 11)
@@ -622,6 +627,47 @@
       </ul>
     {/if}
     <SourcesLimites bloc="territoire.desserte" />
+  {/if}
+
+  {#if guichets}
+    <!-- ── Guichets compétents (Annuaire de l'administration) ──────── -->
+    <h2 id="guichets">Les guichets dont relève la commune</h2>
+    <Niveau type="fait" source="Service-Public.gouv.fr / DILA, Annuaire de l'administration" href={guichets.page_jeu}>
+      Pour chaque administration, l'annuaire désigne le ou les guichets
+      compétents pour les habitants {COMMUNE_DE}. Les horaires et les
+      conditions d'accueil sont sur la fiche de chaque guichet.
+    </Niveau>
+    <div class="chart-wrap">
+      <table>
+        <caption class="visually-hidden">Guichets compétents pour la commune, par administration</caption>
+        <thead><tr><th scope="col">Administration</th><th scope="col">Guichet compétent</th></tr></thead>
+        <tbody>
+          {#each guichets.types as t}
+            <tr>
+              <td>{t.libelle}</td>
+              <td>
+                {#each t.guichets as g, i}
+                  {#if i > 0}<br>{/if}
+                  {#if g.fiche}<a href={g.fiche} rel="noopener">{g.nom}</a>{:else}{g.nom}{/if}{#if g.sur_place}<span class="muted"> · dans la commune</span>{/if}
+                  {#if g.adresse}<br><span class="muted">{g.adresse}{#if g.telephone}{' '}· {g.telephone}{/if}</span>{/if}
+                {:else}{' '}
+                  <span class="muted">L'annuaire n'en rattache aucun à la commune.</span>
+                {/each}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+    <p class="lecture">
+      <b>Précautions d'emploi.</b> Quand l'annuaire rattache plusieurs guichets
+      d'une même administration, il ne dit pas lequel traite quelle démarche.
+      Un type sans guichet n'est pas un service absent du territoire&nbsp;: la
+      CAF, par exemple, n'y est rattachée qu'à la commune de chaque accueil.
+      Données&nbsp;: Service-Public.gouv.fr / DILA, fichier
+      {#if guichets.source_url}<a href={guichets.source_url} rel="noopener">{guichets.fichier}</a>{:else}{guichets.fichier}{/if}{#if guichetsDate}{' '}du {guichetsDate}{/if}.
+    </p>
+    <SourcesLimites bloc="territoire.guichets" millesime={guichetsDate ? `fichier du ${guichetsDate}` : undefined} />
   {/if}
 
   {#if fixe}

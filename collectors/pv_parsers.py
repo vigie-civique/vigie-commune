@@ -270,6 +270,11 @@ _MOBILIER_DE_CACHET = re.compile(
     r"|PUBLI[EÉ]\s+LE\b"
     r"|PAGE\b"
     r"|D[EÉ]LIB[EÉ]RATIONS?\s+DU\s+CONSEIL"
+    # Le même bandeau, colonne « DÉPARTEMENT » collée devant et abîmée :
+    # « BÉPARTENMRENT DES DELIBERATIONS DU CONSEIL », « EPARTEMENT DES
+    # DELIBERATIONS », « HEPARTERENT DES … » — quatre titres des CM de Lasalle
+    # des 10/09 et 15/10/2026.
+    r"|\S{1,14}\s+DES\s+D[EÉ]LIB[EÉ]RATIONS\b"
     r"|ACTE\s+RENDU\s+EX[EÉ]CUTOIRE"
     r"|POUR\s+COPIE\s+CONFORME"
     # L'en-tête de la collectivité elle-même : « COMMUNAUTE DE COMMUNES CAUSSES

@@ -49,8 +49,11 @@
 
   <h2>Qui décide, quand</h2>
   <p>Le conseil municipal <strong>vote le budget avant le 15 avril</strong> (budget primitif), puis
-     constate l'année suivante ce qui a été réellement dépensé (compte administratif). Ces documents
-     sont publics, les délibérations budgétaires aussi.</p>
+     arrête l'année suivante ce qui a été réellement encaissé et dépensé. Ce bilan tenait en deux
+     documents, le compte administratif du maire et le compte de gestion du comptable public ; il
+     tient désormais en un seul, le <strong>compte financier unique</strong> (CFU), généralisé par
+     l'ordonnance du 12 juin 2025 et adopté plus tôt par certaines communes. Ces documents sont
+     publics, les délibérations budgétaires aussi.</p>
 
   <p class="voir">
     Voir les chiffres réels : <a href="/argent">Où va l'argent</a> ·

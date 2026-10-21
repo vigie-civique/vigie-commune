@@ -182,6 +182,7 @@ PROFONDEUR_STEP = {
     "equipements": "fond",          # commerces, santé, écoles (BPE)
     "dpe":         "fond",          # état énergétique du parc de logements
     "lovac":       "fond",          # logements vacants du parc privé
+    "guichets":    "fond",          # guichets compétents (annuaire de la DILA)
     "mobilite":    "fond",          # AOM, arrêts déclarés, dispositifs de l'État
     "sante":       "fond",          # établissements sanitaires et médico-sociaux
     "cadastre":    "fond",          # parcellaire — une commune, un fichier
@@ -474,6 +475,8 @@ STEP_META = {
     "dpe":        (30,  15, "dpe_couverture",    ""),
     # Le Cerema dépose un millésime par an, à l'été.
     "lovac":      (365, 15, "lovac_vacance",     ""),
+    # L'annuaire est republié chaque nuit ; un guichet bouge rarement.
+    "guichets":   (30,  15, "guichets",          ""),
     # Un GTFS se republie en continu, la table de l'ANCT quelques fois par an :
     # 30 jours suit le plus vif des deux.
     "mobilite":   (30,  18, "mobilite_aom",      ""),

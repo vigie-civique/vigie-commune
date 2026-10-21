@@ -161,6 +161,6 @@
   ],
   "total": 10,
   "arrete_le": "2026-10-19",
-  "genere_le": "2026-10-19T14:39:38",
+  "genere_le": "2026-10-19T22:05:14",
   "note": "Flux construit à partir des dates des actes publiés. Les flux financiers n'ont qu'une année : ils portent `date_approx` et sont regroupés par année, hors de la frise mensuelle. Les éléments datés après `arrete_le` sont des événements à venir."
 }

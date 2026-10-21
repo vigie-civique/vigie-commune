@@ -140,6 +140,9 @@ export function load() {
     // Qualifié au build (`export_lovac`) : « s » voyage tel quel, et les
     // ruptures de méthode avec la série.
     lovac: fichier.lovac || null,
+    // Qualifié au build (`export_guichets`) : chaque type retenu, même sans
+    // guichet — l'annuaire ne rattache pas tout.
+    guichets: fichier.guichets || null,
     // Section → dossier thématique publié sur le même sujet (lot 8).
     dossiers: dossiersDeLaPage('/territoire'),
   }

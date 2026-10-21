@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import re
 
+from collectors.guichets import PAGE_JEU as GUICHETS_PAGE_JEU, TYPES as GUICHETS_TYPES
 from collectors.lovac import PAGE_JEU, RUPTURES, SECRET
-from scripts.snapshot.socle import (DEPARTEMENT, EPCI_SIREN_C2, INSEE_C1, TELECOMS_RAYON_KM,
-                                    row, rows, table_exists, write_json)
+from scripts.snapshot.fiches import domain_for
+from scripts.snapshot.socle import (DEPARTEMENT, EPCI_SIREN_C2, INSEE_C1, RULES,
+                                    TELECOMS_RAYON_KM, URL_COMMUNE, row, rows, table_exists,
+                                    write_json)
 
 
 # ── Ce que les dossiers thématiques ont fait collecter, sur les pages ────────
@@ -415,6 +418,49 @@ def export_lovac(conn, insee: str) -> dict | None:
     }
 
 
+def export_guichets(conn, insee: str) -> dict | None:
+    """Les guichets dont relève la commune, type par type, dans l'ordre de la page.
+
+    Chaque type retenu sort, même sans guichet : `guichets` vide veut dire que
+    l'annuaire n'en rattache aucun à la commune, pas qu'il n'en existe pas. Le
+    guichet installé dans la commune passe en tête de son type.
+    """
+    if not table_exists(conn, "guichets_releves"):
+        return None
+    releve = row(conn, "SELECT fichier, date_fichier, source_url FROM guichets_releves"
+                       " WHERE insee=?", (insee,))
+    if not releve:
+        return None
+    lignes = rows(conn, """
+        SELECT type, nom, commune, adresse, telephone, site, fiche_url
+          FROM guichets WHERE insee=? ORDER BY commune<>? , nom""", (insee, insee))
+    # verify_snapshot refuse toute URL d'un domaine générique sous `site`, et la
+    # passe du 20/10/2026 sur le VPS s'est arrêtée là. Le site de la commune est
+    # générique pour l'instance — sauf sur le guichet de sa propre mairie, où il
+    # est le sien (le contrôleur fait la même exception). La fiche de
+    # l'annuaire, elle, reste toujours.
+    generiques = RULES["urls"]["exclude_generic_domains"]
+    commune = domain_for(URL_COMMUNE)
+    par_type: dict[str, list] = {}
+    for l in lignes:
+        dom = domain_for(l["site"])
+        sienne = l["type"] == "mairie" and l["commune"] == insee and dom == commune
+        site = None if dom and not sienne \
+            and any(dom == x or dom.endswith("." + x) for x in generiques) else l["site"]
+        par_type.setdefault(l["type"], []).append({
+            "nom": l["nom"], "sur_place": l["commune"] == insee, "adresse": l["adresse"],
+            "telephone": l["telephone"], "site": site, "fiche": l["fiche_url"]})
+    return {
+        "insee": insee,
+        "types": [{"type": t, "libelle": lib, "guichets": par_type.get(t, [])}
+                  for t, lib in GUICHETS_TYPES.items()],
+        "fichier": releve["fichier"],
+        "date_fichier": releve["date_fichier"],
+        "source_url": releve["source_url"],
+        "page_jeu": GUICHETS_PAGE_JEU,
+    }
+
+
 INSEE_PUBLIABLES = """
     SELECT insee, commune, dataset, indicateur, libelle, annee, valeur, dims
       FROM insee_indicateurs
@@ -677,6 +723,7 @@ def etape_territoire(conn, out) -> None:
         "telecoms": export_telecoms(conn, INSEE_C1, DEPARTEMENT, TELECOMS_RAYON_KM),
         "enfance": export_enfance(conn, INSEE_C1, EPCI_SIREN_C2, DEPARTEMENT),
         "lovac": export_lovac(conn, INSEE_C1),
+        "guichets": export_guichets(conn, INSEE_C1),
     })
 
 

@@ -224,6 +224,11 @@ def construire() -> dict:
         "CENTROID_LNG": centroide[1],
         "SITE_NOM_ATELIER": (projet.get("private_name")
                              or f"Atelier Vigie Civique {nom}"),
+        # Les procès-verbaux abrègent les budgets annexes (« aj ») : seule la
+        # commune sait ce que l'abréviation recouvre. Sans entrée, la page
+        # affiche le nom tel que le PV l'écrit.
+        "NOMS_BUDGETS": {k: v for k, v in (inst.get("noms_budgets") or {}).items()
+                         if not k.startswith("_")},
     }
 
 
@@ -244,6 +249,8 @@ def ecrire(valeurs: dict, cibles: list[Path] | None = None) -> None:
     for cle, valeur in valeurs.items():
         if isinstance(valeur, (int, float)) and not isinstance(valeur, bool):
             lignes.append(f"export const {cle} = {valeur}")
+        elif isinstance(valeur, dict):
+            lignes.append(f"export const {cle} = {json.dumps(valeur, ensure_ascii=False)}")
         else:
             echappe = str(valeur).replace("\\", "\\\\").replace("'", "\\'")
             lignes.append(f"export const {cle} = '{echappe}'")
