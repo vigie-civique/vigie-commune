@@ -9,7 +9,8 @@ Importe les agrégats financiers pré-calculés de la commune depuis data.ofgl.f
 
 Source : https://data.ofgl.fr — API ODS, pas de clé requise.
 Données disponibles : 2018-2025 (le millésime courant n'est publié qu'avec ~1 an de décalage). Budget principal ; budgets annexes additionnés
-(suffixe SUFFIXE_ANNEXES).
+(suffixe SUFFIXE_ANNEXES) ; et, quand la commune a des annexes, les comptes
+CONSOLIDÉS de l'OFGL (suffixes SUFFIXE_TOUS et SUFFIXE_FLUX).
 
 Usage :
   python3 -m collectors.ofgl              # toutes les années
@@ -42,6 +43,15 @@ YEARS = list(range(2017, date.today().year + 1))
 # le même nom sert de clé à l'affichage (budgets/+page.svelte), à garder aligné.
 SUFFIXE_ANNEXES = " - budgets annexes"
 TYPE_PRINCIPAL = "Budget principal"
+
+# Principal + annexes ne s'additionnent pas : la subvention d'équilibre, le
+# personnel remboursé par une régie sont une dépense d'un budget et une recette
+# de l'autre (431 k€ à Lasalle en 2025, 23 % des recettes du principal). L'OFGL
+# publie la somme qui les retire — « comptes consolidés » — et le montant de ces
+# flux, qui dit pourquoi le total n'est pas la somme.
+DATASET_CONSOLIDE = "ofgl-base-communes-consolidee"
+SUFFIXE_TOUS = " - tous budgets"
+SUFFIXE_FLUX = " - flux entre budgets"
 PAGE = 100
 
 
@@ -70,6 +80,43 @@ def fetch_year(year: int) -> list[dict]:
         if len(page) < PAGE:
             return results
         offset += PAGE
+
+
+def fetch_consolide(year: int) -> list[dict]:
+    """Les agrégats consolidés de la commune pour l'exercice (une ligne par agrégat)."""
+    params = urllib.parse.urlencode({
+        "where": f'siren="{SIREN_COMMUNE}" AND year(exer)={year}',
+        "limit": PAGE,
+    })
+    try:
+        data = fetch_json(f"{API_BASE}/{DATASET_CONSOLIDE}/records?{params}",
+                          source="ofgl", timeout=30, headers=HEADERS)
+    except Exception as e:
+        print(f"  [erreur] consolidé {year} : {e}")
+        return []
+    return data.get("results", [])
+
+
+def consolides(records: list[dict]) -> list[dict]:
+    """« agrégat - tous budgets » (flux retirés) et « agrégat - flux entre budgets ».
+
+    Le flux n'est gardé que non nul : un zéro dit seulement que l'agrégat
+    s'additionne tel quel (la dette, l'épargne).
+    """
+    out = []
+    for r in records:
+        if r.get("montant") is None:
+            continue
+        commun = {"ptot": r.get("ptot"), "tranche_population": r.get("tranche_population"),
+                  "rural": r.get("rural")}
+        out.append({**commun, "agregat": r["agregat"] + SUFFIXE_TOUS,
+                    "montant": r["montant"], "euros_par_habitant": r.get("euros_par_habitant")})
+        if r.get("montant_flux"):
+            ptot = r.get("ptot")
+            out.append({**commun, "agregat": r["agregat"] + SUFFIXE_FLUX,
+                        "montant": r["montant_flux"],
+                        "euros_par_habitant": r["montant_flux"] / ptot if ptot else None})
+    return out
 
 
 def separer_budgets(records: list[dict]) -> list[dict]:
@@ -121,6 +168,9 @@ def import_year(conn, year: int, dry_run: bool = False) -> int:
     if not records:
         print(f"  {year} : aucune donnée")
         return 0
+    # Sans annexe, le consolidé redit le principal : rien à ajouter.
+    if any(r["agregat"].endswith(SUFFIXE_ANNEXES) for r in records):
+        records += consolides(fetch_consolide(year))
 
     print(f"  {year} : {len(records)} agrégats")
     if dry_run:

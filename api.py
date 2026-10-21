@@ -913,6 +913,31 @@ def _ia_configuree() -> bool:
     return bool(_IA_URL and _IA_MODELE) and (_ia_locale() or _IA_HORS_MACHINE)
 
 
+def _empreinte_modele() -> str | None:
+    """La version EXACTE du modèle local : l'empreinte que sert Ollama (ses 12
+    premiers caractères, l'« ID » de `ollama list`). Le nom ne suffit pas : un
+    `ollama pull` met une autre version sous le même nom (charte IA, engagement 4).
+
+    `None` pour un service distant, ou si le serveur ne la donne pas : la trace
+    garde alors le nom seul, et ne prétend pas davantage.
+    """
+    if not (_IA_URL and _IA_MODELE and _ia_locale()):
+        return None
+    from urllib.parse import urlsplit
+    import requests as _rq
+    u = urlsplit(_IA_URL)
+    try:
+        r = _rq.get(f"{u.scheme}://{u.netloc}/api/tags", timeout=5)
+        r.raise_for_status()
+        noms = {_IA_MODELE, f"{_IA_MODELE}:latest"}
+        for m in r.json().get("models") or []:
+            if m.get("name") in noms or m.get("model") in noms:
+                return (m.get("digest") or "")[:12] or None
+    except Exception:
+        return None
+    return None
+
+
 class SynthesizeRequest(BaseModel):
     topic: str
     context: str = ""
@@ -1178,6 +1203,9 @@ def atelier_ia_extraire(request: StarletteRequest, req: ExtraireRequest,
     resultat = _extraction.extraire(texte, req.objet, _appel_modele)
     resultat["source"] = {"raw_document_id": doc_id, "titre": titre}
     resultat["modele"] = _IA_MODELE
+    # Rendue à l'atelier, qui la renvoie avec la saisie (`source.ia`) : c'est
+    # elle qui dira, dans un an, quelle version a lu la ligne.
+    resultat["empreinte"] = _empreinte_modele()
     # Le dire explicitement : quand on manipule des données de personnes, savoir
     # si le texte est sorti de la machine n'est pas un détail d'affichage.
     resultat["locale"] = bool(_IA_URL) and _ia_locale()
@@ -3329,6 +3357,14 @@ def _valide_source(source: dict, conn) -> dict:
         propre["sans_document_motif"] = motif[:500]
         if source.get("url"):
             propre["url"] = _normaliser("url", "url", source["url"])
+    # Une ligne reprise d'une proposition du modèle garde QUEL modèle l'a lue
+    # (charte IA, engagement 4) — déclarée par l'atelier, vérifiée dans sa forme.
+    try:
+        ia = _extraction.trace_ia(source.get("ia"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if ia:
+        propre["ia"] = ia
     return propre
 
 

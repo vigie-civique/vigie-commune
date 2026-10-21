@@ -230,6 +230,42 @@ def citation_presente(citation: str, texte: str) -> bool:
     return aplatie in _aplatir(texte)
 
 
+_EMPREINTE = re.compile(r"[0-9a-f]{7,64}")
+
+
+def trace_ia(brute) -> dict | None:
+    """Quel modèle a proposé une ligne : `{"modele", "empreinte"?, "locale"?}`.
+
+    La charte d'usage de l'IA (`docs/charte-ia.md`, engagement 4) promet de
+    garder, pour chaque valeur extraite avec l'aide d'un modèle, quel modèle et
+    sous quelle version EXACTE. Le nom ne suffit pas — `gemma4:26b` désigne deux
+    versions successives après un `ollama pull` ; l'empreinte, si.
+
+    `None` quand rien n'est déclaré. Une trace mal formée lève `ValueError` :
+    elle vient d'un client ou d'un outil externe, et une trace fausse est pire
+    que pas de trace.
+    """
+    if brute in (None, {}):
+        return None
+    if not isinstance(brute, dict) or set(brute) - {"modele", "empreinte", "locale"}:
+        raise ValueError("trace IA : un objet {modele, empreinte, locale} est attendu")
+    modele = brute.get("modele")
+    if not isinstance(modele, str) or not modele.strip() or len(modele) > 200:
+        raise ValueError("trace IA : `modele` doit nommer le modèle (200 caractères au plus)")
+    trace = {"modele": modele.strip()}
+    empreinte = brute.get("empreinte")
+    if empreinte is not None:
+        if not isinstance(empreinte, str) or not _EMPREINTE.fullmatch(empreinte):
+            raise ValueError("trace IA : `empreinte` doit être hexadécimale (7 à 64 caractères)")
+        trace["empreinte"] = empreinte
+    locale = brute.get("locale")
+    if locale is not None:
+        if not isinstance(locale, bool):
+            raise ValueError("trace IA : `locale` doit être un booléen")
+        trace["locale"] = locale
+    return trace
+
+
 def message_extraction(objet: str, tranche: str) -> str:
     forme, quoi = GABARITS[objet]
     return (f"Extrais {quoi} du procès-verbal ci-dessous.\n"

@@ -222,6 +222,30 @@ class TestSaisie:
         assert ligne["origine"] == ATELIER
         assert ligne["saisi_par"] == "julien@exemple.fr"
 
+    def test_le_modele_d_une_ligne_reprise_est_garde(self, client):
+        # Charte IA, engagement 4 : la saisie garde quel modèle a lu la ligne.
+        api_client, _ = client
+        ia = {"modele": "gemma4:26b", "empreinte": "5571076f3d70", "locale": True}
+        r = api_client.post("/api/atelier/saisies", json={
+            "objet": "budget_vote",
+            "valeurs": {"year": 2026, "agregat": "Recettes", "value": 10.0},
+            "source": {"sans_document_motif": "registre consulté en mairie", "ia": ia},
+            "confidence": "confirmed"})
+        assert r.status_code == 201, r.text
+        [s] = api_client.get("/api/atelier/saisies").json()["saisies"]
+        assert s["source"]["ia"] == ia
+
+    def test_une_trace_de_modele_mal_formee_est_refusee(self, client):
+        api_client, _ = client
+        r = api_client.post("/api/atelier/saisies", json={
+            "objet": "budget_vote",
+            "valeurs": {"year": 2026, "agregat": "Recettes", "value": 10.0},
+            "source": {"sans_document_motif": "registre consulté en mairie",
+                       "ia": {"modele": "gemma4:26b", "empreinte": "pas-hexa"}},
+            "confidence": "confirmed"})
+        assert r.status_code == 400 and "empreinte" in r.text
+        assert api_client.get("/api/atelier/saisies").json()["saisies"] == []
+
     def test_verified_est_refuse_a_la_saisie(self, client):
         api_client, _ = client
         r = api_client.post("/api/atelier/saisies", json={

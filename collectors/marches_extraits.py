@@ -47,7 +47,7 @@ from pathlib import Path
 
 from . import propositions as _propositions
 from .citations import compact, montants_cites
-from .extraction import CITATION_MIN, _aplatir, citation_presente
+from .extraction import CITATION_MIN, _aplatir, citation_presente, trace_ia
 from .cle_acte import PREFIXE_PAR_TYPE, TYPES_ACTES, TYPES_SEANCES
 from .chemins import sous
 from .config import COMMUNE_NAME, COMMUNE_SIREN, COMMUNES_ADRESSE, EPCI_SIREN
@@ -421,6 +421,12 @@ def deposer(conn, rapport, auteur: dict, empreinte_rapport: str = "") -> dict:
     """
     _propositions.assurer_schema(conn)
     lignes = lignes_du_rapport(rapport)
+    # Le modèle qui a lu le rapport, déclaré en tête (`modele`) : il suit chaque
+    # ligne jusqu'à la saisie acceptée (charte IA, engagement 4).
+    try:
+        ia = trace_ia(rapport.get("modele")) if isinstance(rapport, dict) else None
+    except ValueError as e:
+        raise RapportRefuse(str(e))
     bilan = {"lignes": len(lignes), "proposees": 0, "deja_proposees": 0,
              "deja_importees": 0, "refusees": [], "cles_ignorees": [],
              "par_portee": {}}
@@ -445,6 +451,8 @@ def deposer(conn, rapport, auteur: dict, empreinte_rapport: str = "") -> dict:
             continue
         if empreinte_rapport:
             charge["rapport"] = empreinte_rapport
+        if ia:
+            charge["ia"] = ia
         _propositions.proposer(conn, NATURE, "deliberation", ligne["event_id"], None,
                                charge, {}, auteur, cle=cle)
         bilan["proposees"] += 1
@@ -526,6 +534,8 @@ def saisie_de(conn, proposition: dict, corrections: dict, validateur: dict) -> d
     }
     if doc:
         source.update(raw_document_id=doc[0], sha256=doc[1])
+    if charge.get("ia"):
+        source["ia"] = charge["ia"]
     valeurs = {
         "objet": charge["objet"],
         "acheteur_nom": charge["acheteur_nom"],

@@ -81,8 +81,11 @@ _MONTANT_RX = re.compile(MONTANT)
 # fois — ceci est un tableau, et il porte le budget primitif de cet exercice.
 # Une phrase qui parle en passant d'un « virement à la section d'investissement »
 # ne la produit jamais.
+# « Chap./art » (point ET barre) s'écrit aussi : le tableau des dépenses
+# d'investissement du parc locatif (PV du 03/03/2026) n'avait pas d'ancre, et
+# son total était lu dans le corps du tableau précédent, celui d'un autre budget.
 ENTETE = re.compile(
-    r"chap(?:\s*[/.]\s*art)?\.?\s*[\s|]*intitul[ée]*\b(?P<colonnes>[\s\S]{0,60}?)"
+    r"chap\.?(?:\s*[/.]?\s*art)?\.?\s*[\s|]*intitul[ée]*\b(?P<colonnes>[\s\S]{0,60}?)"
     r"bp\s+(?P<annee>20\d\d)")
 
 # Ce qui précède l'ancre nomme la section, et parfois le budget :
@@ -191,12 +194,19 @@ def montants_suivants(texte: str, depart: int, maximum: int = 3) -> list[float]:
     « Immédiatement » veut dire : rien entre elles que des blancs. Les sauts de
     ligne en sont : une page HTML met chaque cellule sur sa ligne, un PDF de
     tableur les aligne sur une seule, et le tableau est le même. Ce qui arrête
-    la lecture, c'est un MOT — l'étiquette de la ligne suivante.
+    la lecture, c'est un MOT — l'étiquette de la ligne suivante. Les blancs
+    comprennent l'espace insécable : « TOTAL DES RECETTES D'INVEST EXERCICE »
+    en est suivi dans le PV du 03/03/2026, et le total n'était pas lu.
     """
+    return _lire_montants(texte, depart, maximum)[0]
+
+
+def _lire_montants(texte: str, depart: int, maximum: int = 3) -> tuple[list[float], int]:
+    """Les sommes qui suivent `depart`, et la position où leur lecture s'arrête."""
     valeurs: list[float] = []
-    i = depart
+    i = fin = depart
     while len(valeurs) < maximum:
-        while i < len(texte) and texte[i] in " \t\n\r|:":
+        while i < len(texte) and (texte[i].isspace() or texte[i] in "|:"):
             i += 1
         m = _MONTANT_RX.match(texte, i)
         if not m:
@@ -205,8 +215,36 @@ def montants_suivants(texte: str, depart: int, maximum: int = 3) -> list[float]:
         if v is None or not _est_une_somme(m.group(0), v):
             break
         valeurs.append(v)
-        i = m.end()
-    return valeurs
+        i = fin = m.end()
+    return valeurs, fin
+
+
+def borner(corps: str) -> str:
+    """Le corps d'un tableau, arrêté à sa dernière ligne : le total, ou le solde
+    d'exécution qui le suit.
+
+    Sans borne, le dernier tableau d'un procès-verbal courait jusqu'à la fin du
+    document : les recettes de fonctionnement de La Cure (PV du 03/03/2026)
+    lisaient les « 012 charges de personnel » d'un avenant à la convention eau
+    et assainissement délibéré plus loin, et les écrivaient sous La Cure.
+    Une étiquette sans montant derrière elle (« .001 Solde d'exécution de la
+    section d'invest. ») n'est pas une fin de tableau.
+    """
+    fin_total = None
+    for motif, _ in TOTAUX:
+        for m in re.finditer(motif, corps):
+            valeurs, fin = _lire_montants(corps, m.end())
+            if valeurs:
+                fin_total = fin if fin_total is None else min(fin_total, fin)
+                break
+    if fin_total is None:
+        return corps
+    for m in re.finditer(SOLDE, corps[fin_total:]):
+        valeurs, fin = _lire_montants(corps, fin_total + m.end())
+        if valeurs:
+            return corps[:fin]
+        break
+    return corps[:fin_total]
 
 
 def nom_de_budget(brut: str) -> str | None:
@@ -288,7 +326,7 @@ def tableaux(titre: str, contenu: str) -> list[dict]:
             "annee": int(m.group("annee")),
             "scope": scope,
             "section": section,
-            "corps": texte[m.end():fin],
+            "corps": borner(texte[m.end():fin]),
             "colonne_sure": not colonne_apres_bp(texte[m.end():m.end() + 45]),
         })
     return lus

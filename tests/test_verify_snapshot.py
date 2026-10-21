@@ -398,3 +398,50 @@ def test_un_lien_publie_sous_un_autre_role_ne_fonde_pas_le_conflit(vs, tmp_path)
     vs.check_conflits(_conflit(tmp_path, {**CAS, "flux_id": None, "deport": None},
                                [{**LIEN, "relation_type": "élu_cm"}]), rep)
     assert set(rep.errors) == {"conflit fondé sur un lien non publié"}
+
+
+# ── Le site de la commune ────────────────────────────────────────────────────
+
+def _territoire(dossier: Path, site: str, sur_place: bool = True,
+                type_: str = "mairie") -> Path:
+    dossier.mkdir(parents=True, exist_ok=True)
+    (dossier / "territoire.json").write_text(json.dumps({"guichets": {"types": [
+        {"type": type_, "guichets": [{"nom": "Mairie", "sur_place": sur_place,
+                                      "site": site}]}]}}), encoding="utf-8")
+    return dossier / "territoire.json"
+
+
+def test_le_site_de_la_commune_est_generique_sans_etre_ecrit(vs):
+    # instance_test.json : commune_url = https://exemple.invalid
+    assert vs.COMMUNE_DOMAIN == "exemple.invalid"
+    assert "exemple.invalid" in vs.GENERIC_DOMAINS
+
+
+@pytest.mark.parametrize("sur_place,type_,bloque", [
+    (True, "mairie", False),     # sa mairie : c'est son site
+    (False, "mairie", True),     # la mairie d'ailleurs ne le porte pas
+    (True, "france_services", True),
+])
+def test_seule_la_mairie_sur_place_porte_le_site_de_la_commune(vs, tmp_path,
+                                                              sur_place, type_, bloque):
+    fp = _territoire(tmp_path, "https://www.exemple.invalid/", sur_place, type_)
+    rep = vs.Report()
+    vs.check_file(fp, rep, tmp_path)
+    assert ("URL de domaine générique attribuée à une entité" in rep.errors) is bloque
+
+
+def test_domain_of_ne_mange_pas_les_lettres(vs):
+    assert vs.domain_of("https://web.fr/") == "web.fr"
+    assert vs.domain_of("https://www.web.fr/") == "web.fr"
+
+
+@pytest.mark.parametrize("url, domaine", [
+    ("https://www.lasalle.fr/", "lasalle.fr"),
+    ("http://WWW.Exemple.FR/a", "exemple.fr"),
+    ("https://web.fr/x", "web.fr"),
+    ("https://wwwx.fr", "wwwx.fr"),
+    ("https://sous.www.fr", "sous.www.fr"),
+    ("ftp://www.a.fr", None),
+])
+def test_domain_of_ne_retire_que_le_prefixe_www(vs, url, domaine):
+    assert vs.domain_of(url) == domaine

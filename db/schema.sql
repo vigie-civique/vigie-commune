@@ -818,6 +818,7 @@ CREATE TABLE IF NOT EXISTS budget_annexe_balance (
     nomenclature            TEXT,
     entity_id               INTEGER REFERENCES entities(id) ON DELETE SET NULL,
     encours_dette           REAL,
+    cautions                REAL,
     produits_fonctionnement REAL,
     charges_fonctionnement  REAL,
     solde_fonctionnement    REAL,

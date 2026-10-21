@@ -545,3 +545,12 @@ def test_la_clause_de_decision_perd_ses_scories():
     assert (_titre_de_la_decision("DECIDE de modifier le budget 2023 « Budget Principal » de la façon "
                                   "suivante :\nChapitre 011")
             == "Modifier le budget 2023 « Budget Principal »")
+
+
+def test_le_bandeau_du_registre_abime_par_locerisation_reste_du_mobilier():
+    """La colonne « DÉPARTEMENT » collée au bandeau, lue de travers (CM du
+    10/09 et du 15/10/2026) : quatre titres en étaient faits."""
+    for ligne in ("BÉPARTENMRENT DES DELIBERATIONS DU CONSEIL",
+                  "EPARTEMENT DES DELIBERATIONS", "HEPARTERENT DES DÉLIBÉRATIONS"):
+        assert _ligne_dobjet(ligne) is None
+    assert _ligne_dobjet("TARIFS LOCAUX PROFESSIONNELS") == "TARIFS LOCAUX PROFESSIONNELS"

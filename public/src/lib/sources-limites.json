@@ -60,6 +60,11 @@
       "lien": "https://transport.data.gouv.fr/",
       "limite": "Un arrêt déclaré ne dit pas combien de passages il reçoit, ni s'il ne sert qu'aux transports scolaires."
     },
+    "territoire.guichets": {
+      "source": "Service-Public.gouv.fr / DILA, Annuaire de l'administration (base de données locales)",
+      "lien": "https://www.data.gouv.fr/datasets/service-public-gouv-fr-annuaire-de-ladministration-base-de-donnees-locales",
+      "limite": "Un guichet rattaché est celui que l'annuaire déclare compétent : ni son délai de rendez-vous, ni les démarches qu'il traite à distance ne sont dits."
+    },
     "territoire.telecoms": {
       "source": "ARCEP : Ma connexion internet, déploiements et qualité de la fibre, sites mobiles et sites indisponibles",
       "lien": "https://data.arcep.fr/",

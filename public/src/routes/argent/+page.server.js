@@ -35,7 +35,8 @@ export function load() {
     annee,
     recettes: agregat('Recettes de fonctionnement'),
     depenses: agregat('Dépenses de fonctionnement'),
-    epargne: agregat('Épargne brute'),
+    // Graphie de l'OFGL, sans accent : « Épargne brute » ne trouvait rien.
+    epargne: agregat('Epargne brute'),
     // Attributions et avis séparés : « 58 marchés publiés » comptait des avis
     // comme autant de marchés (audit du 24/09/2026).
     marches: marches.length ? marches.filter(estAttribue).length : (stats.marches_rows ?? null),

@@ -87,3 +87,43 @@ def test_sans_texte_ni_pdf_ni_outil_rien_n_est_invente(pv):
     original, _ = pv
     assert conseils.ocr(original) == ""
     assert not original.with_suffix(".ocr.txt").exists()
+
+
+def test_la_couche_native_revient_en_tete_de_chaque_page(tmp_path, monkeypatch):
+    """Le cachet est une annotation que `--force-ocr` relit abîmée : la couche
+    native de l'original le rend intact, page par page (CM du 15/10/2026)."""
+    original = tmp_path / "liasse.pdf"
+    cible = original.with_suffix(".ocr.pdf")
+    monkeypatch.setattr(conseils, "_pages_natives",
+                        lambda c: ["ID : 030-1-20261015-DEL2610_01-DE\n", "", ""])
+
+    class _Page:
+        def __init__(self, t): self.t = t
+        def extract_text(self): return self.t
+
+    class _Pdf:
+        pages = [_Page("relue 1"), _Page("relue 2")]
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(conseils.pdfplumber, "open", lambda c: _Pdf())
+    assert conseils._texte_ocerise(original, cible) == (
+        "ID : 030-1-20261015-DEL2610_01-DE\nrelue 1\nrelue 2")
+
+
+def test_un_scan_pur_garde_son_texte_relu(tmp_path, monkeypatch):
+    monkeypatch.setattr(conseils, "_pages_natives", lambda c: ["", "\n"])
+    monkeypatch.setattr(conseils, "texte_pdf", lambda c: "RELU")
+    assert conseils._texte_ocerise(tmp_path / "a.pdf", tmp_path / "a.ocr.pdf") == "RELU"
+
+
+def test_des_cachets_seuls_ne_font_pas_une_couche_texte(tmp_path, monkeypatch):
+    """34 pages et 2 402 caractères de cachets (CM du 15/10/2026) : à océriser."""
+    class _Pdf:
+        def __init__(self, n): self.pages = [None] * n
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(conseils.pdfplumber, "open", lambda c: _Pdf(34))
+    assert conseils._trop_mince(tmp_path / "a.pdf", "x" * 2402)
+    monkeypatch.setattr(conseils.pdfplumber, "open", lambda c: _Pdf(3))
+    assert not conseils._trop_mince(tmp_path / "a.pdf", "x" * 2402)
+    assert conseils._trop_mince(tmp_path / "a.pdf", "x" * 399)

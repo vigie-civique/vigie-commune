@@ -58,6 +58,7 @@ Un objet JSON, encodé en UTF-8 :
   "format": "vigie-marches-extraits/1",
   "outil": "nom et version de l'outil, libre",
   "genere_le": "2026-10-04T18:00:00",
+  "modele": {"modele": "gemma4:26b", "empreinte": "5571076f3d70", "locale": true},
   "lignes": [
     {
       "event_id": 18342,
@@ -82,6 +83,13 @@ Un objet JSON, encodé en UTF-8 :
 
 Une **liste nue** de lignes est acceptée aussi (c'est la forme du rapport
 existant). Un objet qui déclare un autre `format` est refusé entier.
+
+`modele` (facultatif) dit quel modèle a lu le rapport : son nom, son empreinte
+— l'« ID » de `ollama list`, qui distingue deux versions sous un même nom — et
+s'il tournait sur la machine. Il suit chaque ligne jusqu'à la saisie acceptée
+(`source.ia`), comme le promet la charte d'usage de l'IA (`docs/charte-ia.md`,
+engagement 4). Une trace mal formée fait refuser le rapport entier ; une trace
+absente laisse les lignes sans modèle déclaré.
 
 | Champ | Obligatoire | Forme | Ce qu'il dit, et ce qui est vérifié |
 |---|---|---|---|

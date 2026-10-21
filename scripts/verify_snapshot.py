@@ -211,7 +211,42 @@ class Report:
 
 def domain_of(url):
     m = re.match(r"https?://([^/]+)", str(url))
-    return m.group(1).lower().lstrip("www.") if m else None
+    # `removeprefix`, pas `lstrip("www.")` : lstrip retire des CARACTÈRES, et
+    # « web.fr » devenait « eb.fr ».
+    return m.group(1).lower().removeprefix("www.") if m else None
+
+
+# Le site de la commune n'est le site d'aucune entité tierce : il est générique
+# pour l'instance, que `publication_rules.json` le dise ou non. Lasalle l'avait
+# écrit à la main, Saillans et Brassac non. Lu dans `instance.json` directement
+# — le contrôleur n'importe pas la config du moteur.
+_INSTANCE = Path(os.environ.get("VIGIE_INSTANCE") or ROOT / "config" / "instance.json")
+COMMUNE_DOMAIN = (domain_of(json.loads(_INSTANCE.read_text()).get("commune_url", ""))
+                  if _INSTANCE.is_file() else None)
+if COMMUNE_DOMAIN:
+    GENERIC_DOMAINS.add(COMMUNE_DOMAIN)
+
+
+def sans_site_de_la_mairie(data):
+    """territoire.json, moins le site du guichet de la mairie de la commune.
+
+    Seule exception à la règle des domaines génériques : la mairie sur place
+    porte le site de la commune, c'est le sien. Une mairie d'ailleurs, ou un
+    autre domaine, reste contrôlé.
+    """
+    g = data.get("guichets") if isinstance(data, dict) else None
+    if not isinstance(g, dict) or not COMMUNE_DOMAIN:
+        return data
+    types = []
+    for t in g.get("types") or []:
+        if isinstance(t, dict) and t.get("type") == "mairie":
+            t = {**t, "guichets": [
+                {k: v for k, v in x.items() if k != "site"}
+                if isinstance(x, dict) and x.get("sur_place") is True
+                and domain_of(x.get("site")) == COMMUNE_DOMAIN else x
+                for x in t.get("guichets") or []]}
+        types.append(t)
+    return {**data, "guichets": {**g, "types": types}}
 
 
 # Clés sous lesquelles une URL est un site ATTRIBUÉ à une entité (la règle des
@@ -318,6 +353,8 @@ def check_file(fp, rep, base):
     except json.JSONDecodeError as exc:
         rep.error("JSON invalide", f"{loc}: {exc}")
         return
+    if fp.name == "territoire.json":
+        data = sans_site_de_la_mairie(data)
     walk(data, fp, rep, loc)
     if fp.name == "events.json":
         check_events_file(data, rep, loc)

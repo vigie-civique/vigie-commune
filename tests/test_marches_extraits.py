@@ -402,6 +402,29 @@ class TestAtelier:
         assert len(atelier["sql"]("SELECT id FROM marches_publics")) == 1
         assert len(saisies.charger()["saisies"]) == 1
 
+    def test_le_modele_du_rapport_suit_la_ligne_jusqu_a_la_saisie(self, atelier):
+        # Charte IA, engagement 4 : déclaré en tête du rapport, gardé à l'arrivée.
+        c = atelier["client"]
+        ia = {"modele": "gemma4:26b", "empreinte": "5571076f3d70", "locale": True}
+        r = c.post("/api/atelier/marches-extraits", headers=atelier["valid"],
+                   json={"format": mx.FORMAT, "modele": ia, "lignes": [_ligne(atelier["eid"])]})
+        assert r.status_code == 201, r.text
+        [p] = _attente(atelier)
+        r = c.post(f"/api/atelier/propositions/{p['id']}/decision", headers=atelier["valid"],
+                   json={"accepter": True})
+        assert r.status_code == 200, r.text
+        from collectors import saisies
+        [s] = saisies.charger()["saisies"]
+        assert s["source"]["ia"] == ia
+
+    def test_un_rapport_au_modele_mal_declare_est_refuse_entier(self, atelier):
+        r = atelier["client"].post(
+            "/api/atelier/marches-extraits", headers=atelier["valid"],
+            json={"format": mx.FORMAT, "modele": {"modele": "gemma4:26b", "locale": "oui"},
+                  "lignes": [_ligne(atelier["eid"])]})
+        assert r.status_code == 400 and "locale" in r.text
+        assert _attente(atelier) == []
+
     def test_la_citation_ne_se_corrige_pas(self, atelier):
         c = atelier["client"]
         c.post("/api/atelier/marches-extraits", headers=atelier["valid"], json=[_ligne(atelier["eid"])])

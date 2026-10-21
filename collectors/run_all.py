@@ -68,6 +68,7 @@ from collectors.plu           import run as run_plu
 from collectors.equipements   import run as run_equipements
 from collectors.dpe           import run as run_dpe
 from collectors.lovac         import run as run_lovac
+from collectors.guichets      import run as run_guichets
 from collectors.mobilite      import run as run_mobilite
 from collectors.sante         import run as run_sante
 from collectors.cadastre      import run as run_cadastre
@@ -238,6 +239,9 @@ STEPS = {
     # La vacance de plus de deux ans, que le recensement ne distingue pas. Le
     # fichier des communes seulement : aucune adresse de logement n'entre.
     "lovac":    ("Logements vacants du parc privé (LOVAC, Cerema)", run_lovac),
+    # Des services, jamais leurs agents : les responsables nommés de l'annuaire
+    # ne sont pas lus. Une DILA injoignable rend un avertissement.
+    "guichets": ("Guichets compétents (Annuaire de l'administration, DILA)", run_guichets),
     "mobilite": ("Transport déclaré et dispositifs de l'État", run_mobilite),
     # Les murs du soin — pharmacies, EHPAD, laboratoires. Les professionnels,
     # eux, se comptent dans `equipements` (BPE, domaine D).

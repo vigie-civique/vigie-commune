@@ -53,6 +53,9 @@
   let rechercheActe = ''
   let propositions = null
   let iaEnCours = false
+  // Le modèle qui a lu la proposition reprise : il part avec la saisie
+  // (`source.ia`), pour qu'on sache dans un an quelle version a lu la ligne.
+  let iaTrace = null
 
   $: actesFiltres = rechercheActe
       ? actes.filter(a => `${a.date} ${a.title || ''}`.toLowerCase()
@@ -100,6 +103,11 @@
     }
     valeurs = v
     citation = p.citation || ''
+    iaTrace = propositions?.modele
+      ? { modele: propositions.modele,
+          ...(propositions.empreinte ? { empreinte: propositions.empreinte } : {}),
+          locale: !!propositions.locale }
+      : null
     // Une ligne reprise d'un modèle n'est pas une ligne lue par un humain :
     // elle part en `probable` tant que personne n'a rouvert la source.
     confidence = p.citation_verifiee ? 'confirmed' : 'probable'
@@ -182,6 +190,7 @@
   function reinitialiser() {
     valeurs = {}
     citation = ''
+    iaTrace = null
     rechercheEntite = {}
     suggestions = {}
   }
@@ -192,6 +201,7 @@
       const source = { citation }
       if (docChoisi) source.raw_document_id = docChoisi.id
       else source.sans_document_motif = sansDocumentMotif
+      if (iaTrace) source.ia = iaTrace
       const r = await api.saisieCreer(objet, valeurs, source, confidence)
       succes = `${libelleObjet} enregistré — ${r.import?.ecrites ?? 0} ligne(s) écrite(s) en base.`
       reinitialiser()

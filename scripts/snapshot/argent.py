@@ -456,18 +456,24 @@ def etape_finances(conn, revue, public_ids, public_entities, perimetre_par_entit
     if table_exists(conn, "budget_annexe_balance"):
         from collectors.budgets_annexes import suites
         poursuites = suites()
-        for b in rows(conn, """
-            SELECT year, budget, entity_id, encours_dette, solde_fonctionnement, source
+        # `cautions` : colonne du 21/10/2026, absente d'une base plus ancienne.
+        cautions = ("cautions" if "cautions" in {r["name"] for r in rows(
+            conn, "PRAGMA table_info(budget_annexe_balance)")} else "NULL AS cautions")
+        for b in rows(conn, f"""
+            SELECT year, budget, entity_id, encours_dette, {cautions}, solde_fonctionnement, source
             FROM budget_annexe_balance ORDER BY year DESC, budget
         """):
             commun = {"year": b["year"], "source": b["source"], "entity_name": b["budget"],
                       "entity_id": b["entity_id"] if b["entity_id"] in public_ids else None}
             if b["budget"] in poursuites:
                 commun["poursuivi_sous"] = poursuites[b["budget"]]
-            if b["encours_dette"] is not None:
+            # Emprunts et cautionnements reçus (compte 165) : le périmètre de
+            # l'« Encours de dette » OFGL, pour que la somme des budgets y retombe.
+            if b["encours_dette"] is not None or b["cautions"] is not None:
                 budget_annexe.append({**commun, "section": "dette", "sens": "solde",
-                                      "libelle": "Encours de dette (emprunts, balance DGFiP)",
-                                      "montant": b["encours_dette"]})
+                                      "libelle": "Encours de dette (emprunts et cautionnements, balance DGFiP)",
+                                      "montant": (b["encours_dette"] or 0) + (b["cautions"] or 0),
+                                      "cautions": b["cautions"]})
             if b["solde_fonctionnement"] is not None:
                 budget_annexe.append({**commun, "section": "fonctionnement", "sens": "solde",
                                       "libelle": "Produits − charges de l'exercice (balance DGFiP)",
