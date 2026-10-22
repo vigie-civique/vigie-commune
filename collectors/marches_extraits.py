@@ -112,7 +112,8 @@ def _valeur(champ: str, genre: str, v):
     if v is None or (isinstance(v, str) and not v.strip()):
         return None
     if genre == "entier":
-        if isinstance(v, bool) or not str(v).strip().isdigit():
+        # `"²".isdigit()` est vrai, `int("²")` lève : ASCII seulement.
+        if isinstance(v, bool) or not (str(v).strip().isascii() and str(v).strip().isdigit()):
             raise LigneRefusee(f"{champ} : entier attendu, reçu {v!r}")
         return int(v)
     if genre == "date":

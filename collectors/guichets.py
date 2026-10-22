@@ -28,8 +28,9 @@ UNE SOURCE QUI COUPE
 
 Les serveurs de la DILA ferment parfois la connexion (step `justice`). Un
 téléchargement manqué n'est pas un échec de passe : l'index précédent du
-magasin sert, et sans index le step s'arrête sur un avertissement, sans
-toucher à ce que la base contient déjà.
+magasin sert. Sans index (premier passage coupé), le step est en ÉCHEC, sans
+toucher à ce que la base contient déjà : rendu « vide », il passerait pour
+abouti et la boucle ne le retenterait qu'au bout du TTL (cas du 20/10/2026).
 
 Source : data.gouv.fr, jeu du Premier ministre (DILA), Licence Ouverte v2.
 Mention exigée : Service-Public.gouv.fr / DILA, l'URL de téléchargement, le
@@ -253,8 +254,9 @@ def ensure_table(conn):
 def run(insee: str | None = None) -> int:
     index = _index()
     if index is None:
-        print("  ⚠ [guichets] aucun index au magasin : rien n'est relevé cette fois")
-        return 0
+        # Un `return 0` serait noté `empty`, donc abouti : la source paraîtrait
+        # fraîche 30 jours sans avoir rien relevé. L'échec la fait retenter demain.
+        raise RuntimeError("Annuaire injoignable et aucun index au magasin : rien n'est relevé")
     competences, services, meta = index
     codes = {insee} if insee else set(communes_du_step(SOURCE))
     total = 0

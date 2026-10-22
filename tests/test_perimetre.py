@@ -114,3 +114,20 @@ def test_commune_trouvee_en_capitales(monkeypatch):
         conn.execute("INSERT INTO entities VALUES (?, 'service', ?, ?, ?)",
                      (id_, nom, normaliser(nom), commune))
     assert bps._commune_entity_id(conn) == 7
+
+
+def test_epci_trouvee_par_son_nom_normalise(monkeypatch):
+    """Les flux qu'elle verse sortent `de_l_epci`, affichés à part sur /finances."""
+    import sqlite3
+    import collectors.config as config
+    from collectors.nom_normalise import normaliser
+    from scripts.snapshot.argent import _epci_entity_id
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE entities (id, type, name, name_norm, commune)")
+    conn.execute("INSERT INTO entities VALUES (12, 'service', 'CC DU TEST', ?, NULL)",
+                 (normaliser("CC du Test"),))
+    monkeypatch.setattr(config, "EPCI_NOM", "CC du Test")
+    assert _epci_entity_id(conn) == 12
+    monkeypatch.setattr(config, "EPCI_NOM", "")
+    assert _epci_entity_id(conn) is None

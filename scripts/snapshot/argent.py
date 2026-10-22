@@ -213,6 +213,17 @@ def _commune_entity_id(conn) -> int | None:
     return row["id"] if row else None
 
 
+def _epci_entity_id(conn) -> int | None:
+    """Id de la fiche de l'intercommunalité de l'instance (`epci_nom`), ou None."""
+    from collectors.config import EPCI_NOM
+    from collectors.nom_normalise import normaliser
+    if not EPCI_NOM:
+        return None
+    row = conn.execute("SELECT id FROM entities WHERE type='service' AND name_norm=? "
+                       "ORDER BY id LIMIT 1", (normaliser(EPCI_NOM),)).fetchone()
+    return row["id"] if row else None
+
+
 def nommer_acheteurs(marches: list[dict], noms: dict[int, str]) -> int:
     """L'acheteur porte le nom de SA FICHE, pas la graphie de chaque source.
 
@@ -243,18 +254,15 @@ def acheteurs_par_siren(conn) -> dict[str, int]:
     se retrouvent par le nom, comme partout ailleurs dans le snapshot (aucun
     identifiant de ligne écrit en dur).
     """
-    from collectors.config import COMMUNE_SIREN, EPCI_NOM, EPCI_SIREN
+    from collectors.config import COMMUNE_SIREN, EPCI_SIREN
     from collectors.marches_publics import siren_de
-    from collectors.nom_normalise import normaliser
     sortie = {}
     commune = _commune_entity_id(conn)
     if commune and siren_de(COMMUNE_SIREN):
         sortie[siren_de(COMMUNE_SIREN)] = commune
-    if EPCI_NOM and siren_de(EPCI_SIREN):
-        r = conn.execute("SELECT id FROM entities WHERE type='service' AND name_norm=? "
-                         "ORDER BY id LIMIT 1", (normaliser(EPCI_NOM),)).fetchone()
-        if r:
-            sortie[siren_de(EPCI_SIREN)] = r["id"]
+    epci = _epci_entity_id(conn)
+    if epci and siren_de(EPCI_SIREN):
+        sortie[siren_de(EPCI_SIREN)] = epci
     return sortie
 
 
@@ -420,6 +428,15 @@ def etape_flux(conn, revue, entity_rows, public_person_ids, public_ids,
             f["sens"] = "sortant"
         else:
             f["sens"] = "tiers"
+
+    # `de_l_epci` : un flux intercommunalité → association est `tiers` (le sens
+    # se mesure à la commune) et ne finissait que dans le tableau brut de
+    # /finances, parmi les subventions de la Région et les cessions privées.
+    # Le signaler permet de l'afficher à part — jamais additionné à la commune.
+    EPCI_ID = _epci_entity_id(conn)
+    for f in public_flows:
+        f["de_l_epci"] = (f["sens"] == "tiers" and EPCI_ID is not None
+                          and f.get("from_id") == EPCI_ID)
 
     # `statut` valait `realise` sur la totalité des flux — la subvention
     # votée, la dotation lue dans les comptes et la demande de DSIL avec le

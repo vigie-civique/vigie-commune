@@ -15,7 +15,7 @@
   ]
   const NATURE = {
     fiche: 'Fiche', coords: 'Point sur la carte', relation: 'Relation', correction: 'Chiffre corrigé',
-    marche: 'Marché lu dans un procès-verbal',
+    marche: 'Marché lu dans un procès-verbal', flux: 'Subvention lue dans un acte',
   }
   const OBJET = { flow: 'flux', marche: 'marché', deliberation: 'acte' }
   // Les champs d'une relation et d'une correction n'ont pas de libellé commun
@@ -38,7 +38,7 @@
   let motifs = {}          // id → motif saisi pour un refus
   let enCours = null
   let corrigeables = {}
-  // `?nature=marche` : la file des marchés lus, seule. Un rapport en dépose
+  // `?nature=marche` (ou `flux`) : la file des lignes lues, seule. Un rapport en dépose
   // des dizaines d'un coup ; mêlées aux propositions des contributeurs, elles
   // les repousseraient en bas de la file.
   let nature = ''
@@ -89,7 +89,9 @@
       let rapport
       try { rapport = JSON.parse(await fichier.text()) }
       catch { erreur = "Ce fichier n'est pas du JSON lisible."; return }
-      const r = await authFetch('/atelier/marches-extraits', {
+      // Le rapport dit ce qu'il porte : des subventions, ou des marchés.
+      const route = rapport?.format === 'vigie-flux-extraits/1' ? 'flux-extraits' : 'marches-extraits'
+      const r = await authFetch(`/atelier/${route}`, {
         method: 'POST', body: JSON.stringify(rapport),
       })
       const d = await r.json()
@@ -131,14 +133,18 @@
             on:click={() => { nature = nature === 'marche' ? '' : 'marche'; charger() }}>
       Marchés lus dans les PV seulement
     </button>
+    <button class:actif={nature === 'flux'}
+            on:click={() => { nature = nature === 'flux' ? '' : 'flux'; charger() }}>
+      Subventions lues dans les actes seulement
+    </button>
   </div>
 
   {#if peutTrancher}
     <!-- Le seul chemin d'entrée d'un rapport d'extraction depuis que l'atelier
          tourne sur un serveur : déposer le fichier ici. Format :
-         docs/format-marches-extraits.md. -->
+         docs/format-marches-extraits.md, collectors/flux_extraits.py. -->
     <details class="depot">
-      <summary>Déposer un rapport de marchés extraits des procès-verbaux</summary>
+      <summary>Déposer un rapport de marchés ou de subventions extraits des actes</summary>
       <p class="muted">Chaque ligne dont la citation se retrouve dans le texte de son acte devient une
         proposition à relire ici, une à une. Rien n'est publié avant. Redéposer le même rapport ne
         propose rien de plus.</p>
@@ -177,9 +183,9 @@
         <p class="avis">L'objet visé n'existe plus : cette proposition ne peut qu'être refusée.</p>
       {/if}
 
-      {#if p.nature === 'marche'}
+      {#if p.nature === 'marche' || p.nature === 'flux'}
         <LigneExtraite {p} peutTrancher={peutTrancher && etat === 'en_attente'}
-          enCours={enCours === p.id} corrigeables={corrigeables.marche || []}
+          enCours={enCours === p.id} corrigeables={corrigeables[p.nature] || []}
           on:trancher={(e) => trancher(p, e.detail.accepter, e.detail.motif, e.detail.corrections)} />
       {:else}
       <table>
@@ -208,7 +214,7 @@
           {#if p.tranche_le}, {heureLocale(p.tranche_le)}{/if}
           {#if p.motif}{' '} — « {p.motif} »{/if}
         </p>
-      {:else if p.nature === 'marche'}
+      {:else if p.nature === 'marche' || p.nature === 'flux'}
         <!-- Les gestes d'une ligne extraite vivent dans LigneExtraite. -->
       {:else if peutTrancher}
         <div class="gestes">

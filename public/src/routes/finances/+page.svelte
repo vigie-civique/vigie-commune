@@ -67,11 +67,16 @@
   $: cessions = base.filter(isCession).sort((a, b) => (b.year || 0) - (a.year || 0) || (b.amount || 0) - (a.amount || 0))
   $: inflows  = base.filter(isInflow)
   $: outflows = base.filter(isOutflow)
-  $: others   = base.filter(f => !isCession(f) && !isInflow(f) && !isOutflow(f))
+  $: tiers    = base.filter(f => !isCession(f) && !isInflow(f) && !isOutflow(f))
+  // Ce que l'intercommunalité verse (`de_l_epci`, posé au snapshot) : un autre
+  // budget, montré à part et jamais additionné à celui de la commune.
+  $: epciFlows = tiers.filter(f => f.de_l_epci)
+  $: others    = tiers.filter(f => !f.de_l_epci)
   const sum = (L) => L.reduce((s, f) => s + (f.amount || 0), 0)
   $: inTotal = sum(inflows)
   $: outTotal = sum(outflows)
   $: othTotal = sum(others)
+  $: epciTotal = sum(epciFlows)
   $: cessionTotal = sum(cessions)
 
   // « la commune a versé 10 k€ » pour un exercice dont AUCUN paiement n'est
@@ -121,13 +126,16 @@
     return arr
   }
   $: outByBenef = group(outflows, f => f.to_name, f => f.to_id)
+  $: epciByBenef = group(epciFlows, f => f.to_name, f => f.to_id)
+  $: epciMax = Math.max(...epciByBenef.map(g => g.total), 1)
   $: inBySource = group(inflows, f => f.from_name)
   $: outMax = Math.max(...outByBenef.map(g => g.total), 1)
   $: inMax = Math.max(...inBySource.map(g => g.total), 1)
 
   const TOP = 12
-  let showAllOut = false, showAllIn = false
+  let showAllOut = false, showAllIn = false, showAllEpci = false
   $: outShown = showAllOut ? outByBenef : outByBenef.slice(0, TOP)
+  $: epciShown = showAllEpci ? epciByBenef : epciByBenef.slice(0, TOP)
   $: inShown = showAllIn ? inBySource : inBySource.slice(0, TOP)
 
   function eurosC(n) {
@@ -335,6 +343,35 @@
       {' '}{/if}
     {/if}
 
+    <!-- Versé par l'intercommunalité : un autre budget, jamais additionné -->
+    {#if epciByBenef.length}
+      <h2 class="epci-h">Ce que verse l'intercommunalité</h2>
+      <p class="hint">
+        {eurosC(epciTotal)} sur {periode}, versés par {epciFlows[0].from_name}
+        sur <b>son propre budget</b>, voté en conseil communautaire : ils ne
+        s'ajoutent pas aux montants de la commune ci-dessus.
+        <a href="/com-com">Ce que décide l'intercommunalité</a>.
+      </p>
+      <ul class="bars">
+        {#each epciShown as g}
+          <li>
+            <span class="blabel" class:unk={g.unknown}>
+              {#if g.id}<a href="/entite/{g.id}">{g.key}</a>{:else}{g.key}{/if}
+              {#if g.count > 1}<em>· {g.count} flux</em>{/if}
+            </span>
+            <span class="btrack"><span class="bfill epci" style="width:{100 * g.total / epciMax}%"></span></span>
+            <span class="bval">{eurosC(g.total)}</span>
+            <span class="bpct">{pct(g.total, epciTotal)}</span>
+          </li>
+        {/each}
+      </ul>
+      {#if epciByBenef.length > TOP}{' '}
+        <button class="more" aria-expanded={showAllEpci} on:click={() => showAllEpci = !showAllEpci}>
+          {showAllEpci ? '− Réduire' : `+ ${epciByBenef.length - TOP} autres`}
+        </button>
+      {' '}{/if}
+    {/if}
+
     <!-- Flux tiers -->
     {#if others.length}
       <details>
@@ -421,6 +458,7 @@
 
   h2 { margin: 1.75rem 0 .25rem; font-size: 1.15rem; }
   h2.out-h { color: var(--ardoise-fonce); } h2.in-h { color: var(--recette); } h2.ces-h { color: var(--ardoise); }
+  h2.epci-h { color: var(--ardoise); }
   .hint { color: var(--gris); font-size: .85rem; margin: 0 0 .9rem; }
   .ces { color: var(--ardoise); }
 
@@ -471,6 +509,7 @@
   .btrack { grid-column: 1; display: block; background: var(--trait-pale); border-radius: 4px; height: 14px; overflow: hidden; }
   .bfill { display: block; height: 100%; border-radius: 4px; }
   .bfill.out { background: var(--ardoise); } .bfill.in { background: var(--recette); }
+  .bfill.epci { background: var(--ardoise); opacity: .55; }
   .bval { grid-column: 2; text-align: right; font-size: .82rem; font-weight: 700; color: var(--encre); font-variant-numeric: tabular-nums; }
   .bpct { grid-column: 3; text-align: right; font-size: .75rem; color: var(--gris-clair); }
 

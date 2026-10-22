@@ -130,14 +130,24 @@ def fetch_json(url: str, *, source: str, headers: dict | None = None,
     GET une URL d'API, archive la réponse brute (dédup sha256), retourne le JSON.
     Les erreurs HTTP/réseau remontent à l'appelant (retry/fallback inchangés).
     archive_url : URL enregistrée en base à la place de l'URL réelle (ex. token masqué).
+
+    Une réponse qui n'est pas du JSON lève AVANT l'archivage : le 22/10/2026,
+    l'API de data.culture.gouv.fr redirigeait (301) vers la page d'accueil HTML
+    du nouveau portail, et chaque passe archivait cette page comme pièce brute.
     """
     req = urllib.request.Request(url, headers=headers or HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         raw = r.read()
         ct = r.headers.get_content_type()
         status = r.status
+        final = r.geturl()
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise ValueError(f"réponse non JSON ({ct}) de {final}"
+                         + (f", redirigée depuis {url}" if final != url else "")) from None
     archive_fetch(source, archive_url or url, raw, content_type=ct, http_status=status)
-    return json.loads(raw)
+    return data
 
 
 def archive_url(conn, url: str, *, source: str, title: str | None = None,
