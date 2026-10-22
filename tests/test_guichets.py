@@ -136,6 +136,12 @@ class TestCoupure:
         self._coupe(monkeypatch)
         assert g._index() is None
 
+    def test_sans_index_le_step_est_en_echec(self, magasin, monkeypatch):
+        # Rendu vide, il serait noté `empty` et compté comme un passage abouti.
+        self._coupe(monkeypatch)
+        with pytest.raises(RuntimeError, match="aucun index"):
+            g.run("99001")
+
     def test_l_index_precedent_sert(self, magasin, monkeypatch):
         g._index()
         g.META.touch()

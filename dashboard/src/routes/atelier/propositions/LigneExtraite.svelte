@@ -1,6 +1,7 @@
 <script>
-  // Un marché LU dans un procès-verbal par un outil d'extraction, et qui
-  // n'est encore nulle part en base (cf. collectors/marches_extraits.py).
+  // Un marché ou une subvention LU dans un acte par un outil d'extraction, et
+  // qui n'est encore nulle part en base (cf. collectors/marches_extraits.py,
+  // collectors/flux_extraits.py).
   // Le validateur le juge l'acte sous les yeux : le texte de l'acte, le passage
   // que l'outil cite comme preuve, et ce qu'il en a tiré — qu'il peut corriger
   // avant d'accepter. Rien n'est publié avant ce geste.
@@ -18,7 +19,10 @@
     objet: 'Objet', acheteur_nom: 'Acheteur', acheteur_siren: "SIREN de l'acheteur",
     titulaire: 'Titulaire', montant: 'Montant (€)', devise_base: 'HT ou TTC',
     procedure: 'Procédure', nature: 'Nature',
+    tiers: 'Bénéficiaire ou financeur', annee: 'Exercice', sens: 'Sens',
+    type_tiers: 'Type de la fiche à créer',
   }
+  const ASSEMBLEE = { commune: 'le conseil municipal', epci: 'le conseil communautaire' }
   const PORTEE = {
     commune: 'la commune', intercommunalite: "l'intercommunalité",
     autre: 'un autre acheteur', non_etabli: 'acheteur non établi',
@@ -53,6 +57,7 @@
   // où le contrôle avait réussi.
   $: extrait = acte?.extrait
   $: doublons = p.doublons || []
+  $: flux = p.nature === 'flux'
 </script>
 
 <div class="ligne">
@@ -77,7 +82,12 @@
   {#if !c.montant_dans_citation}
     <p class="signal">Le montant lu ne figure pas dans le passage cité : le vérifier dans l'acte.</p>
   {/if}
-  {#if c.portee === 'commune' && c.assemblee_de_l_acte === 'intercommunalite'}
+  {#if flux}
+    <p class="muted">Voté par {ASSEMBLEE[c.assemblee] ?? c.assemblee} (lu dans l'acte, pas dans le rapport)
+      · {c.sens === 'verse' ? 'versé à' : 'reçu de'}
+      {#if c.tiers_id}la fiche <a href="/atelier/entite/{c.tiers_id}">{c.tiers_fiche}</a> — rapprochée par
+        le nom, à vérifier{:else}une fiche à créer : « {c.tiers} »{/if}</p>
+  {:else if c.portee === 'commune' && c.assemblee_de_l_acte === 'intercommunalite'}
     <p class="signal">L'acte est de l'intercommunalité, l'acheteur lu est la commune.</p>
   {:else if c.portee === 'intercommunalite' && c.assemblee_de_l_acte === 'commune'}
     <p class="signal">L'acte est municipal, l'acheteur lu est l'intercommunalité : un compte rendu, ou une erreur de lecture ?</p>
@@ -85,19 +95,30 @@
 
   {#if doublons.length}
     <div class="signal">
-      Déjà en base pour le même acheteur et le même montant — un doublon, ou un autre marché ?
-      <ul>
-        {#each doublons as d}
-          <li>{d.date_notif || 'sans date'} · {d.objet} · {d.source}{d.confidence === 'probable' ? ' (non publié)' : ''}</li>
-        {/each}
-      </ul>
+      {#if flux}{' '}
+        Déjà en base la même année et pour le même montant — un doublon, ou un autre flux ?
+        <ul>
+          {#each doublons as d}
+            <li>{d.year} · {d.de || '?'} → {d.vers || '?'} · {d.source}{d.confidence === 'probable' ? ' (non publié)' : ''}</li>
+          {/each}
+        </ul>
+      {' '}{:else}{' '}
+        Déjà en base pour le même acheteur et le même montant — un doublon, ou un autre marché ?
+        <ul>
+          {#each doublons as d}
+            <li>{d.date_notif || 'sans date'} · {d.objet} · {d.source}{d.confidence === 'probable' ? ' (non publié)' : ''}</li>
+          {/each}
+        </ul>
+      {' '}{/if}
     </div>
   {/if}
 
+  {#if !flux}
   <p class="muted">Acheteur : {PORTEE[c.portee] ?? c.portee}
     {#if c.acheteur_siren}— SIREN donné par l'outil, qui peut l'avoir déduit de l'assemblée
       plutôt que lu dans l'acte : la portée en découle, le vérifier{/if}
     {#if c.titre_acte && c.titre_acte !== acte?.title}· l'outil a lu le titre « {c.titre_acte} »{/if}</p>
+  {/if}
 
   <div class="champs">
     {#each corrigeables as k}
@@ -106,6 +127,15 @@
         {#if peutTrancher}
           {#if k === 'devise_base'}{' '}
             <select bind:value={valeurs[k]}><option value="">—</option><option>HT</option><option>TTC</option></select>
+          {' '}{:else if k === 'sens'}{' '}
+            <select bind:value={valeurs[k]}><option value="verse">versé</option><option value="recu">reçu</option></select>
+          {' '}{:else if k === 'type_tiers'}{' '}
+            <!-- Sans fiche rapprochée, le validateur DIT ce qu'est le tiers :
+                 il n'est jamais deviné. -->
+            <select bind:value={valeurs[k]} disabled={!!c.tiers_id && valeurs.tiers === c.tiers}>
+              <option value="">—</option><option value="association">association</option>
+              <option value="business">entreprise</option><option value="service">service public</option>
+            </select>
           {' '}{:else}{' '}
             <input bind:value={valeurs[k]} class:modifie={String(valeurs[k] ?? '') !== String(c[k] ?? '')} />
           {' '}{/if}
@@ -120,7 +150,8 @@
     <div class="gestes">
       <button class="oui" disabled={enCours || p.actuel === null}
               on:click={() => dispatch('trancher', { accepter: true, motif, corrections })}>
-        {corrige ? 'Corriger et accepter' : 'Accepter — le marché est publié au prochain passage'}
+        {corrige ? 'Corriger et accepter'
+          : `Accepter — ${flux ? 'le flux' : 'le marché'} est publié au prochain passage`}
       </button>
       <input placeholder="Motif (obligatoire pour écarter)" bind:value={motif} />
       <button class="non" disabled={enCours}

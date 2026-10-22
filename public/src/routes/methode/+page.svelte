@@ -1,5 +1,5 @@
 <script>
-  import { CODE_POSTAL, COMMUNE, COMMUNE_DE, EPCI, EPCI_COURT, INSEE, SITE_NOM } from '#lib/instance.js'
+  import { CODE_POSTAL, COMMUNE, COMMUNE_DE, DEPOT_URL, EPCI, EPCI_COURT, INSEE, SITE_NOM } from '#lib/instance.js'
   // Chiffres lus au build (cf. +page.server.js) : cette page ne doit jamais
   // citer un compteur écrit à la main.
   export let data
@@ -199,6 +199,32 @@
     Ce qui a été corrigé, et quand, se lit dans le
     <a href="/corrections">journal des corrections</a>. Une erreur constatée
     peut être signalée par la page <a href="/contact">Contact / Droit de réponse</a>.
+  </p>
+
+  <h2 id="ia">L'intelligence artificielle</h2>
+  <p>
+    Des modèles de langage interviennent à trois endroits, et
+    <strong>jamais pour publier</strong> :
+  </p>
+  <ul>
+    <li><strong>Lire les procès-verbaux.</strong> Un modèle exécuté sur nos
+      machines propose des lignes, un montant, un marché, une délibération,
+      chacune avec la phrase du document qui la justifie. La phrase est vérifiée
+      contre le document, et une personne valide la ligne avant qu'elle entre en
+      base. Nous gardons quel modèle l'a lue, et sous quelle version.</li>
+    <li><strong>Rédiger les textes du site.</strong> Dossiers thématiques,
+      pages d'explication, libellés : l'IA aide à la rédaction, et une personne
+      relit, édite et valide chaque texte avant publication. Ce paragraphe en
+      tient lieu de mention : les textes ne la répètent pas un à un.</li>
+    <li><strong>Écrire le code du site.</strong> Avec un assistant américain, qui
+      travaille sur le code et sur des données déjà publiées, jamais sur notre
+      base de travail.</li>
+  </ul>
+  <p>
+    Le contrôle qui précède chaque mise en ligne n'utilise aucun modèle. Ce à
+    quoi nous nous engageons, et de qui nous dépendons, est écrit dans la
+    {#if DEPOT_URL}<a href="{DEPOT_URL}/blob/main/docs/charte-ia.md">charte d'usage de l'intelligence artificielle</a>{:else}charte
+    d'usage de l'intelligence artificielle (<code>docs/charte-ia.md</code> du moteur){/if}.
   </p>
 
   <p class="renvoi">

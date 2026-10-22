@@ -39,6 +39,12 @@ from collectors.config import (BBOX, COMMUNE_NAME, COMMUNE_INSEE, DB_PATH,
 from collectors import dossiers as _dossiers
 from collectors import propositions as _propositions
 from collectors import marches_extraits as _marches_extraits
+from collectors import flux_extraits as _flux_extraits
+
+#: Les lignes LUES dans les actes par un outil d'extraction, par nature de
+#: proposition : un marché, une subvention. Même chemin, mêmes gestes.
+_EXTRAITS = {_marches_extraits.NATURE: _marches_extraits,
+             _flux_extraits.NATURE: _flux_extraits}
 from collectors import extraction as _extraction
 from collectors.origine import (ATELIER, INSTITUTIONNEL, ORIGINES, VERBATIM,
                                 modifiable)
@@ -1756,7 +1762,7 @@ def publication_modifications(x_admin_key: Optional[str] = Header(default=None),
         propositions = [
             {c: p[c] for c in ("id", "nature", "object_type", "object_id", "entity_id",
                                "fiche", "charge", "avant", "propose_par", "propose_le")}
-            for p in attendent if p["nature"] != _marches_extraits.NATURE]
+            for p in attendent if p["nature"] not in _EXTRAITS]
         contributions = rows(conn, f"""
             SELECT e.id, e.name, e.type, e.confidence,
                    COUNT(*) AS modifications,
@@ -4362,7 +4368,7 @@ def delete_relation(rel_id: int = FPath(..., ge=1), user=Depends(require_au_moin
 class DecisionProposition(BaseModel):
     accepter: bool
     motif: str = ""
-    #: Une ligne extraite (nature `marche`) peut être CORRIGÉE en l'acceptant :
+    #: Une ligne extraite (`_EXTRAITS`) peut être CORRIGÉE en l'acceptant :
     #: le validateur lit l'acte, et c'est lui qui a le dernier mot sur ce qu'il
     #: dit. Refusé pour toute autre nature : celles-là portent déjà ce que le
     #: contributeur voulait écrire, et le corriger serait écrire à sa place.
@@ -4374,7 +4380,7 @@ def _valeurs_actuelles(conn, prop: dict) -> Optional[dict]:
     relecture, la collecte ou un autre éditeur ont pu passer. None : l'objet
     n'existe plus."""
     champs = list(prop["charge"])
-    if prop["nature"] == _marches_extraits.NATURE:
+    if prop["nature"] in _EXTRAITS:
         # Une ligne extraite ne remplace aucune valeur en place : ce qui peut
         # avoir disparu, c'est l'acte d'où elle a été lue.
         # Retrouvé par sa clé datée s'il a été renuméroté depuis le dépôt.
@@ -4429,21 +4435,21 @@ def atelier_propositions(etat: str = "en_attente", nature: Optional[str] = None,
             nature=nature)
         for p in lignes:
             p["actuel"] = _valeurs_actuelles(conn, p) if etat == "en_attente" else None
-            if p["nature"] == _marches_extraits.NATURE:
+            if p["nature"] in _EXTRAITS:
                 p["acte"] = _acte_sous_les_yeux(conn, p)
                 # Calculés à la lecture, pas au dépôt : un marché accepté hier
                 # doit apparaître comme doublon possible de la ligne d'aujourd'hui.
                 if etat == "en_attente":
-                    p["doublons"] = _marches_extraits.doublons(conn, p["charge"])
+                    p["doublons"] = _EXTRAITS[p["nature"]].doublons(conn, p["charge"])
         # Les propositions des contributeurs restent en tête, les plus anciennes
         # d'abord : quelqu'un attend. Les marchés lus viennent ensuite, l'acte
         # le plus récent d'abord (Julien, 07/10/2026) — un rapport couvre dix
         # ans de procès-verbaux, et la file s'ouvrait sur 2016.
-        lus = [p for p in lignes if p["nature"] == _marches_extraits.NATURE]
+        lus = [p for p in lignes if p["nature"] in _EXTRAITS]
         lus.sort(key=lambda p: (p.get("acte") or {}).get("date") or "", reverse=True)
-        lignes = [p for p in lignes if p["nature"] != _marches_extraits.NATURE] + lus
+        lignes = [p for p in lignes if p["nature"] not in _EXTRAITS] + lus
         return {"propositions": lignes, "peut_trancher": au_moins(user, "validator"),
-                "corrigeables": {_marches_extraits.NATURE: list(_marches_extraits.CORRIGEABLES)}}
+                "corrigeables": {n: list(m.CORRIGEABLES) for n, m in _EXTRAITS.items()}}
     finally:
         conn.close()
 
@@ -4467,15 +4473,16 @@ def atelier_trancher_proposition(
         if prop["etat"] != "en_attente":
             raise HTTPException(409, f"Cette proposition n'attend plus : {prop['etat']}"
                                      + (f" par {prop['tranche_par']}." if prop["tranche_par"] else "."))
-        if req.corrections and not (req.accepter and prop["nature"] == _marches_extraits.NATURE):
+        if req.corrections and not (req.accepter and prop["nature"] in _EXTRAITS):
             raise HTTPException(400, "Seule une ligne extraite se corrige en l'acceptant.")
         motif = req.motif
-        if req.accepter and prop["nature"] == _marches_extraits.NATURE:
+        if req.accepter and prop["nature"] in _EXTRAITS:
+            extraits = _EXTRAITS[prop["nature"]]
             if _valeurs_actuelles(conn, prop) is None:
                 raise HTTPException(409, "L'acte d'où la ligne a été lue n'existe plus "
                                          "dans cette base : elle ne peut qu'être écartée.")
             try:
-                saisie = _marches_extraits.saisie_de(conn, prop, req.corrections, user)
+                saisie = extraits.saisie_de(conn, prop, req.corrections, user)
             except _marches_extraits.LigneRefusee as e:
                 raise HTTPException(400, str(e))
             # Même ordre que pour une correction : la saisie est écrite et
@@ -4493,7 +4500,7 @@ def atelier_trancher_proposition(
             _decider(prop["object_type"], prop["object_id"],
                      AnnotationUpdate(corrections=prop["charge"]), user)
         conn.execute("BEGIN IMMEDIATE")
-        if req.accepter and prop["nature"] not in ("correction", _marches_extraits.NATURE):
+        if req.accepter and prop["nature"] != "correction" and prop["nature"] not in _EXTRAITS:
             oid, charge = prop["object_id"], prop["charge"]
             if prop["nature"] == "fiche":
                 current = row(conn, _FICHE_COURANTE, (oid,))
@@ -4558,6 +4565,36 @@ def atelier_deposer_marches_extraits(
     # Archivé APRÈS le dépôt : un rapport refusé n'a rien proposé, il n'a pas
     # à occuper le disque. Le nom est l'empreinte, jamais une valeur reçue.
     _marches_extraits.archiver(octets, RAPPORTS_EXTRAITS)
+    return {"ok": True, "rapport": empreinte[:16], **bilan}
+
+
+RAPPORTS_FLUX_EXTRAITS = _flux_extraits.RAPPORTS
+
+
+@app.post("/api/atelier/flux-extraits", status_code=201)
+def atelier_deposer_flux_extraits(
+    rapport: dict = Body(...),
+    user=Depends(require_au_moins("validator", "Déposer un rapport de subventions extraites")),
+):
+    """Le dépôt des marchés lus, pour les subventions (cf. `collectors/flux_extraits.py`) :
+    une proposition par ligne nouvelle dont la citation se lit dans l'acte."""
+    octets = json.dumps(rapport, ensure_ascii=False, sort_keys=True).encode()
+    if len(octets) > 20 * 1024 * 1024:
+        raise HTTPException(413, "rapport trop volumineux (20 Mo maximum).")
+    empreinte = _flux_extraits.empreinte(octets)
+    conn = get_db_rw()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            bilan = _flux_extraits.deposer(conn, rapport, user, empreinte[:16])
+        except _flux_extraits.RapportRefuse as e:
+            conn.rollback()
+            raise HTTPException(400, str(e))
+        _flux_extraits.journaliser(conn, user, empreinte[:16], bilan)
+        conn.commit()
+    finally:
+        conn.close()
+    _flux_extraits.archiver(octets, RAPPORTS_FLUX_EXTRAITS)
     return {"ok": True, "rapport": empreinte[:16], **bilan}
 
 

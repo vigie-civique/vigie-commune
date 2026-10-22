@@ -28,7 +28,7 @@ import json
 from typing import Optional
 
 #: Ce qu'une proposition peut porter, et l'objet qu'elle vise.
-NATURES = ("fiche", "coords", "relation", "correction", "marche")
+NATURES = ("fiche", "coords", "relation", "correction", "marche", "flux")
 ETATS = ("en_attente", "acceptee", "refusee", "retiree")
 
 SCHEMA = """CREATE TABLE IF NOT EXISTS propositions (
