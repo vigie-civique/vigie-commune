@@ -96,7 +96,14 @@ EXCLUS_FICHIERS = {"instance.json", "instance.js", "seed_local.json",
 # contient l'archive précédente : l'y remettre la ferait grossir à chaque
 # publication et distribuerait une version périmée du dépôt à l'intérieur de la
 # version courante.
-EXCLUS_CHEMINS = ("public/static/kit/",)
+# `.claude/` et `CLAUDE.md` : configuration de l'assistant du poste de Julien
+# (chemins personnels, garde-fous). Même règle que la liste d'exclusion du miroir
+# public (moteur_public_exclus.txt, depuis le 21/10/2026).
+# `dashboard/static/api/` : synthèses IA nominatives écrites par l'atelier
+# (api.py::SYNTHESES_DIR). Ignorées par .gitignore ; ce filet couvre un clone où
+# elles auraient été versionnées par erreur (`git ls-files` les listerait).
+EXCLUS_CHEMINS = ("public/static/kit/", ".claude/", "CLAUDE.md",
+                  "dashboard/static/api/")
 
 # ── Les seuls binaires admis ─────────────────────────────────────────────────
 # Décision explicite du 06/10/2026 (Julien) : les icônes du site public. Un
@@ -116,6 +123,46 @@ IMAGE_POIDS_MAX = 64 * 1024
 # logiciel, un chemin de fichier — que personne ne relirait.
 MORCEAUX_PNG_ADMIS = {b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"gAMA",
                       b"sRGB", b"pHYs", b"cHRM", b"bKGD", b"sBIT"}
+
+# Décision du 09/11/2026 (Julien) : les polices du portail, servies par chaque
+# instance (public/static/fonts, licences OFL à côté). Même règle que les
+# images : liste CLOSE, chaque fichier nommé, et de plus son empreinte SHA-256.
+# Une police ne se relit pas ; elle est donc admise pour ce qu'elle EST, octet
+# pour octet, et rien d'autre ne passe sous son nom. Les empreintes de Plex
+# sont celles de static/fonts/PROVENANCE-IBM-Plex.txt ; celle de Fraunces est
+# celle du fichier servi par le portail (portail-local/public/fonts).
+# Changer une police, c'est changer sa ligne ici : un geste, relu comme tel.
+FONTES_ADMISES = {
+    "public/static/fonts/fraunces-latin-normal.woff2":
+        "7f9d191d999336d3b9790afa72e1358e50a13b06d4f289341e92a311967a80f9",
+    "public/static/fonts/ibm-plex-sans-latin-400.woff2":
+        "db71f8a28ad8501544fb4e7668e3c6d0b731760b6f20de3525ebaeba597f1922",
+    "public/static/fonts/ibm-plex-sans-latin-600.woff2":
+        "31535a91ce3f6b8ed3ddedadab1e49957e2220263a640df1a3f14f6fdfe15eb6",
+    "public/static/fonts/ibm-plex-mono-latin-400.woff2":
+        "3c5a451f9ec27a354b0c2bcca636c6ec17a651281aabf29f8427e210a1d31e85",
+    "public/static/fonts/ibm-plex-mono-latin-500.woff2":
+        "756026ff72eb76fd971ac4b7504cec55eef62109d2684c2cad8da32170b80b37",
+}
+FONTE_POIDS_MAX = 64 * 1024
+
+
+def refus_fonte(octets: bytes, empreinte: str) -> str | None:
+    """Pourquoi cette police ne peut pas entrer dans l'archive — ou None.
+
+    Un WOFF2 (signature « wOF2 »), léger, dont la longueur déclarée dans
+    l'en-tête est celle du fichier (rien n'est collé derrière), et dont
+    l'empreinte est exactement celle qui a été admise.
+    """
+    if len(octets) > FONTE_POIDS_MAX:
+        return f"{len(octets)} octets, plus que les {FONTE_POIDS_MAX} admis"
+    if not octets.startswith(b"wOF2"):
+        return "ce n'est pas un WOFF2"
+    if len(octets) < 48 or int.from_bytes(octets[8:12], "big") != len(octets):
+        return "longueur déclarée différente de celle du fichier"
+    if hashlib.sha256(octets).hexdigest() != empreinte:
+        return "empreinte SHA-256 différente de celle admise"
+    return None
 
 
 def refus_image(octets: bytes) -> str | None:
@@ -196,6 +243,11 @@ def verifier(source: Path, liste: list[Path]) -> list[str]:
                 raison = refus_image(octets)
                 if raison:
                     problemes.append(f"{rel} — image refusée : {raison}")
+                continue
+            if rel.as_posix() in FONTES_ADMISES:
+                raison = refus_fonte(octets, FONTES_ADMISES[rel.as_posix()])
+                if raison:
+                    problemes.append(f"{rel} — police refusée : {raison}")
                 continue
             # L'octet nul est le marqueur de binaire, et il est décodable en
             # UTF-8 : s'en remettre au seul échec de décodage laissait passer

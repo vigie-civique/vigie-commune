@@ -326,6 +326,13 @@ def repondre(conn, tache_id: int, user: dict, contenu: dict,
         raise Refus("Tâche introuvable.", 404)
     if t["etat"] not in ("ouverte", "proposee"):
         raise Refus(f"Cette tâche n'attend pas de réponse : elle est « {t['etat']} ».", 409)
+    # La réponse proposée par un autre ne s'écrase pas : un contributeur
+    # remplaçait celle d'un autre, qui en devenait l'auteur (audit du 15/11).
+    # Le validateur, lui, la tranche (`valider`).
+    if (t["etat"] == "proposee" and t.get("propose_par") not in (None, user["id"])
+            and user.get("role") == "contributor"):
+        raise Refus("Une réponse d'un autre compte attend déjà d'être relue : "
+                    "un validateur la tranche avant qu'une autre la remplace.", 409)
     reponse = nettoyer_reponse(t["nature"], contenu, candidats)
     conn.execute("UPDATE taches SET etat='proposee', reponse=?, propose_par=?, "
                  "propose_le=datetime('now'), valide_par=NULL, valide_le=NULL WHERE id=?",

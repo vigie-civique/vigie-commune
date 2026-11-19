@@ -82,7 +82,7 @@ def test_sirene_type_une_commune_en_service(base, monkeypatch):
 def _upsert_direct(base):
     """`upsert_entity` réduit à l'essentiel : la config d'instance n'est pas ici."""
     def _u(conn, *, type, name, short_name=None, lat=None, lng=None,
-           address=None, confidence="verified", commune=None):
+           address=None, confidence="verified", commune=None, siren=None):
         row = conn.execute("SELECT id FROM entities WHERE type=? AND name=?",
                            (type, name)).fetchone()
         if row:

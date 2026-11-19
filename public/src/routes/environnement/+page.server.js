@@ -60,6 +60,11 @@ export function load() {
     controleEau: d.eau_controle?.reseaux?.length ? d.eau_controle : null,
     dechets: d.dechets?.acteurs?.length ? d.dechets : null,
     incendie: d.incendie || null,
+    // Qualifiés au build (`sources_data_gouv.py`) : VigiEau par année et par
+    // niveau ; l'électricité par filière seulement, sans aucune installation
+    // désignée (avis DPO du 29/10/2026).
+    vigieau: d.vigieau?.annees?.length ? d.vigieau : null,
+    electricite: d.electricite || null,
     // Section → dossier thématique publié sur le même sujet (lot 8).
     dossiers: dossiersDeLaPage('/environnement'),
   }

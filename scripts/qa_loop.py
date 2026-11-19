@@ -26,8 +26,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from collectors.config import STEP_META            # noqa: E402  (fraîcheur des sources)
-
 from collectors.config import DB_PATH   # nommée dans la config
 from collectors.sauvegarde import sauvegarder      # noqa: E402
 REPORT_PATH = ROOT / "audits" / "qa_report.json"
@@ -292,108 +290,10 @@ def check_geocodable_in_commune(c):
             for r in rows]
 
 
-def check_silent_source(c):
-    """Collecteur qui n'a plus livré depuis trop longtemps, ou qui tourne à vide.
-
-    Deux pannes distinctes, aucune des deux visible sans ce check :
-
-    1. SILENCE — plus aucun run réussi depuis > 1,5 × TTL. Cas de figure : le
-       collecteur n'est plus planifié, ou l'API ne répond plus.
-       `api-dvf.cerema.fr` ne résout plus (DNS mort) et personne ne l'a vu.
-
-    2. À VIDE — la source répond, les runs passent, mais n'apportent plus rien
-       depuis plusieurs passages. C'est exactement ce qui est arrivé à DECP :
-       `decp_augmente` n'était plus alimenté depuis le 05/03/2026 alors que
-       l'API répondait normalement — 577 jours de données foncières figées sans
-       le moindre signal. Un jeu qui répond n'est pas un jeu à jour.
-
-    Le seuil est 1,5 × TTL : le TTL déclenche la relance de la collecte, pas
-    l'alerte. On n'alerte que si la relance elle-même n'a rien produit.
-    """
-    findings = []
-    for name, (ttl, _prio, _table, _where) in STEP_META.items():
-        last = c.execute(
-            "SELECT finished_at, status, items_added FROM collector_runs"
-            " WHERE collector=? AND status IN ('ok','empty')"
-            " ORDER BY finished_at DESC LIMIT 1", (name,)
-        ).fetchone()
-
-        if last is None or not last["finished_at"]:
-            # Le filtre status IN ('ok','empty') ne voit ici que l'ABSENCE de
-            # succès — un collecteur qui échoue à CHAQUE run (error/timeout)
-            # tombe dans la même branche qu'un collecteur jamais lancé, alors
-            # que ce sont deux pannes très différentes à traiter. Cas réel
-            # trouvé le 10/08/2026 : rne échouait en DNS (URLError) à chaque
-            # passage depuis le 27/07 — 10+ échecs consécutifs journalisés,
-            # rapportés ici comme un simple "jamais journalisé" jusqu'à ce
-            # qu'on aille lire collector_runs à la main.
-            recent_errors = c.execute(
-                "SELECT COUNT(*), MAX(started_at), error FROM collector_runs"
-                " WHERE collector=? AND status IN ('error','timeout')"
-                " ORDER BY started_at DESC LIMIT 1", (name,)
-            ).fetchone()
-            n_err = c.execute(
-                "SELECT COUNT(*) FROM collector_runs"
-                " WHERE collector=? AND status IN ('error','timeout')", (name,)
-            ).fetchone()[0]
-            if n_err:
-                findings.append(finding(
-                    "silent_source", "error",
-                    f"collecteur « {name} » : {n_err} run(s) en échec, aucun succès "
-                    f"journalisé — dernier échec {recent_errors[1]} ({recent_errors[2]})",
-                    ref={"collector": name, "n_errors": n_err}))
-            else:
-                findings.append(finding(
-                    "silent_source", "warning",
-                    f"collecteur « {name} » n'a aucun run journalisé — "
-                    f"fraîcheur non vérifiable (lancer python3 -m collectors.run_all pour la produire)",
-                    ref={"collector": name}))
-            continue
-
-        age = c.execute("SELECT julianday('now') - julianday(?)",
-                        (last["finished_at"],)).fetchone()[0]
-        if age is not None and age > ttl * 1.5:
-            sev = "error" if age > ttl * 3 else "warning"
-            findings.append(finding(
-                "silent_source", sev,
-                f"collecteur « {name} » muet depuis {age:.0f} j (TTL {ttl} j) — "
-                f"source morte ou plus planifiée",
-                ref={"collector": name, "age_days": round(age, 1), "ttl": ttl}))
-            continue
-
-        # Runs consécutifs sans apport : la source répond mais ne livre plus.
-        recents = c.execute(
-            "SELECT items_added FROM collector_runs"
-            " WHERE collector=? AND status IN ('ok','empty')"
-            " ORDER BY finished_at DESC LIMIT 3", (name,)
-        ).fetchall()
-        if len(recents) == 3 and all((r["items_added"] or 0) == 0 for r in recents):
-            # ⚠️ « Sans apport » ne veut dire « figé » que si la source a DÉJÀ
-            # livré ici. Sur `crc`, ne rien trouver est le résultat JUSTE et
-            # durable : une commune de moins de 3 500 habitants n'est presque
-            # jamais contrôlée, et son intercommunalité pas davantage. Le
-            # contrôle criait donc à chaque passage sur une réponse correcte —
-            # Lasalle et Brassac, en septembre 2026. Un avertissement qui ne
-            # peut pas s'éteindre apprend à ne plus lire les avertissements.
-            a_deja_livre = c.execute(
-                "SELECT 1 FROM collector_runs"
-                " WHERE collector=? AND items_added > 0 LIMIT 1", (name,)
-            ).fetchone()
-            if a_deja_livre:
-                findings.append(finding(
-                    "stale_source", "warning",
-                    f"collecteur « {name} » : 3 runs consécutifs sans aucun apport "
-                    f"alors qu'il a déjà livré — vérifier que le jeu source est "
-                    f"encore alimenté (cf. decp_augmente figé alors que l'API répondait)",
-                    ref={"collector": name}))
-            else:
-                findings.append(finding(
-                    "stale_source", "info",
-                    f"collecteur « {name} » : aucun apport dans tout l'historique "
-                    f"journalisé — normal quand la collectivité n'est pas concernée "
-                    f"(crc sur une commune jamais contrôlée), à vérifier sinon",
-                    ref={"collector": name}))
-    return findings
+# `check_silent_source` (silence et source figée) vivait ici, et rien ne le
+# lançait : ni plist, ni timer du VPS (relevé du 06/11/2026). Il est fondu dans
+# `scripts/collect_loop.py::sante()`, qui écrit `sante.json` à chaque collecte
+# (chantier « sentinelle de forme des sources », lot 2).
 
 
 def check_confidence_values(c):
@@ -537,7 +437,6 @@ CHECKS = [
     check_stale_body_membership,
     check_geocodable_in_commune,
     check_confidence_values,
-    check_silent_source,
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -6,10 +6,35 @@ silence.
 """
 from __future__ import annotations
 
-from scripts.snapshot.socle import RULES
+from scripts.snapshot.socle import RULES, rows, table_exists
 
 
-def etape_dictionnaire(out, stats, location_quality) -> None:
+def entites_osm_publiees(conn, public_ids) -> int:
+    """Les entités publiées importées d'OpenStreetMap (`places.osm_id`), avec
+    leurs coordonnées : la part OSM du jeu, celle qui fonde l'ODbL."""
+    if not table_exists(conn, "places"):
+        return 0
+    osm = {r["entity_id"] for r in rows(conn,
+           "SELECT DISTINCT entity_id FROM places WHERE osm_id IS NOT NULL")}
+    return len(osm & set(public_ids))
+
+
+_GEOCODAGE = ("viennent du géocodage de l'IGN (Géoplateforme) et de la Base Adresse "
+              "Nationale, sous Licence Ouverte.")
+
+
+def _origine_osm(n_osm: int, n: int) -> str:
+    if not n_osm:
+        return (f"Aucune des {n} entités publiées ne vient d'OpenStreetMap dans "
+                f"cette construction. Les coordonnées {_GEOCODAGE}")
+    return (f"Ce choix découle des sources : {n_osm} des {n} entités publiées "
+            "sont des points d'intérêt OpenStreetMap, importés avec leurs "
+            "coordonnées et fondus dans le jeu : c'est une base dérivée au "
+            "sens de l'ODbL, et le partage à l'identique s'applique. Les "
+            f"autres coordonnées {_GEOCODAGE}")
+
+
+def etape_dictionnaire(out, stats, location_quality, conn, public_ids) -> None:
     # ── Dictionnaire de données ──────────────────────────────────────────
     # Servi À CÔTÉ des JSON, et régénéré à chaque exécution : un README
     # écrit à la main se périme en silence — celui d'avant le 12/08/2026
@@ -38,11 +63,10 @@ def etape_dictionnaire(out, stats, location_quality) -> None:
         "redistribuez, et ne pas la diffuser sous verrou technique sans "
         "en fournir aussi une version libre.",
         "",
-        "Ce choix découle des sources : 333 des entités publiées sont des "
-        "points d'intérêt OpenStreetMap et une large part des coordonnées "
-        "vient d'un géocodage OSM. La contribution est substantielle et "
-        "fondue dans le jeu — c'est donc une base dérivée au sens de "
-        "l'ODbL, et le partage à l'identique s'applique.",
+        # Compté à chaque construction : le chiffre écrit en dur (« 333 »,
+        # et un « géocodage OSM » qui n'existe pas, le géocodeur étant celui
+        # de l'IGN) était le même sur les trois sites (avis PI du 26/10/2026).
+        _origine_osm(entites_osm_publiees(conn, public_ids), len(public_ids)),
         "",
         "### Attribution",
         "",
@@ -87,6 +111,9 @@ def etape_dictionnaire(out, stats, location_quality) -> None:
         "| `budget.json` · `budget_vote.json` · `ofgl.json` | Budgets "
         "votés et agrégats financiers | `annuel`/`annexe`, `budget_vote`, "
         "`ofgl` |",
+        "| `avant_fusion.json` | Commune nouvelle : ses anciennes communes, et "
+        "les comptes de celles absorbées sous un autre code, à part (jamais "
+        "additionnés) | `predecesseurs`, `absorbees` |",
         "| `intercommunalite.json` | Compétences, délégués, sièges de "
         "l'EPCI | racine |",
         "| `elus_rne.json` | Conseils municipaux (Répertoire National des "
@@ -96,7 +123,7 @@ def etape_dictionnaire(out, stats, location_quality) -> None:
         "| `fiscalite.json` · `impots` | Taux d'imposition comparés, et "
         "leur rang parmi les communes | `taux`, `reperes` |",
         "| `dvf.json` | Mutations immobilières (DVF), en agrégats : par année, "
-        "par nature de bien — aucune vente à l'unité | `synthese`, `par_annee`, "
+        "par nature de bien, comptées par mutation et non par ligne — aucune vente à l'unité | `synthese`, `par_annee`, "
         "`par_nature` |",
         "| `urbanisme.json` | Autorisations d'urbanisme | `autorisations` |",
         "| `environnement.json` | Eau (prix, contrôle sanitaire), déchets, "

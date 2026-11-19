@@ -136,6 +136,37 @@ class TestRapprochementEPCI:
             self.NOM_DECLARE, "Drôme", epci=True)
 
 
+class TestSiegeDeLEpci:
+    """« Communauté de communes Pays des Écrins - Argentière-la-Bessée
+    (Hautes-Alpes) » : le titre réel, écarté le 02/11/2026 au relevé de
+    Vallouise-Pelvoux parce que le siège ajoutait deux mots au nom."""
+    TITRE = "Communauté de communes Pays des Écrins - Argentière-la-Bessée (Hautes-Alpes)"
+    MEMBRES = ("L'Argentière-la-Bessée", "Vallouise-Pelvoux", "Puy-Saint-Vincent")
+
+    def test_le_siege_membre_tombe(self):
+        """Le COG écrit « L'Argentière-la-Bessée », le site sans l'article."""
+        assert correspond(self.TITRE, "CC du Pays des Ecrins", "Hautes-Alpes",
+                          epci=True, membres=self.MEMBRES)
+
+    def test_un_siege_hors_du_registre_reste_et_ecarte(self):
+        """Ni rapprochement flou, ni siège deviné : sans la commune dans le
+        registre, rien ne tombe."""
+        assert not correspond(self.TITRE, "CC du Pays des Ecrins", "Hautes-Alpes",
+                              epci=True, membres=("Vallouise-Pelvoux",))
+        assert not correspond(self.TITRE, "CC du Pays des Ecrins", "Hautes-Alpes",
+                              epci=True, membres=())
+
+    def test_le_siege_ne_rattrape_pas_une_voisine(self):
+        assert not correspond(
+            "Communauté de communes du Briançonnais - Briançon (Hautes-Alpes)",
+            "CC du Pays des Ecrins", "Hautes-Alpes", epci=True,
+            membres=("Briançon", "Argentière-la-Bessée"))
+
+    def test_une_commune_ne_perd_jamais_un_suffixe(self):
+        assert not correspond("Commune de Saillans - Véronne (Drôme)", "Saillans",
+                              "Drôme", epci=False)
+
+
 class TestDepartement:
     def test_le_nom_se_tire_de_la_prefecture(self):
         """L'instance déclare le département en CODE ; le titre porte son NOM.

@@ -5,13 +5,15 @@ Périmètre : les communes de config/instance.json, via COMMUNE_INSEE.
 """
 import json
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
+from . import mesure
 from .archive import archive_fetch, fetch_json
 from .config import (DVF_API, COMMUNE_INSEE, DEPARTEMENT, HEADERS,
                      NATIONAL_STORE, REQUEST_DELAY)
 from .db import transaction
-from .national_store import ecrire_atomiquement, est_frais
+from .national_store import ecrire_atomiquement, est_frais, magasin_ecrivable, perime_lisible
 
 
 DVF_CACHE = NATIONAL_STORE / "dvf"
@@ -23,8 +25,8 @@ def _cache_cerema(insee: str):
     return DVF_CACHE / "cerema" / f"{insee}.json"
 
 
-def _cache_departement(year: str):
-    return DVF_CACHE / "departements" / year / f"{DEPARTEMENT}.csv.gz"
+def _cache_departement(year: str, departement: str = DEPARTEMENT):
+    return DVF_CACHE / "departements" / year / f"{departement}.csv.gz"
 
 
 def _resultats_cerema(data) -> list[dict]:
@@ -52,12 +54,18 @@ def fetch_dvf_cerema(insee: str = COMMUNE_INSEE, limit: int = 1000) -> list[dict
             data = json.loads(cache.read_bytes())
             origine = "magasin partagé"
         else:
-            data = fetch_json(url, source="dvf-cerema", timeout=20)
+            # Compté plus bas, cache compris, sous un nom à lui : ici, une liste
+            # au sommet l'aurait été une seconde fois.
+            data = fetch_json(url, source="dvf-cerema", timeout=20, mesurer=False)
             ecrire_atomiquement(
                 cache, json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
             )
             origine = "API Cerema"
         results = _resultats_cerema(data)
+        # Plafonné à `limit` sans pagination : un plafond atteint reste stable.
+        mesure.lu("cerema-mutations", len(results),
+                  sorted(results[0]) if results and isinstance(results[0], dict) else None,
+                  complete=True)
         print(f"  [dvf] {insee} {origine} → {len(results)} mutations")
     except Exception as e:
         if cache.is_file() and cache.stat().st_size > 0:
@@ -74,6 +82,81 @@ def fetch_dvf_cerema(insee: str = COMMUNE_INSEE, limit: int = 1000) -> list[dict
     return results
 
 
+def _annees() -> list[str]:
+    # Millésimes déduits de l'année courante plutôt que codés en dur : la liste
+    # figée à 2024 a laissé passer le millésime 2025 (données arrêtées au
+    # 20/12/2024 pendant 577 jours). Le millésime de l'année en cours n'est
+    # publié qu'en cours d'année — un 404 est normal et simplement ignoré.
+    from datetime import date
+    return [str(a) for a in range(2020, date.today().year + 1)]
+
+
+def csv_departement(year: str, departement: str = DEPARTEMENT, insee: str = "") -> bytes:
+    """Le CSV DVF géolocalisé d'un département pour une année, compressé :
+    celui du magasin s'il est frais, sinon téléchargé (et déposé si le magasin
+    l'accepte). Un 404 (millésime pas encore publié) lève `HTTPError`."""
+    from datetime import date
+
+    url = (f"https://files.data.gouv.fr/geo-dvf/latest/csv"
+           f"/{year}/departements/{departement}.csv.gz")
+    cache = _cache_departement(year, departement)
+    # Les millésimes clos sont immuables. Seul celui de l'année en
+    # cours expire, car data.gouv le complète au fil des publications.
+    frais = None if int(year) < date.today().year else DVF_BULK_COURANT_CACHE_JOURS
+    if est_frais(cache, frais):
+        print(f"  [dvf] {insee} magasin partagé {year}/{departement}.csv.gz")
+        return cache.read_bytes()
+    # Comme `deposer` : un lecteur qui ne peut pas écrire lit la copie périmée
+    # bornée avant d'appeler la source ; l'écrivain, jamais.
+    if not magasin_ecrivable(cache.parent, cache.name) and perime_lisible(cache, frais or 1):
+        return cache.read_bytes()
+    print(f"  [dvf] {insee} téléchargement {year}/{departement}.csv.gz...")
+    req = urllib.request.Request(url, headers=HEADERS)
+
+    # Sur une connexion instable, les téléchargements peuvent être
+    # coupés en cours de route. Le fichier partagé n'est publié
+    # qu'après réception complète.
+    derniere_erreur = None
+    for tentative in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                compressed = resp.read()
+            ecrire_atomiquement(cache, compressed)
+            return compressed
+        except urllib.error.HTTPError:
+            raise       # 404 : millésime non publié, inutile d'insister
+        except Exception as e:
+            derniere_erreur = e
+            if tentative < 2:
+                attente = 3 * (tentative + 1)
+                print(f"  [dvf] {insee} {year} coupé ({type(e).__name__}), "
+                      f"nouvelle tentative dans {attente}s...")
+                time.sleep(attente)
+    if cache.is_file() and cache.stat().st_size > 0 and perime_lisible(cache, frais or 1):
+        print(f"  [dvf] {insee} cache périmé repris pour {year}")
+        return cache.read_bytes()
+    raise derniere_erreur
+
+
+def remplir_magasin(departements: list[str]) -> list[str]:
+    """Pour l'écrivain du magasin : les CSV départementaux de chaque année,
+    sans commune ni base. Rend les « département/année » en échec ; un
+    millésime pas encore publié (404) n'en est pas un."""
+    echecs = []
+    for departement in departements:
+        for year in _annees():
+            try:
+                csv_departement(year, departement)
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    echecs.append(f"{departement}/{year}")
+                    print(f"  ✗ [dvf] {departement} {year} : HTTP {e.code}")
+            except Exception as e:
+                echecs.append(f"{departement}/{year}")
+                print(f"  ✗ [dvf] {departement} {year} : {type(e).__name__}: {e}")
+    return echecs
+
+
 def fetch_dvf_csv_bulk(insee: str = COMMUNE_INSEE) -> list[dict]:
     """
     Télécharge le CSV DVF géolocalisé par département (data.gouv.fr),
@@ -83,56 +166,12 @@ def fetch_dvf_csv_bulk(insee: str = COMMUNE_INSEE) -> list[dict]:
     import io
     import csv
 
-    # Millésimes déduits de l'année courante plutôt que codés en dur : la liste
-    # figée à 2024 a laissé passer le millésime 2025 (données arrêtées au
-    # 20/12/2024 pendant 577 jours). Le millésime de l'année en cours n'est
-    # publié qu'en cours d'année — un 404 est normal et simplement ignoré.
-    from datetime import date
-    annees = [str(a) for a in range(2020, date.today().year + 1)]
-
     all_rows: list[dict] = []
-    for year in annees:
+    for year in _annees():
         url = (f"https://files.data.gouv.fr/geo-dvf/latest/csv"
                f"/{year}/departements/{DEPARTEMENT}.csv.gz")
-        cache = _cache_departement(year)
         try:
-            # Les millésimes clos sont immuables. Seul celui de l'année en
-            # cours expire, car data.gouv le complète au fil des publications.
-            frais = None if int(year) < date.today().year else DVF_BULK_COURANT_CACHE_JOURS
-            if est_frais(cache, frais):
-                compressed = cache.read_bytes()
-                print(f"  [dvf] {insee} magasin partagé {year}/{DEPARTEMENT}.csv.gz")
-            else:
-                print(f"  [dvf] {insee} téléchargement {year}/{DEPARTEMENT}.csv.gz...")
-                req = urllib.request.Request(url, headers=HEADERS)
-
-                # Sur une connexion instable, les téléchargements peuvent être
-                # coupés en cours de route. Le fichier partagé n'est publié
-                # qu'après réception complète.
-                compressed = None
-                derniere_erreur = None
-                for tentative in range(3):
-                    try:
-                        with urllib.request.urlopen(req, timeout=90) as resp:
-                            compressed = resp.read()
-                        ecrire_atomiquement(cache, compressed)
-                        break
-                    except urllib.error.HTTPError:
-                        raise       # 404 : millésime non publié, inutile d'insister
-                    except Exception as e:
-                        derniere_erreur = e
-                        if tentative < 2:
-                            attente = 3 * (tentative + 1)
-                            print(f"  [dvf] {insee} {year} coupé ({type(e).__name__}), "
-                                  f"nouvelle tentative dans {attente}s...")
-                            time.sleep(attente)
-                if compressed is None:
-                    if cache.is_file() and cache.stat().st_size > 0:
-                        compressed = cache.read_bytes()
-                        print(f"  [dvf] {insee} cache périmé repris pour {year}")
-                    else:
-                        raise derniere_erreur
-
+            compressed = csv_departement(year, DEPARTEMENT, insee)
             raw = gzip.decompress(compressed).decode("utf-8", errors="replace")
             reader = csv.DictReader(io.StringIO(raw))
             rows = [
@@ -209,6 +248,7 @@ def _parse_record(item: dict) -> dict | None:
         cad, section, numero = _cadastre(item)
         base = surface_t or surface_b
         return {
+            "id_mutation":     str(_first(item, "id_mutation", "idmutinvar", "idmutation") or "") or None,
             "date":            date,
             "cadastre_ref":    cad,
             "section":         section,
@@ -252,13 +292,14 @@ def insert_transaction(conn, parsed: dict, insee: str | None = None) -> None:
     section et prix s'écrasent silencieusement — bug constaté le 11/08/2026 sur
     les 7 communes collectées jusque-là.
     """
+    commune = insee or parsed.get("insee")
     conn.execute(
         "INSERT OR IGNORE INTO dvf_transactions"
-        " (insee,date,cadastre_ref,section,numero,lieu_dit,"
+        " (insee,id_mutation,date,cadastre_ref,section,numero,lieu_dit,"
         "  nature_mutation,nature_bien,surface_terrain,"
         "  surface_bati,price,price_per_m2,lat,lng)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (insee or parsed.get("insee"),
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (commune, parsed.get("id_mutation"),
          parsed["date"], parsed["cadastre_ref"],
          parsed["section"], parsed["numero"],
          parsed["lieu_dit"], parsed["nature_mutation"],
@@ -266,6 +307,21 @@ def insert_transaction(conn, parsed: dict, insee: str | None = None) -> None:
          parsed["surface_bati"], parsed["price"],
          parsed["price_per_m2"], parsed["lat"], parsed["lng"])
     )
+    # Une ligne déjà en base d'avant la colonne est IGNORÉE par l'insertion :
+    # elle garderait son identifiant vide pour toujours. On le lui reporte, par
+    # la clé même de `ux_dvf_dedup`.
+    if parsed.get("id_mutation"):
+        conn.execute(
+            "UPDATE dvf_transactions SET id_mutation=?"
+            " WHERE id_mutation IS NULL AND insee IS ? AND date IS ?"
+            "   AND cadastre_ref IS ? AND nature_bien IS ?"
+            "   AND COALESCE(surface_terrain,-1)=COALESCE(?,-1)"
+            "   AND COALESCE(surface_bati,-1)=COALESCE(?,-1)"
+            "   AND COALESCE(price,-1)=COALESCE(?,-1)",
+            (parsed["id_mutation"], commune, parsed["date"],
+             parsed["cadastre_ref"], parsed["nature_bien"],
+             parsed["surface_terrain"], parsed["surface_bati"], parsed["price"])
+        )
 
 
 def import_dvf(insee: str = COMMUNE_INSEE):

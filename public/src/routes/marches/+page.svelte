@@ -2,9 +2,10 @@
   import { estAttribue } from '#lib/marches.js'
   import { COMMUNE_DE, EPCI, EPCI_COURT, SITE_NOM } from '#lib/instance.js'
   import { euros } from '#lib/data.js'
-  import { pluriel } from '#lib/couverture.js'
+  import { enumerer, pluriel } from '#lib/couverture.js'
   import Niveau from '#lib/components/Niveau.svelte'
   import FiltrePortee from '#lib/components/FiltrePortee.svelte'
+  import AvantFusion from '#lib/components/AvantFusion.svelte'
 
   // Rendu au build par +page.server.js : le tableau est déjà dans le HTML.
   export let data
@@ -102,12 +103,14 @@
        publication décrit un vide qu'elle a elle-même fabriqué. -->
   <p class="seuil">
     <b>Ce que cette page ne peut pas montrer.</b>
-    La publication des données essentielles n'est obligatoire qu'à partir de
-    <b>40 000 €&nbsp;HT</b>. En dessous, un marché est légalement attribué sans
-    qu'aucun registre national n'en garde trace&nbsp;: ni le BOAMP, ni les DECP.
-    Entre 25&nbsp;000 et 40&nbsp;000&nbsp;€&nbsp;HT, la commune publie seulement,
-    chaque année, la liste de ces marchés, sur le support de son choix&nbsp;;
-    sous 25&nbsp;000&nbsp;€&nbsp;HT, rien ne l'oblige à les publier.
+    Un acheteur public n'est tenu de publier les données essentielles d'un marché
+    sur le portail national (les DECP) qu'à partir de <b>40 000 €&nbsp;HT</b>,
+    dans les deux mois qui suivent sa notification. Un marché conclu sans publicité
+    ni mise en concurrence y est soumis dès 25&nbsp;000&nbsp;€&nbsp;HT, mais
+    l'acheteur peut se contenter d'en publier la liste chaque année, au premier
+    trimestre, sur le support de son choix. Pour les marchés plus petits, le texte
+    ne prévoit aucune publication
+    (<a href="https://www.legifrance.gouv.fr/codes/article_lc/LEGIARTI000045739606" target="_blank" rel="noopener">code de la commande publique, art.&nbsp;R2196-1<span class="visually-hidden"> (nouvelle fenêtre)</span></a>).
     Pour une commune de cette taille, l'essentiel de la commande publique passe
     sous ce seuil, et ne se lit, quand elle se lit, que dans les procès-verbaux
     du conseil.
@@ -116,7 +119,14 @@
          sur les trois instances, y compris là où 77 attributions lues
          attendaient leur relecture (refonte du contenu, lot 4 b). -->
     {#if comptePortee.commune === undefined}{' '}
-      Ici, <b>aucun marché attribué par la commune</b> n'est encore publié.
+      Ici, <b>aucune donnée n'est déclarée avec la commune comme acheteur</b>
+      dans ce que le site publie.
+      {#if data.decpAbsents && data.decpAbsents.length}{' '}
+        Les fichiers consolidés des DECP lus par ce site ne couvrent pas
+        {enumerer(data.decpAbsents.map(String))}&nbsp;: pour
+        {data.decpAbsents.length > 1 ? 'ces années' : 'cette année'}, ce zéro
+        n'établit pas que la commune n'a rien acheté.
+      {' '}{/if}
       {#if sourceMarches === 'absente'}{' '}
         La collecte des sources ouvertes (BOAMP, DECP) n'a pas encore tourné
         pour ce site.
@@ -147,18 +157,20 @@
     <!-- Les lignes communales en attente se taisaient dès qu'un premier marché
          de la commune était publié : le total affiché paraissait complet. -->
     {#if comptePortee.commune !== undefined && extraits.enAttente}{' '}
-      {pluriel(extraits.enAttente, 'autre attribution')} de la commune
+      {pluriel(extraits.enAttente, 'autre attribution', 'autres attributions')} de la commune
       lue{extraits.enAttente > 1 ? 's' : ''} dans les procès-verbaux
       {extraits.enAttente > 1 ? 'attendent leur' : 'attend sa'} relecture et
       n'entre{extraits.enAttente > 1 ? 'nt' : ''} dans aucun chiffre de cette page.
     {' '}{/if}
     {#if extraits.autresEnAttente}{' '}
-      {pluriel(extraits.autresEnAttente, 'autre attribution')} lue{extraits.autresEnAttente > 1 ? 's' : ''}
+      {pluriel(extraits.autresEnAttente, 'autre attribution', 'autres attributions')} lue{extraits.autresEnAttente > 1 ? 's' : ''}
       dans les procès-verbaux (intercommunalité ou autre acheteur)
       {extraits.autresEnAttente > 1 ? 'attendent leur' : 'attend sa'} relecture et
       n'entre{extraits.autresEnAttente > 1 ? 'nt' : ''} dans aucun chiffre de cette page.
     {' '}{/if}
   </p>
+
+  <AvantFusion af={data.avantFusion} lignes={marches} quoi="marches" />
 
   {#if marches.length}
     <FiltrePortee bind:valeur={portee} compte={comptePortee}
@@ -176,16 +188,16 @@
          somme que nous faisons, et elle vaut ce que vaut la collecte. Un
          marché non recensé ne s'y voit pas. -->
     <Niveau type="calcul" base="les marchés recensés dans les délibérations et les données ouvertes">
-      Sur la période <b>{periode}</b>, <b>{dansPortee.filter(isAttrib).length}</b> marchés attribués sont recensés
+      Sur la période <b>{periode}</b>, <b>{dansPortee.filter(isAttrib).length}</b> {dansPortee.filter(isAttrib).length > 1 ? 'marchés attribués sont recensés' : 'marché attribué est recensé'}
       (titulaire et montant connus), pour <b>{eurosC(sum(dansPortee.filter(isAttrib)))}</b>,
       auxquels s'ajoutent <b>{dansPortee.filter(m => !isAttrib(m)).length}</b> avis publiés&nbsp;:
       des consultations, ou des résultats dont le titulaire ou le montant manque.
       Un avis n'est pas un marché attribué, et n'entre dans aucun total en euros.
       {#if constat}
         <br />
-        <b>{constat.pourMoitie}</b> titulaires réunissent à eux seuls
+        <b>{constat.pourMoitie}</b> {constat.pourMoitie > 1 ? 'titulaires réunissent à eux seuls' : 'titulaire réunit à lui seul'}
         <b>{constat.partMoitie} %</b> des montants attribués, répartis entre
-        <b>{constat.titulaires}</b> entreprises différentes.
+        <b>{constat.titulaires}</b> {constat.titulaires > 1 ? 'entreprises différentes' : 'entreprise'}.
       {' '}{/if}
     </Niveau>
 
@@ -252,6 +264,7 @@
               {#if m.nature}<span class="chip">{m.nature}</span>{/if}
               {#if m.procedure}<span class="chip light">{m.procedure}</span>{/if}
               <span class="macheteur">{m.acheteur_nom}</span>
+              {#if m.avant_fusion}<a class="chip light" href="#avant-fusion" title="Passé par l'ancienne commune {m.avant_fusion}, avant la fusion">avant fusion</a>{/if}
               {#if m.date_notif}<span class="mdate">{m.date_notif}</span>{/if}
               {#if m.source_url}<a class="msrc" class:cr={srcTag(m) === 'CR'} href={m.source_url} target="_blank" rel="noopener">{srcTag(m)}<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{:else}<span class="msrc">{srcTag(m)}</span>{/if}
             </div>
@@ -291,7 +304,7 @@
                 <td>{m.date_notif || '-'}</td>
                 <td>{m.objet || '-'}</td>
                 <td class="r">{m.montant ? eurosC(m.montant) : '-'}</td>
-                <td>{m.acheteur_nom || '-'}</td>
+                <td>{m.acheteur_nom || '-'}{#if m.avant_fusion}{' '}<a href="#avant-fusion">(avant fusion)</a>{/if}</td>
                 <td>{#if m.source_url}<a href={m.source_url} target="_blank" rel="noopener">{srcTag(m)}<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{:else}{srcTag(m)}{/if}</td>
               </tr>
             {/each}
@@ -339,7 +352,7 @@
   .amt { color: var(--ambre); }
 
   .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: .75rem; margin-bottom: 1.75rem; }
-  .tile { background: #fff; border: 1px solid var(--trait); border-top: 3px solid var(--trait); border-radius: 8px; padding: .8rem .9rem; display: flex; flex-direction: column; gap: .15rem; }
+  .tile { background: var(--carte); border: 1px solid var(--trait); border-top: 3px solid var(--trait); border-radius: 8px; padding: .8rem .9rem; display: flex; flex-direction: column; gap: .15rem; }
   .tile.amt { border-top-color: var(--ambre); }
   .tlabel { font-size: .72rem; color: var(--gris); font-weight: 600; text-transform: uppercase; letter-spacing: .02em; }
   .tval { font-size: 1.45rem; font-weight: 700; color: var(--encre); }
@@ -360,11 +373,11 @@
   .mtit { font-weight: 600; color: var(--gris); }
   .mtit a { color: var(--ardoise-fonce); }
   .chip { background: var(--trait-pale); color: var(--gris); border-radius: 99px; padding: .05rem .5rem; font-size: .72rem; font-weight: 600; }
-  .chip.light { background: #fff; border: 1px solid var(--trait); font-weight: 500; }
+  .chip.light { background: var(--carte); border: 1px solid var(--trait); font-weight: 500; }
   .macheteur { color: var(--gris); }
   .mdate { color: var(--gris-clair); font-variant-numeric: tabular-nums; }
   .msrc { margin-left: auto; color: var(--gris); font-weight: 600; font-size: .74rem; border: 1px solid var(--trait); border-radius: 99px; padding: .05rem .5rem; }
-  .msrc.cr { color: var(--recette); border-color: #bbf7d0; background: #e7f0ea; }
+  .msrc.cr { color: var(--recette); border-color: var(--recette-bord); background: var(--recette-pale); }
 
   .trend { display: flex; align-items: flex-end; gap: .6rem; height: 150px; padding: .5rem 0; border-bottom: 1px solid var(--trait); }
   .tcol { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; gap: .2rem; }

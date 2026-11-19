@@ -211,11 +211,13 @@ class ConnecteurDrupal(Connecteur):
         # Les liens de la page de listing qui mènent à une séance. On ne retient
         # que ceux dont l'adresse porte une date : le reste est de la navigation.
         def _liens(page_url: str, html: str):
-            for href in re.findall(r'href="([^"#?]+)"', html):
+            for href, texte in _ancres(html):
                 absolu = urllib.parse.urljoin(page_url, href)
                 if not absolu.startswith(self.bases[portee]):
                     continue
-                date = _date_depuis_adresse(absolu)
+                # L'adresse d'abord ; à défaut, le texte du lien, avec la même
+                # exigence (année à quatre chiffres, ou mois en lettres et année).
+                date = _date_depuis_adresse(absolu) or date_fr(texte)
                 if not date:
                     continue
                 yield absolu, (date, absolu)
@@ -338,6 +340,51 @@ class ConnecteurDrupal(Connecteur):
             if html:
                 textes.append(texte_brut(html))
         return textes
+
+
+class _AncresParser(HTMLParser):
+    """Couples (href, texte) des ancres : balises internes retirées, espaces
+    fusionnés, entités décodées (`convert_charrefs`)."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.ancres: list[tuple[str, str]] = []
+        self._href: str | None = None
+        self._texte: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "a":
+            return
+        self._fermer()
+        href = dict(attrs).get("href")
+        if href:
+            href = href.split("#", 1)[0].split("?", 1)[0]
+        self._href = href or None
+        self._texte = []
+
+    def handle_data(self, data):
+        if self._href is not None:
+            self._texte.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a":
+            self._fermer()
+
+    def _fermer(self):
+        if self._href:
+            self.ancres.append((self._href, " ".join("".join(self._texte).split())))
+        self._href, self._texte = None, []
+
+    def close(self):
+        super().close()
+        self._fermer()
+
+
+def _ancres(html: str) -> list[tuple[str, str]]:
+    parseur = _AncresParser()
+    parseur.feed(html)
+    parseur.close()
+    return parseur.ancres
 
 
 def _date_depuis_adresse(url: str) -> str | None:

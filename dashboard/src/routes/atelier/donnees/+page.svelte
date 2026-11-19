@@ -8,6 +8,8 @@
   import { currentUser } from '#lib/stores/auth.js'
   import { auMoins } from '#lib/roles.js'
   import { VERDICTS, VERDICT } from '#lib/axes.js'
+  import { FIABILITE, phraseErreur } from '#lib/libelles.js'
+  import { COMMUNE } from '#lib/instance.js'
 
   const TABS = [
     { key: 'deliberation', label: 'Délibérations' },
@@ -47,6 +49,11 @@
   let conflit = null         // 409 : quelqu'un a annoté la ligne entre-temps
   // Valider, rejeter, poser la fiabilité : trancher. Le contributeur note et corrige.
   $: tranche = auMoins($currentUser, 'validator')
+  // La note d'une décision est le motif publié d'une rectification : un
+  // contributeur ne la réécrit pas sous la décision d'un autre compte (l'API
+  // refuse). Il propose une correction ; le champ reste lisible.
+  $: noteFigee = !tranche && !!selected?.annotation?.reviewed_by
+                 && selected.annotation.reviewed_by !== $currentUser?.email
 
   // ─── Corrections ───────────────────────────────────────────────────────────
   // Annoter « rejeté » fait disparaître la donnée ; le plus souvent il faut la
@@ -82,15 +89,32 @@
   $: rectifiable = selected
       && ['verbatim', 'atelier'].includes(selected.origine)
 
+  const PAGE = 50
+  let total = 0
+  let plusEnCours = false
+
   async function load() {
     loading = true; error = ''; selected = null
     try {
-      items = await api.donnees(tab, statusFilter, 300, origineFilter)
+      const d = await api.donneesPage(tab, statusFilter, origineFilter, PAGE, 0)
+      items = d.items; total = d.total
     } catch (e) {
-      error = e.message || 'Erreur de chargement'
-      items = []
+      error = phraseErreur(e)
+      items = []; total = 0
     } finally {
       loading = false
+    }
+  }
+
+  async function chargerPlus() {
+    plusEnCours = true; error = ''
+    try {
+      const d = await api.donneesPage(tab, statusFilter, origineFilter, PAGE, items.length)
+      items = [...items, ...d.items]; total = d.total
+    } catch (e) {
+      error = phraseErreur(e)
+    } finally {
+      plusEnCours = false
     }
   }
 
@@ -119,8 +143,9 @@
       }
       // `lu_le` : la revue telle qu'affichée. Si quelqu'un a annoté la ligne
       // depuis, l'API refuse au lieu d'écraser sa note.
+      const { note, ...sansNote } = draft
       const res = await api.annotate(tab, selected.id, {
-        ...draft, corrections: aEnvoyer,
+        ...(noteFigee ? sansNote : draft), corrections: aEnvoyer,
         lu_le: selected.annotation?.reviewed_at ?? null,
       })
       conflit = null
@@ -149,8 +174,7 @@
       if (e.status === 409 && e.detail && typeof e.detail === 'object') {
         conflit = e.detail
       } else {
-        error = (typeof e.detail === 'object' ? e.detail?.message : e.detail)
-          || e.message || "Échec de l'enregistrement"
+        error = (typeof e.detail === 'object' ? e.detail?.message : e.detail) || phraseErreur(e)
       }
     } finally {
       saving = false
@@ -192,11 +216,15 @@
     .catch(() => {})
 </script>
 
+<svelte:head><title>Chiffres à confirmer — Atelier {COMMUNE}</title></svelte:head>
+
 <div class="donnees">
   <header class="top">
-    <h1>Données importées</h1>
-    <p class="sub">Revoir, annoter et valider les délibérations, flux financiers et marchés
-       avant publication. L'annotation n'écrase jamais la donnée source.</p>
+    <h1>Chiffres à confirmer</h1>
+    <p class="sub">Relire les délibérations, les flux financiers et les marchés publics avant
+       leur publication, et les confirmer ou les écarter. Cette page les liste tous, y compris
+       ceux qui sont déjà sûrs ; l'accueil ne compte que ceux qui attendent une décision.
+       Une annotation n'écrase jamais la donnée d'origine.</p>
   </header>
 
   <div class="tabs">
@@ -210,7 +238,7 @@
       {#each STATUSES as s}
         <button class="chip" class:on={statusFilter === s.key} on:click={() => (statusFilter = s.key)}>{s.label}</button>
       {/each}
-      <select class="chip-select" bind:value={origineFilter}>
+      <select class="chip-select" bind:value={origineFilter} aria-label="Origine des lignes">
         {#each ORIGINES as o}<option value={o.key}>{o.label}</option>{/each}
       </select>
     </div>
@@ -268,12 +296,19 @@
             {/each}
           </tbody>
         </table>
+        <p class="muted pied-liste">
+          {items.length} sur {total}
+          {#if items.length < total}{' '}
+            · <button class="plus" on:click={chargerPlus} disabled={plusEnCours}>
+              {plusEnCours ? 'Chargement…' : 'Charger plus'}</button>
+          {' '}{/if}
+        </p>
       {/if}
     </div>
 
     <aside class="panel" class:empty={!selected}>
       {#if !selected}
-        <p class="muted">Sélectionne une ligne pour l'annoter.</p>
+        <p class="muted">Choisissez une ligne pour l'annoter.</p>
       {:else}
         <h2>Annotation</h2>
         <div class="src">
@@ -293,7 +328,7 @@
             {#if selected.saisi_par}· {selected.saisi_par}{/if}
           </p>
           {#if selected.source_url}{' '}
-            <a class="src-link" href={lienSur(selected.source_url)} target="_blank" rel="noopener">↗ source</a>
+            <a class="src-link" href={lienSur(selected.source_url)} target="_blank" rel="noopener">↗ source d'origine</a>
           {' '}{/if}
           {#if selected.document_id}{' '}
             <a class="src-link" href={api.documentUrl(selected.document_id)}
@@ -302,7 +337,7 @@
         </div>
 
         <label class="field">
-          <span>Verdict{#if !tranche}{' '} <em class="hint">— Vous proposez ; un validateur tranche.</em>{/if}</span>
+          <span>Verdict{#if !tranche}{' '} <em class="hint">— Seul un validateur pose le verdict. Vous pouvez noter et proposer une correction.</em>{/if}</span>
           <div class="seg">
             {#each VERDICTS as v}
               <button class:on={draft.review_status === v.cle} title={v.effet}
@@ -316,10 +351,10 @@
         </label>
 
         <label class="field">
-          <span>Fiabilité</span>
+          <span>Fiabilité de la donnée</span>
           <select bind:value={draft.confidence} disabled={!tranche}>
             {#each CONFIDENCES as c}
-              <option value={c}>{c || '— (non renseigné)'}</option>
+              <option value={c}>{c ? FIABILITE[c] : '— non renseignée'}</option>
             {/each}
           </select>
         </label>
@@ -382,8 +417,12 @@
 
         <label class="field">
           <span>Note</span>
-          <textarea rows="4" bind:value={draft.note}
+          <textarea rows="4" bind:value={draft.note} disabled={noteFigee}
                     placeholder="Pourquoi cette correction ? La note s'affiche au survol du repère « rectifié » sur le site public."></textarea>
+          {#if noteFigee}{' '}
+            <em class="hint">Cette note est le motif de la décision de {selected.annotation.reviewed_by}.
+              Pour corriger une valeur, proposez-la ci-dessus : un validateur tranchera.</em>
+          {' '}{/if}
         </label>
 
         {#if conflit}
@@ -411,6 +450,8 @@
 </div>
 
 <style>
+  .pied-liste { margin: .75rem 0; }
+  .plus { background: none; border: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; padding: .4rem 0; }
   .donnees { padding: 1.25rem 1.5rem; height: 100%; overflow-y: auto; color: var(--texte); }
   .top h1 { font-size: 1.4rem; margin: 0; }
   .sub { color: var(--texte-doux); font-size: .85rem; max-width: 70ch; margin: .35rem 0 1rem; }
@@ -507,7 +548,11 @@
     color: var(--alerte-texte); font-size: .8rem; cursor: pointer;
   }
 
-  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    .donnees { padding: .8rem; height: auto; }
+    .tabs, .filters, .legend { flex-wrap: wrap; }
+  }
   .avis { background: var(--alerte-doux); border: 1px solid var(--alerte-bordure); border-radius: 6px; color: var(--alerte-texte); padding: .5rem .75rem; }
   .avis a { color: var(--alerte-texte); text-decoration: underline; }
 </style>

@@ -56,10 +56,11 @@ def client(tmp_path, monkeypatch, schema_sql):
     # `/api/` en amont (clé de service ou JWT), les routes exigent en plus une
     # session. Le test passe par la clé de service — la même porte que les
     # scripts — et surcharge la dépendance de session.
-    monkeypatch.setenv("ADMIN_KEY", "cle-de-test")
+    monkeypatch.setattr(api, "ADMIN_KEY", "cle-de-test")
     api.app.dependency_overrides[require_auth] = lambda: {
         "id": 1, "email": "julien@exemple.fr", "role": "admin"}
-    yield (TestClient(api.app, headers={"x-admin-key": "cle-de-test"}), chemin_db)
+    yield (TestClient(api.app, headers={"x-admin-key": "cle-de-test"},
+                        client=("127.0.0.1", 50000)), chemin_db)
     api.app.dependency_overrides.clear()
 
 

@@ -25,9 +25,11 @@ export function load() {
   const annee = lignes.reduce((max, l) => (l.year > max ? l.year : max), 0)
   const agregat = (nom) => lignes.find((l) => l.year === annee && l.agregat === nom)?.montant ?? null
 
-  // Bénéficiaires distincts de l'argent public (hors demandes non acquises).
+  // Bénéficiaires distincts de l'argent public (hors demandes non acquises et
+  // flux annulés). L'état se lit dans `etat`, posé par le snapshot : `statut`
+  // vaut « realise » sur presque tous les flux et laissait tout passer.
   const rows = Array.isArray(flows) ? flows : flows.flows || []
-  const verses = rows.filter((f) => f.statut !== 'demande')
+  const verses = rows.filter((f) => f.etat !== 'demande' && f.etat !== 'annule')
   const beneficiaires = new Set(verses.map((f) => f.to_id).filter(Boolean)).size
   const totalVerse = verses.reduce((s, f) => s + (f.amount || 0), 0)
 

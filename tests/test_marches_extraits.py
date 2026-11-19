@@ -177,6 +177,14 @@ class TestDepot:
         charge = json.loads(base.execute("SELECT charge FROM propositions").fetchone()[0])
         assert charge["montant_dans_citation"] is False
 
+    def test_le_titulaire_hors_citation_est_signale_pas_refuse(self, base, depot):
+        """Audit du 06/11/2026 : un titulaire inventé passait pour attesté."""
+        eid = _acte(base)
+        depot([_ligne(eid), _ligne(eid, titulaire="Bâtiments Ruinés SARL", montant=18450.0)])
+        lus = {json.loads(c)["titulaire"]: json.loads(c)["titulaire_dans_citation"]
+               for (c,) in base.execute("SELECT charge FROM propositions")}
+        assert lus == {"Toits du Causse": True, "Bâtiments Ruinés SARL": False}
+
     @pytest.mark.parametrize("ecrit, lu", [
         ("13 766.98 € TTC", 13766.98),       # la graphie des PV de Lasalle
         ("91 469.50 € HT", 91469.5),

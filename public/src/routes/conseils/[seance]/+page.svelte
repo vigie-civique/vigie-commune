@@ -1,13 +1,11 @@
 <script>
   import { SITE_NOM } from '#lib/instance.js'
+  import { dateFr } from '#lib/dates.js'
   export let data
   $: s = data.seance
   $: actes = data.actes
   $: clair = s.en_clair
-  const fmt = (d) => {
-    try { return new Date(d + 'T00:00:00').toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) }
-    catch { return d }
-  }
+  const fmt = (d) => dateFr(d, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
   const PIECES = {
     proces_verbal: 'Procès-verbal', compte_rendu: 'Compte rendu',
     deliberations: 'Registre des délibérations', convocation: 'Convocation',
@@ -31,7 +29,7 @@
 </svelte:head>
 
 <article>
-  <p class="fil"><a href="/conseils">Les conseils en clair</a> › {s.date}</p>
+  <p class="fil"><a href="/conseils">Les conseils en clair</a> › {dateFr(s.date)}</p>
   <p class="nature" class:cc={s.code === 'cc'}>{s.assemblee}</p>
   <h1>{s.assemblee} du {fmt(s.date)}</h1>
 
@@ -40,10 +38,10 @@
        rubrique ne doit pas le promettre à leur place. -->
   {#if clair}
     <div class="clair">
-      <p class="etat"><b>Mise en clair</b>, relue par la vigie le {clair.relu_le}.</p>
+      <p class="etat"><b>Mise en clair</b>, relue par la vigie le {dateFr(clair.relu_le)}.</p>
       <p class="titre-clair">{clair.titre}</p>
       <p><a class="bouton" href="/data/{clair.fichier}">Lire les trois feuilles en clair</a>
-        <span class="aide">ce qui était annoncé, ce qui a été décidé, ce que les documents ont de faux ou d'incomplet : imprimables en A4</span></p>
+        <span class="aide">ce qui était annoncé, ce qui a été décidé, les écarts ou manques relevés dans les documents : imprimables en A4</span></p>
     </div>
   {:else}
     <p class="etat pas-encore">
@@ -85,7 +83,7 @@
   {#if actes.length}
     <ol class="actes">
       {#each actes as a}
-        <li><a href={a.lien}>{a.titre || '(sans titre)'}</a>{#if vote(a.vote)}{' '} <span class="vote"> : {vote(a.vote)}</span>{/if}</li>
+        <li><a href={a.lien}>{a.titre || '(sans titre)'}</a>{' '} <span class="vote"> : {vote(a.vote) || 'vote non relevé'}</span></li>
       {/each}
     </ol>
     <p class="aide">Chaque délibération mène à sa ligne dans le registre de son année, avec son texte quand il a été lu.</p>

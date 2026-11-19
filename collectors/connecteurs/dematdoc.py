@@ -71,9 +71,19 @@ LOT = 100
 # Types d'acte que le conseil délibère lui-même. Les décisions du Président ou
 # du bureau, prises par délégation, sont des actes publics eux aussi — mais ce
 # ne sont pas des délibérations, et les compter comme telles fausserait le seul
-# chiffre que le site met en avant. Elles sont dénombrées et annoncées, jamais
-# tues. Surchargeable par `pages.<portee>.portail_deliberations`.
-DELIBERATIONS_DEFAUT = r"délibération"
+# chiffre que le site met en avant. Elles ont leur propre catalogue
+# (`catalogue_decisions`) et leur propre type d'acte (`collectors/decisions.py`).
+# Surchargeable par `pages.<portee>.portail_deliberations`.
+# Ancré : « Décision du Président (délibération du 12/03) » n'est pas une
+# délibération, et entrerait sinon avec son texte lu et publié.
+DELIBERATIONS_DEFAUT = r"^\s*d[ée]lib[ée]ration"
+
+# Les décisions prises par délégation : « Décision du Président », « Décision du
+# bureau communautaire ». Le motif vise le mot « décision » et non « Président » :
+# les « Arrêtés du Président » nomment des agents (délégations de signature,
+# régisseurs) et ne sont pas des décisions par délégation (avis DPO du
+# 14/11/2026). Surchargeable par `pages.<portee>.portail_decisions`.
+DECISIONS_DEFAUT = r"^\s*d[ée]cision"
 
 
 class Portail:
@@ -159,6 +169,41 @@ def champs(document: dict) -> dict:
     return sorties
 
 
+def document_publie(document: dict, base: str, source: str,
+                    adresse_corbeille: str) -> DocumentPublie | None:
+    """Un document de l'API, rendu comme le catalogue le publie (acte compris).
+
+    Sorti de `catalogue_pv` pour servir aussi une réponse ARCHIVÉE de l'API
+    (`scripts/reprendre_actes_archives.py`) : un portail qui ne liste plus un
+    acte n'en a pas moins publié son numéro et son objet, et c'est cette
+    déclaration qu'on reprend, pas un titre deviné dans le PDF.
+    Un acte sans chemin de fichier n'est pas rendu (cf. `catalogue_pv`).
+    """
+    v = champs(document)
+    chemin = document.get("bifferPath") or document.get("path") or ""
+    # Un chemin qui ne part pas de la racine, ou qui part de `//`, changerait
+    # d'hôte une fois collé à `base` (`@autre.fr/…`, `.autre.fr/…`, `//autre.fr/…`)
+    # — relecture vigie-securite du 08/11/2026.
+    if not chemin.startswith("/") or chemin.startswith("//"):
+        return None
+    # `DATEACTE` est une date de télétransmission (cf. l'en-tête de ce
+    # fichier) : elle sert d'ordre et de repli, pas de vérité.
+    date = v.get("DATEACTE") or (document.get("createdAt") or "")[:10]
+    return DocumentPublie(
+        date=date,
+        url=f"{base}{chemin}",
+        libelle=v.get("OBJET") or document.get("name") or "",
+        source=source,
+        acte={
+            "numero": v.get("NUMEROACTE") or "",
+            "objet": v.get("OBJET") or "",
+            "type": v.get("TYPE_DACTE_ACTE") or "",
+            "date_teletransmission": date,
+            "portail": adresse_corbeille,
+        },
+    )
+
+
 class ConnecteurDematDOC(Connecteur):
     """Portail d'actes DematDOC — actes publiés un par un, avec leur numéro."""
 
@@ -191,6 +236,10 @@ class ConnecteurDematDOC(Connecteur):
                   f"  Compléter `pages.{portee}.portail` par /public/<id>.")
         return portail, doctypes, motif
 
+    def _motif_decisions(self, portee: Portee) -> re.Pattern:
+        return re.compile((self.pages.get(portee) or {}).get("portail_decisions")
+                          or DECISIONS_DEFAUT, re.I)
+
     # ── actes ────────────────────────────────────────────────────────────────
     def catalogue_pv(self, portee: Portee = "commune") -> list[DocumentPublie]:
         """Les délibérations publiées, de la plus récente à la plus ancienne.
@@ -203,41 +252,52 @@ class ConnecteurDematDOC(Connecteur):
         if not portail or not doctypes:
             return []
 
+        decisions = self._motif_decisions(portee)
         sorties: list[DocumentPublie] = []
         ecartes: dict[str, int] = {}
         for doctype in doctypes:
             adresse_corbeille = f"{portail.base}/public/{doctype}"
             for document in portail.documents(doctype):
-                v = champs(document)
-                type_acte = v.get("TYPE_DACTE_ACTE") or ""
-                if not motif.search(type_acte):
+                type_acte = champs(document).get("TYPE_DACTE_ACTE") or ""
+                # Exclusion mutuelle : ce que le motif des décisions reconnaît
+                # n'est jamais une délibération, quel que soit le réglage.
+                if not motif.search(type_acte) or decisions.search(type_acte):
                     ecartes[type_acte or "(sans type)"] = \
                         ecartes.get(type_acte or "(sans type)", 0) + 1
                     continue
-                chemin = document.get("bifferPath") or document.get("path") or ""
-                if not chemin:
-                    continue
-                # `DATEACTE` est une date de télétransmission (cf. l'en-tête de
-                # ce fichier) : elle sert d'ordre et de repli, pas de vérité.
-                date = v.get("DATEACTE") or (document.get("createdAt") or "")[:10]
-                sorties.append(DocumentPublie(
-                    date=date,
-                    url=f"{portail.base}{chemin}",
-                    libelle=v.get("OBJET") or document.get("name") or "",
-                    source=portail.source,
-                    acte={
-                        "numero": v.get("NUMEROACTE") or "",
-                        "objet": v.get("OBJET") or "",
-                        "type": type_acte,
-                        "date_teletransmission": date,
-                        "portail": adresse_corbeille,
-                    },
-                ))
+                doc = document_publie(document, portail.base, portail.source,
+                                      adresse_corbeille)
+                if doc:
+                    sorties.append(doc)
 
         if ecartes:
             detail = ", ".join(f"{n} {t.lower()}" for t, n in sorted(ecartes.items()))
             print(f"  [dematdoc] {sum(ecartes.values())} acte(s) hors conseil "
                   f"non catalogués : {detail}")
+        sorties.sort(key=lambda d: d.date, reverse=True)
+        return sorties
+
+    def catalogue_decisions(self, portee: Portee = "commune") -> list[DocumentPublie]:
+        """Les décisions prises par délégation, de la plus récente à la plus ancienne.
+
+        Seules les corbeilles déclarées sont lues : celle des actes de l'action
+        sociale (CIAS), qu'un portail publie à part, n'est jamais cataloguée
+        sans qu'un exploitant l'ait nommée, et ne doit pas l'être.
+        """
+        portail, doctypes, _ = self._reglage(portee)
+        if not portail or not doctypes:
+            return []
+        motif = self._motif_decisions(portee)
+        sorties: list[DocumentPublie] = []
+        for doctype in doctypes:
+            adresse_corbeille = f"{portail.base}/public/{doctype}"
+            for document in portail.documents(doctype):
+                if not motif.search(champs(document).get("TYPE_DACTE_ACTE") or ""):
+                    continue
+                doc = document_publie(document, portail.base, portail.source,
+                                      adresse_corbeille)
+                if doc:
+                    sorties.append(doc)
         sorties.sort(key=lambda d: d.date, reverse=True)
         return sorties
 

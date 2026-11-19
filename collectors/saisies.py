@@ -38,7 +38,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import verrou as verrou_fichier
-from .db import pivot_ids, transaction, upsert_entity, upsert_relation
+from .db import (assurer_rattachement, entite_connue, entite_par_siren, pivot_ids,
+                 refus_de_relation,
+                 transaction, upsert_entity, upsert_relation)
 from .origine import ATELIER
 
 RACINE = Path(__file__).resolve().parent.parent
@@ -141,6 +143,33 @@ CHAMPS_SAISIE = {
         "siren":    ("texte_court", "SIREN, s'il est connu"),
     },
 }
+
+
+#: Les natures de fiche qui portent un SIREN, et la table qui le garde.
+TABLE_DU_SIREN = {"business": "businesses", "association": "associations"}
+
+
+def siren_valide(valeur) -> str:
+    """Les neuf chiffres d'un SIREN (ou du SIRET dont il est le début), clé de
+    contrôle comprise, ou "" si `valeur` n'en est pas un.
+
+    Le SIREN d'une saisie était accepté puis jeté (audit du 15/11/2026) : le
+    garder impose de refuser ce qui n'en est pas un, sans quoi une faute de
+    frappe rattacherait la fiche à une autre personne morale. La clé de Luhn
+    se vérifie sur les neuf chiffres du SIREN, pas sur le SIRET : les
+    établissements de La Poste n'en suivent pas la règle, son SIREN si."""
+    texte = str(valeur or "").strip()
+    if not texte or not all(c.isdigit() or c in " .-" for c in texte):
+        return ""
+    chiffres = "".join(c for c in texte if c.isdigit())
+    if len(chiffres) not in (9, 14):
+        return ""
+    siren = chiffres[:9]
+    somme = 0
+    for i, c in enumerate(reversed(siren)):
+        n = int(c) * (2 if i % 2 else 1)
+        somme += n - 9 if n > 9 else n
+    return siren if somme % 10 == 0 else ""
 
 
 def chemin_des_saisies() -> Path:
@@ -306,6 +335,23 @@ def _entite_du_tiers(conn, tiers: dict, confiance: str) -> int:
     return eid
 
 
+def _type_du_lien(valeurs: dict) -> str:
+    return "subventionné" if valeurs["type"].startswith("subvention") else valeurs["type"]
+
+
+def refus_du_lien_de_flux(conn, s: dict):
+    """Le refus qui empêche le lien d'un flux saisi d'être écrit, ou None.
+
+    Le flux, lui, est écrit : seul le lien sur la fiche est retenu. L'atelier
+    doit le dire au lieu d'un « ok » sans réserve (second avis de
+    vigie-securite)."""
+    flux = conn.execute("SELECT from_id, to_id FROM financial_flows WHERE source=?",
+                        (_source_de(s),)).fetchone()
+    if not flux:
+        return None
+    return refus_de_relation(conn, flux[0], flux[1], _type_du_lien(s["valeurs"]))
+
+
 def _relier(conn, s: dict, from_id: int, to_id: int) -> None:
     """La relation qu'un flux saisi justifie, à la confiance de la saisie.
 
@@ -317,7 +363,7 @@ def _relier(conn, s: dict, from_id: int, to_id: int) -> None:
     est retirée, celle-ci revient.
     """
     v = s["valeurs"]
-    type_ = "subventionné" if v["type"].startswith("subvention") else v["type"]
+    type_ = _type_du_lien(v)
     confiance = s.get("confidence", "confirmed")
     source = _source_de(s)
     deja = [r[0] for r in conn.execute(
@@ -487,11 +533,49 @@ def _inserer_dotation(conn, s: dict, commune_id: int, doc_id: int | None) -> boo
     return True
 
 
+def fiche_de_la_saisie(conn, saisie_id: str) -> tuple[int, bool] | None:
+    """(id de la fiche, créée par la saisie ?) — ce que le rejeu a retenu."""
+    r = conn.execute("SELECT entity_id, cree FROM saisies_entites WHERE saisie_id=?",
+                     (saisie_id,)).fetchone()
+    return (r[0], bool(r[1])) if r else None
+
+
 def _inserer_entite(conn, s: dict, commune_id: int, doc_id: int | None) -> bool:
     v = s["valeurs"]
+    # Par l'identifiant d'abord : la fiche que cette saisie a créée ou rejointe
+    # au premier passage. Le rejeu passait par le nom, et une fiche renommée à
+    # l'atelier était recréée sous l'ancien (audit du 15/11/2026).
+    if fiche_de_la_saisie(conn, s["id"]) is not None:
+        return False
+    # Saisie d'avant le rattachement, ou base refaite : le nom, comme avant.
+    # Une fiche déjà connue n'est pas réécrite par une saisie : `upsert_entity`
+    # comblait ses champs vides (adresse, commune) sans proposition, et la
+    # faisait passer en origine `atelier` (audit du 15/11/2026). La saisie la
+    # retrouve, rien de plus — l'API, elle, propose ce qu'elle apporte
+    # (`api._completer_fiche_rejointe`). Même recherche que `upsert_entity`.
+    # Une saisie d'avant le 15/11/2026 a pu garder un SIREN faux : ignoré.
+    siren = siren_valide(v.get("siren")) if v["type"] in TABLE_DU_SIREN else ""
+    eid = entite_connue(conn, type=v["type"], name=v["name"], commune=v.get("commune"),
+                        siren=siren or None)
+    if eid is not None:
+        conn.execute("INSERT INTO saisies_entites(saisie_id, entity_id, cree)"
+                     " VALUES(?,?,0)", (s["id"], eid))
+        return False
     eid = upsert_entity(conn, type=v["type"], name=v["name"],
                         address=v.get("address"), commune=v.get("commune"),
                         confidence=s.get("confidence", "confirmed"))
+    conn.execute("INSERT INTO saisies_entites(saisie_id, entity_id, cree)"
+                 " VALUES(?,?,1)", (s["id"], eid))
+    if siren and s.get("siren_confirme_par"):
+        # Là où la collecte le range, et où `entite_par_siren` le cherche :
+        # la fiche saisie sera retrouvée par lui, quelle que soit la graphie.
+        # Seulement si un VALIDATEUR l'a saisi (avis de vigie-securite) : la
+        # collecte suivante (SIRENE, banatic, marchés) range les données du
+        # registre sur la fiche que désigne ce SIREN, sous le nom choisi par
+        # l'auteur de la saisie. Celui d'un contributeur reste dans la saisie,
+        # à confirmer (cf. `api._completer_fiche_rejointe`).
+        conn.execute(f"INSERT OR IGNORE INTO {TABLE_DU_SIREN[v['type']]}(entity_id, siren)"
+                     " VALUES(?,?)", (eid, siren))
     # Une fiche créée à la main est d'origine `atelier` — ce que le commentaire
     # d'ici refusait jusqu'au 21/09/2026 au motif que `confidence` et
     # `validation_status` la décrivaient déjà. Ils ne la décrivaient pas : le
@@ -500,7 +584,8 @@ def _inserer_entite(conn, s: dict, commune_id: int, doc_id: int | None) -> bool:
     # c'est proposer ; retenir revient à qui tranche (collectors/verdict.py).
     # Colonne absente sur une base pas encore passée par `init_db` : rien écrit
     # plutôt qu'une saisie qui échoue.
-    if any(r[1] == "origine" for r in conn.execute("PRAGMA table_info(entities)")):
+    if any(
+            r[1] == "origine" for r in conn.execute("PRAGMA table_info(entities)")):
         conn.execute("UPDATE entities SET origine=? WHERE id=?", (ATELIER, eid))
     return True
 
@@ -615,6 +700,7 @@ def import_saisies(chemin: Path | None = None) -> dict[str, int]:
         conn.close()
 
     with transaction() as conn:
+        assurer_rattachement(conn)
         commune_id = pivot_ids(conn).get("commune")
         if not commune_id:
             raise RuntimeError(

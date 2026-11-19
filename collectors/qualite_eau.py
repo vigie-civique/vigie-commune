@@ -30,6 +30,7 @@ import urllib.parse
 import urllib.request
 
 from .config import CENTROID, EAU_COURS_EAU, HEADERS, communes_du_step
+from . import mesure
 from .db import get_conn
 from .erreurs import ConfigurationManquante
 
@@ -111,8 +112,17 @@ def selection_stations(cours_eau: dict, centroid: tuple, communes: list[str]) ->
 
 
 def purger_hors_selection(conn, gardees: list[str]) -> int:
-    """Retire les stations (et leurs analyses) que la sélection ne retient plus."""
-    marques = ",".join("?" * len(gardees)) or "''"
+    """Retire les stations (et leurs analyses) que la sélection ne retient plus.
+
+    Une sélection VIDE ne purge rien. Hub'Eau qui répond `200` avec
+    `{"data": []}` (paramètre renommé, panne partielle) effaçait toutes les
+    stations et leurs analyses, et la passe de nuit publiait une page
+    Environnement vide (revue d'architecture du 07/11/2026, C6). Une commune
+    réellement sans station n'a rien collecté : rien à purger non plus.
+    """
+    if not gardees:
+        return 0
+    marques = ",".join("?" * len(gardees))
     sortantes = [r[0] for r in conn.execute(
         f"SELECT code_station FROM eau_stations WHERE code_station NOT IN ({marques})",
         gardees)]
@@ -127,8 +137,12 @@ def fetch_stations(conn) -> list[str]:
     params = selection_stations(EAU_COURS_EAU, CENTROID, communes_du_step("eau"))
     url = f"{API}/station_pc?{urllib.parse.urlencode({**params, 'size': 200, 'format': 'json'})}"
     data = _get_json(url)
+    stations = data.get("data", [])
+    # La liste du périmètre se relit en entière à chaque passe.
+    mesure.lu("hubeau-stations", len(stations),
+              mesure.forme_de(stations), complete=True)
     codes = []
-    for s in data.get("data", []):
+    for s in stations:
         # v2 de l'API : `nom_cours_eau`. L'ancien `libelle_cours_eau` n'existe
         # plus, et la colonne restait vide sans que rien ne le signale.
         conn.execute(
@@ -180,7 +194,10 @@ def _fetch_pages(conn, url: str) -> int:
     inserted = 0
     while url:
         data = _get_json(url)
-        for a in data.get("data", []):
+        # Lues depuis la dernière date connue : zéro un jour sur deux.
+        lues = data.get("data", [])
+        mesure.lu("hubeau-analyses", len(lues), mesure.forme_de(lues))
+        for a in lues:
             cur = conn.execute(
                 "INSERT OR IGNORE INTO eau_analyses"
                 " (code_analyse, code_station, date_prelevement, code_parametre,"
@@ -211,6 +228,9 @@ def run(since: str | None):
         print(f"[eau] {len(codes)} station(s) sur "
               f"{len(communes_du_step('eau'))} commune(s) en profondeur"
               " — aucun cours d'eau déclaré (collecte.cours_eau)")
+    if not codes:
+        print("[eau] ⚠ aucune station rendue : rien n'est purgé — "
+              "la source ou la sélection a-t-elle changé ?")
     purgees = purger_hors_selection(conn, codes)
     if purgees:
         print(f"[eau] {purgees} station(s) hors sélection purgée(s), analyses comprises")

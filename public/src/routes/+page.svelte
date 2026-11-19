@@ -1,23 +1,29 @@
 <script>
-  import { COMMUNE, COMMUNE_DE, EPCI, EPCI_COURT } from '#lib/instance.js'
-  import Icon from '#lib/components/Icon.svelte'
+  import { COMMUNE, COMMUNE_DE, EPCI } from '#lib/instance.js'
+  import { PORTAIL_URL } from '#lib/portail.js'
   import Mini from '#lib/components/Mini.svelte'
   import SourcesLimites from '#lib/components/SourcesLimites.svelte'
+  import { dateFr } from '#lib/dates.js'
 
   // Accueil refondu le 11/08/2026. C'était une carte plein écran : 1 135 points
   // en quatre couleurs, un encart flottant, et rien qui dise ce qu'est ce site
   // ni ce qu'on peut y chercher. La carte devient /carte ; l'accueil annonce,
   // oriente, puis montre ce qui vient de bouger.
+  //
+  // 09/11/2026 : mise en page de la maquette v2 (harmonisation des vigies avec
+  // le portail). Un seul composant carte (`.carte`, `.carte.forte`), un kicker
+  // mono au-dessus de chaque titre de section, quatre tuiles visibles et les
+  // autres repliées, la signature du portail une fois sous l'entrée.
   export let data
   $: ({ tableau, recents, agenda, arreteLe, interco, prochains,
        dernieres, dossiers, sujets, anneesSeances } = data)
 
   const GENRES = {
-    acte:      { label: 'Acte public',     classe: 'g-acte' },
-    'marché':  { label: 'Marché public',   classe: 'g-marche' },
-    argent:    { label: 'Argent public',   classe: 'g-argent' },
-    'légal':   { label: 'Annonce légale',  classe: 'g-legal' },
-    vie:       { label: 'Vie locale',      classe: 'g-vie' },
+    acte:      'Acte public',
+    'marché':  'Marché public',
+    argent:    'Argent public',
+    'légal':   'Annonce légale',
+    vie:       'Vie locale',
   }
 
   // Les titres BODACC finissent par la date de l'annonce, déjà affichée dans sa
@@ -44,15 +50,36 @@
   const compte = (n) =>
     n > 0 ? `${n} délibération${n > 1 ? 's' : ''}`
           : 'aucune délibération lue dans les pièces'
-  const jour = (d) => {
-    if (!d) return ''
-    const dt = new Date(d + 'T00:00:00')
-    return dt.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })
-  }
-  const dateLongue = (d) =>
-    d ? new Date(d + 'T00:00:00').toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' }) : ''
-  const dateDuJour = (d) =>
-    d ? new Date(d + 'T00:00:00').toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' }) : ''
+  // L'année ne s'écrit que si elle n'est pas l'année en cours : « 14 avr. »
+  // sans plus laissait croire à une séance du printemps dernier quand elle
+  // date de 2021. Un flux d'argent n'a que son millésime (`date_approx`) :
+  // il s'affiche par son année, jamais par un 31 décembre inventé.
+  const ANNEE = new Date().getFullYear().toString()
+  const jour = (d) => dateFr(d, d?.slice(0, 4) === ANNEE
+    ? { day: 'numeric', month: 'short' }
+    : { day: 'numeric', month: 'short', year: 'numeric' })
+  const quand = (i) => (i.date_approx && i.annee ? String(i.annee) : jour(i.date))
+  const dateLongue = (d) => dateFr(d)
+  // La plus récente des dernières séances : ce que l'on sait du dernier
+  // conseil quand aucun prochain n'est annoncé.
+  $: derniere = dernieres?.length
+    ? [...dernieres].sort((a, b) => b.date.localeCompare(a.date))[0] : null
+  const dateDuJour = (d) => dateFr(d, { weekday: 'long', day: 'numeric', month: 'long' })
+
+  // Le kicker des séances nomme les assemblées montrées, et elles seules.
+  $: assemblees = [...new Set((dernieres || []).map((s) => s.code))]
+    .map((c) => ({ cm: 'municipal', cc: 'communautaire' })[c]).filter(Boolean)
+  $: kickerSeances = assemblees.join(' · ').replace(/^./, (l) => l.toUpperCase())
+
+  // ── Les tuiles ──────────────────────────────────────────────────────────
+  // `repli` est posé par #lib/tableau.server.js : les quatre premières se
+  // voient, les autres se déplient.
+  $: tete = (tableau || []).filter((t) => !t.repli)
+  $: replis = (tableau || []).filter((t) => t.repli)
+
+  // Une valeur longue (« 2,75 à 4,63 € ») prend un corps réduit, sans se
+  // couper : à 390 px, elle tenait sur deux lignes.
+  const longue = (v) => String(v).length > 9
 </script>
 
 <svelte:head>
@@ -60,51 +87,75 @@
   <meta name="description" content="Qui décide, où va l'argent, qui agit : {COMMUNE} et son intercommunalité, la {EPCI}, à partir des seules données publiques." />
 </svelte:head>
 
-<!-- Accueil refondu le 04/10/2026 (refonte du contenu, architecture
-     B). Il s'ouvrait sur des compteurs et trois portes vers de la donnée
-     rangée ; les séances et les dossiers — ce qui donne accès à la décision et
-     à ses enjeux — n'y étaient que deux pastilles d'en-tête, cachées derrière
-     le menu sur mobile. Il part maintenant d'elles ; les données suivent.
-     Resserré le 06/10/2026 : la recherche face au titre, trois dossiers, les
-     données en tuiles, et le fil des décisions après les trois portes.
-     Refondu le 07/10/2026 : les tuiles deviennent un tableau de bord, douze
-     indicateurs avec leur série ; les trois portes tiennent sur une ligne, et
-     « Pour situer les chiffres » s'efface, le tableau menant déjà au
-     territoire et à l'environnement. -->
-<section class="entree">
-  <div>
-    <h1>Vigie {COMMUNE_DE}</h1>
-    <p>Les séances du conseil, les dossiers, les données publiques.</p>
+<!-- L'entrée : le titre sur deux lignes (la seconde dans la teinte de la
+     commune), le lien vers le portail juste dessous (05/11/2026 : les lecteurs
+     d'un article arrivent ici sans habiter la commune), deux phrases de
+     présentation, la recherche, puis les trois portes (conseil design du
+     09/11/2026 : sur un téléphone, menu replié, elles sont la seule entrée
+     visible vers le reste du site). Portes : titre seul (option 1, Julien). -->
+<section class="gouttiere entree">
+  <div class="titre-bloc">
+    <h1>Vigie Civique <span>{COMMUNE_DE}</span></h1>
+    <p class="autre">Une autre commune&nbsp;? <a href={PORTAIL_URL}>Le portail Vigie Civique&nbsp;<span aria-hidden="true">→</span></a></p>
   </div>
-  <form class="cherche" action="/recherche" method="get" role="search">
-    <input type="search" name="q" placeholder="Un sujet, un nom, un montant…"
-           aria-label="Rechercher un sujet, un nom, un montant" autocomplete="off" />
-    <button type="submit">Chercher</button>
-  </form>
+  <!-- Deux phrases (conseil design du 09/11/2026) : ce qu'on trouve ici,
+       d'où ça vient. Le reste se lit sur /methode et /couverture. -->
+  <p class="presentation">
+    Ce site rassemble ce qui est public sur {COMMUNE}&nbsp;: les séances du
+    conseil, les décisions et qui les prend, le budget, les marchés, les
+    subventions. Tout vient de documents officiels, et chaque page cite sa
+    source.
+  </p>
+  <div class="sous-entree">
+    <form class="cherche" action="/recherche" method="get" role="search" aria-label="Recherche dans le site">
+      <input class="champ" type="search" name="q" placeholder="Un sujet, un nom, un montant…"
+             aria-label="Rechercher un sujet, un nom, un montant" autocomplete="off" />
+      <button class="bouton" type="submit">Chercher</button>
+    </form>
+    <nav aria-label="Les trois questions du site">
+      <ul class="portes">
+        <li><a href="/qui-decide">Qui décide&nbsp;?</a></li>
+        <li><a href="/argent">Où va l'argent&nbsp;?</a></li>
+        <li><a href="/acteurs-publics">Qui agit&nbsp;?</a></li>
+      </ul>
+    </nav>
+  </div>
 </section>
 
+<!-- La signature du portail : filet de 5 px, point rouge au milieu. Une fois
+     par page, et c'est ici. -->
+<div class="gouttiere"><div class="signature" aria-hidden="true"></div></div>
+
 <!-- Au conseil : la dernière séance de CHAQUE assemblée, nommée. Les deux ne
-     se mêlent pas — ni les mêmes élus, ni le même bulletin de vote. -->
+     se mêlent pas — ni les mêmes élus, ni le même bulletin de vote. La séance
+     mise en clair est la carte forte (contour encre, ombre dure). -->
 {#if dernieres?.length || prochains?.length}
-  <section class="conseil">
-    <header>
-      <h2 data-sans-donnees>Les conseils en clair</h2>
+  <section class="gouttiere section" aria-labelledby="t-conseils">
+    {#if kickerSeances}<p class="kicker">{kickerSeances}</p>{/if}
+    <div class="tete-section">
+      <h2 id="t-conseils" data-sans-donnees>Les conseils en clair</h2>
       <!-- Le lien dit l'année tant que les séances publiées n'en couvrent
            qu'une : « toutes » promettrait un historique qui n'y est pas. -->
-      <a class="tout" href="/conseils">Toutes les séances{anneesSeances?.length === 1 ? ` ${anneesSeances[0]}` : ''} <Icon name="fleche" size={14} /></a>
-    </header>
+      <a class="tout" href="/conseils">Toutes les séances{anneesSeances?.length === 1 ? ` ${anneesSeances[0]}` : ''} <span aria-hidden="true">→</span></a>
+    </div>
+    <!-- « En clair » n'était défini que dans « Sources et limites ». Ce que
+         le mot recouvre (cf. scripts/snapshot/en_clair.py) : une feuille
+         rédigée d'après les documents publiés, aux chiffres contrôlés
+         automatiquement, publiée seulement si une personne l'a relue et
+         retenue à l'atelier. -->
+    <p class="chapo">Une séance <b>en clair</b>, c'est un résumé en langage courant, tiré des documents publiés et relu par une personne avant sa mise en ligne.</p>
     {#if dernieres?.length}
-      <div class="seances">
+      <div class="grille-2">
         {#each dernieres as s}
-          <a class="seance" href="/conseils/{s.id}">
-            <span class="nature" class:cc={s.code === 'cc'}>{s.assemblee}</span>
-            <strong>{dateLongue(s.date)}</strong>
+          <a class="carte" class:forte={s.en_clair} href="/conseils/{s.id}">
+            <span class="etiquette">{s.assemblee}</span>
+            <span class="date">{dateLongue(s.date)}</span>
             {#if s.en_clair}{' '}
-              <span class="titre-clair">{s.en_clair.titre}</span>
-              <span class="etat">Mise en clair, relue le {dateLongue(s.en_clair.relu_le)}</span>
+              <span class="titre-carte">{s.en_clair.titre}</span>
+              <span class="tampon">Résumé en clair, relu le {dateLongue(s.en_clair.relu_le)}</span>
             {' '}{:else}{' '}
-              <span>{compte(s.nb_actes)}</span>
-              <span class="etat">Pas encore mise en clair</span>
+              <span class="titre-carte">{compte(s.nb_actes)}</span>
+              <span class="tampon a-venir">Résumé à venir</span>
             {' '}{/if}
           </a>
         {/each}
@@ -113,53 +164,60 @@
     {#if prochains?.length}
     <!-- Le prochain conseil, tel que sa convocation l'annonce : avant la séance,
          c'est la seule chose qu'un habitant peut en savoir. -->
-    <div class="prochain">
+    <div class="prochains">
       {#each prochains as s}
-        <article>
-          <p class="quand">
-            <span class="etiquette">Prochain conseil</span>
-            <strong>{assemblee(s.titre)}</strong>, {dateDuJour(s.date)}{#if s.convocation?.heure}, {s.convocation.heure}{/if}{#if s.convocation?.lieu}, {s.convocation.lieu}{/if}
-          </p>
+        <article class="carte">
+          <span class="etiquette">Prochain conseil</span>
+          <p class="quand"><strong>{assemblee(s.titre)}</strong>, {dateDuJour(s.date)}{#if s.convocation?.heure}, {s.convocation.heure}{/if}{#if s.convocation?.lieu}, {s.convocation.lieu}{/if}</p>
           {#if s.convocation?.ordre_du_jour?.length}
             <details>
               <summary>L'ordre du jour : {s.convocation.ordre_du_jour.length} point{s.convocation.ordre_du_jour.length > 1 ? 's' : ''}</summary>
               <ol>{#each s.convocation.ordre_du_jour as point}<li>{point}</li>{/each}</ol>
-              <p class="source">Lu dans la convocation{#if s.convocation.convoque_le}{' '}du {dateLongue(s.convocation.convoque_le)}{/if}{#if s.convocation.url}{' '}(<a href={s.convocation.url} target="_blank" rel="noopener">la lire<span class="visually-hidden"> (nouvelle fenêtre)</span></a>){/if}.
+              <p class="source">Lu dans la convocation{#if s.convocation.convoque_le}{' '}du {dateLongue(s.convocation.convoque_le)}{/if}{#if s.convocation.url}{' '}(<a href={s.convocation.url} target="_blank" rel="noopener">la lire<span class="visually-hidden">{' (nouvelle fenêtre)'}</span></a>){/if}.
                 Séance publique : chacun peut y assister.</p>
             </details>
           {:else if s.convocation?.url}
-            <p class="source"><a href={s.convocation.url} target="_blank" rel="noopener">La convocation<span class="visually-hidden"> (nouvelle fenêtre)</span></a></p>
+            <p class="source"><a href={s.convocation.url} target="_blank" rel="noopener">La convocation<span class="visually-hidden">{' (nouvelle fenêtre)'}</span></a></p>
           {/if}
         </article>
       {/each}
     </div>
-  {/if}
+    {:else if derniere}
+    <!-- Aucune séance à venir dans les sources : on le dit, sans inventer de
+         date, et l'on redonne la seule date publiée, celle de la dernière.
+         « Relevée » et non « publiée » : `prochains` lit les séances datées
+         après l'arrêt des données, pas les convocations, et deux des
+         instances n'en ont jamais relevé (vérificateur, 09/11/2026). -->
+    <p class="prochain-aucun">Aucune séance à venir relevée pour l'instant. Dernière séance&nbsp;: {derniere.assemblee.toLowerCase()} du {dateLongue(derniere.date)}.</p>
+    {/if}
   </section>
 {/if}
 
 {#if !dossiers?.length && sujets?.length}
-  <section class="dossiers">
-    <header>
-      <h2 data-sans-donnees>Ce que les données disent de…</h2>
-      <a class="tout" href="/dossiers">Dossiers thématiques <Icon name="fleche" size={14} /></a>
-    </header>
-    <p class="chapeau-dossiers">Aucun dossier n'est encore écrit ici. Sur ces sujets, les sources publiques ont déjà des faits&nbsp;:</p>
-    <ul>
-      {#each sujets as s}<li><a href={s.lien}>{s.titre}</a></li>{/each}
+  <section class="gouttiere section" aria-labelledby="t-sujets">
+    <p class="kicker">Pas encore de dossier</p>
+    <div class="tete-section">
+      <h2 id="t-sujets" data-sans-donnees>Ce que les données disent de…</h2>
+      <a class="tout" href="/dossiers">Dossiers thématiques <span aria-hidden="true">→</span></a>
+    </div>
+    <p class="chapo">Aucun dossier n'est encore écrit ici. Sur ces sujets, les sources publiques ont déjà des faits&nbsp;:</p>
+    <ul class="grille-3">
+      {#each sujets as s}<li class="carte dossier"><h3><a href={s.lien}>{s.titre}</a></h3></li>{/each}
     </ul>
   </section>
 {/if}
 
 <!-- Trois dossiers, tirés au sort à chaque publication (+page.server.js). -->
 {#if dossiers?.length}
-  <section class="dossiers">
-    <header>
-      <h2 data-sans-donnees>Dossiers thématiques</h2>
-      <a class="tout" href="/dossiers">Tous les dossiers <Icon name="fleche" size={14} /></a>
-    </header>
-    <ul>
+  <section class="gouttiere section" aria-labelledby="t-dossiers">
+    <p class="kicker">Trois dossiers à lire</p>
+    <div class="tete-section">
+      <h2 id="t-dossiers" data-sans-donnees>Dossiers thématiques</h2>
+      <a class="tout" href="/dossiers">Tous les dossiers <span aria-hidden="true">→</span></a>
+    </div>
+    <ul class="grille-3">
       {#each dossiers as d}
-        <li><a href="/dossiers/{d.slug}">{d.titre}</a>{#if d.chapeau}<p>{d.chapeau}</p>{/if}</li>
+        <li class="carte dossier"><h3><a href="/dossiers/{d.slug}">{d.titre}</a></h3>{#if d.chapeau}<p>{d.chapeau}</p>{/if}</li>
       {/each}
     </ul>
   </section>
@@ -168,18 +226,22 @@
 <!-- Le tableau de bord : une tuile par indicateur, entière cliquable vers la
      page qui le détaille. Chaque tuile porte le chiffre de la COMMUNE ; celui
      de l'intercommunalité suit, nommé, jamais additionné. Un zéro garde sa
-     raison. Les séries et leurs règles : #lib/tableau.server.js. -->
+     raison. Les séries et leurs règles : #lib/tableau.server.js. Les quatre
+     premières se voient ; les autres, et les sources, se déplient. -->
 {#if tableau?.length}
-  <section class="tableau">
-    <header>
-      <h2>{COMMUNE} en chiffres</h2>
-      <a class="tout" href="/carte">La carte <Icon name="fleche" size={14} /></a>
-    </header>
+  <section class="gouttiere section" aria-labelledby="t-chiffres">
+    <p class="kicker">Chiffres de la commune · sources dépliables en bas</p>
+    <div class="tete-section">
+      <h2 id="t-chiffres">{COMMUNE} en chiffres</h2>
+      <a class="tout" href="/carte">La carte <span aria-hidden="true">→</span></a>
+    </div>
     <div class="tuiles">
-      {#each tableau as t (t.cle)}
-        <a class="tuile" class:vide={t.vide} href={t.href}>
+      {#each tete as t (t.cle)}
+        <a class="carte tuile" class:vide={t.vide} href={t.href}>
           <span class="quoi">{t.libelle}</span>
-          <b>{t.valeur}</b>
+          <b class:longue={longue(t.valeur)}>{t.valeur}</b>
+          <!-- La place du graphique est réservée même sans série : les
+               valeurs restent alignées d'une tuile à l'autre. -->
           <span class="graphe">{#if t.graphe}<Mini graphe={t.graphe} />{/if}</span>
           {#if t.raison}<span class="aussi raison">{t.raison}</span>{/if}
           {#if t.note}<span class="aussi">{t.note}</span>{/if}
@@ -187,34 +249,56 @@
         </a>
       {/each}
     </div>
+    {#if replis.length}
+      <details class="pli">
+        <summary>Tous les indicateurs</summary>
+        <div class="tuiles">
+          {#each replis as t (t.cle)}
+            <a class="carte tuile" class:vide={t.vide} href={t.href}>
+              <span class="quoi">{t.libelle}</span>
+              <b class:longue={longue(t.valeur)}>{t.valeur}</b>
+              <span class="graphe">{#if t.graphe}<Mini graphe={t.graphe} />{/if}</span>
+              {#if t.raison}<span class="aussi raison">{t.raison}</span>{/if}
+              {#if t.note}<span class="aussi">{t.note}</span>{/if}
+              {#if t.aussi}<span class="aussi">{t.aussi}</span>{/if}
+            </a>
+          {/each}
+        </div>
+      </details>
+    {/if}
+    <!-- Les sources des tuiles, repliées : le composant commun, mis au pli
+         de la maquette par les règles `.sources` plus bas. -->
+    <div class="sources"><SourcesLimites blocs={tableau.map((t) => `accueil.${t.cle}`)} /></div>
     <p class="provenance">
       Chiffres de la commune.
-      <a href="/com-com">Ceux de la {EPCI_COURT}</a> · <a href="/methode">Méthode</a>
+      <a href="/com-com">Ceux de l'intercommunalité</a> · <a href="/methode">Méthode</a>
     </p>
-    <SourcesLimites blocs={tableau.map((t) => `accueil.${t.cle}`)} />
   </section>
 {/if}
 
-<nav class="portes" aria-label="Les trois questions du site">
-  <a href="/qui-decide"><Icon name="decide" size={17} />Qui décide&nbsp;?</a>
-  <a href="/argent"><Icon name="argent" size={17} />Où va l'argent&nbsp;?</a>
-  <a href="/acteurs-publics"><Icon name="acteurs" size={17} />Qui agit&nbsp;?</a>
-</nav>
-
-{#if recents.length}
-  <section class="flux">
-    <header>
-      <h2 data-sans-donnees>Ce que la commune vient de décider</h2>
-      {#if arreteLe}<span class="arrete">données arrêtées au {dateLongue(arreteLe)}</span>{/if}
-      <a class="tout" href="/nouveautes">Tout le flux <Icon name="fleche" size={14} /></a>
-    </header>
-    <ul>
+<!-- « Ce que la commune vient de décider » coiffait aussi des séances, des
+     scrutins, des permis et des marchés : le genre « acte » les mêle tous
+     (vérificateur, 09/11/2026). Le titre ne promet que ce que la liste est :
+     des entrées des registres publics, les plus récentes. Pas de titre
+     au-dessus d'une liste vide ; le lien vers le flux entier, lui, reste.
+     La date d'arrêt des données passe dans le kicker. -->
+{#if recents.length || interco?.recents}
+  <section class="gouttiere section" aria-labelledby={recents.length ? 't-fil' : undefined}>
+    {#if recents.length}
+      <p class="kicker">{#if arreteLe}Données arrêtées au {dateLongue(arreteLe)}{:else}Registres publics{/if}</p>
+    {/if}
+    <div class="tete-section">
+      {#if recents.length}<h2 id="t-fil" data-sans-donnees>Dernières entrées publiques</h2>{/if}
+      <a class="tout" href="/nouveautes">Tout le flux <span aria-hidden="true">→</span></a>
+    </div>
+    {#if recents.length}
+    <ul class="fil">
       {#each recents as item}
         <li>
-          <time datetime={item.date}>{jour(item.date)}</time>
+          <time datetime={item.date}>{quand(item)}</time>
           <!-- `id` désigne l'événement, pas un acteur : pas de lien vers une
                fiche. La seule cible utile est la source d'origine. -->
-          <span class="titre">
+          <span class="quoi">
             {#if item.nb_actes != null}
               <!-- Une séance renvoie vers sa page (cf. +page.server.js) ; ses
                    PIÈCES renvoient vers l'archive d'origine. -->
@@ -222,23 +306,29 @@
               <span class="compte">: {compte(item.nb_actes)}</span>
               {#if item.pieces?.length}{' '}
                 <span class="pieces">
-                  {#each item.pieces as p, i}{#if i}<span class="sep"> · </span>{/if}<a
-                    href={p.url} target="_blank" rel="noopener">{PIECES[p.nature] || 'pièce'}<span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/each}
+                  {#each item.pieces as p, i}{#if i}<span class="sep">{' · '}</span>{/if}<a
+                    href={p.url} target="_blank" rel="noopener">{PIECES[p.nature] || 'pièce'}<span class="visually-hidden">{' (nouvelle fenêtre)'}</span></a>{/each}
                 </span>
               {' '}{/if}
             {:else if item.url}{' '}
-              <a href={item.url} target="_blank" rel="noopener">{titre(item.titre)}<span class="visually-hidden"> (nouvelle fenêtre)</span></a>
+              <a href={item.url} target="_blank" rel="noopener">{titre(item.titre)}<span class="visually-hidden">{' (nouvelle fenêtre)'}</span></a>
             {' '}{:else}{titre(item.titre)}{/if}
           </span>
-          <span class="genre {GENRES[item.genre]?.classe || ''}">{GENRES[item.genre]?.label || item.genre}</span>
+          <span class="genre">{GENRES[item.genre] || item.genre}</span>
         </li>
       {/each}
     </ul>
+    {/if}
     {#if interco?.recents}
+      <!-- Le sigle de l'intercommunalité ne s'écrit pas seul : il ne dit rien
+           à qui n'habite pas le canton. Son nom entier, une fois.
+           La phrase dit ce que le site PUBLIE, pas ce que l'intercommunalité a
+           voté ni depuis quand : la collecte n'est pas réputée complète, et
+           `nb_actes` compte quelques occurrences non dédoublonnées
+           (vérificateur, 09/11/2026). -->
       <p class="ailleurs">
-        Sur la même période, la {EPCI_COURT} a pris
-        {interco.recents.toLocaleString('fr-FR')} décisions qui engagent aussi
-        la commune. <a href="/deliberations">Les voir avec les autres actes</a>
+        {#if interco.recents > 1}{interco.recents.toLocaleString('fr-FR')} délibérations de l'intercommunalité{#if EPCI}{' '}({EPCI}){/if} sont publiées ici{#if interco.depuis}, la plus ancienne du {dateLongue(interco.depuis)}{/if}.{:else}Une délibération de l'intercommunalité{#if EPCI}{' '}({EPCI}){/if} est publiée ici{#if interco.depuis}, datée du {dateLongue(interco.depuis)}{/if}.{/if}
+        <a href="/deliberations">Les voir avec les autres actes</a>
       </p>
     {/if}
   </section>
@@ -247,18 +337,19 @@
 <!-- L'agenda garde sa place, mais après la décision publique et sous son propre
      nom. Mélangé au reste et trié par date, il occupait tout le fil. -->
 {#if agenda?.length}
-  <section class="flux agenda">
-    <header>
-      <h2 data-sans-donnees>Et dans la vie de la commune</h2>
-      <a class="tout" href="/vie-locale">L'agenda <Icon name="fleche" size={14} /></a>
-    </header>
-    <ul>
+  <section class="gouttiere section agenda" aria-labelledby="t-agenda">
+    <p class="kicker">Vie locale · site de la mairie</p>
+    <div class="tete-section">
+      <h2 id="t-agenda" data-sans-donnees>Et dans la vie de la commune</h2>
+      <a class="tout" href="/vie-locale">Vie locale <span aria-hidden="true">→</span></a>
+    </div>
+    <ul class="fil">
       {#each agenda as item}
         <li>
-          <time datetime={item.date}>{jour(item.date)}</time>
-          <span class="titre">
+          <time datetime={item.date}>{quand(item)}</time>
+          <span class="quoi">
             {#if item.url}{' '}
-              <a href={item.url} target="_blank" rel="noopener">{titre(item.titre)}<span class="visually-hidden"> (nouvelle fenêtre)</span></a>
+              <a href={item.url} target="_blank" rel="noopener">{titre(item.titre)}<span class="visually-hidden">{' (nouvelle fenêtre)'}</span></a>
             {' '}{:else}{titre(item.titre)}{/if}
           </span>
         </li>
@@ -268,157 +359,222 @@
 {/if}
 
 <style>
-  .ailleurs {
-    margin: .7rem 0 0; font-size: .85rem; color: var(--gris);
-    border-top: 1px dashed var(--trait); padding-top: .6rem;
+  /* Maquette v2 du 09/11/2026 (vigie-maquettes/2026-11-09-harmonisation-
+     instances). Les jetons (--papier, --carte, --encre, --gris, --filet,
+     --teinte, --e1 à --e8, --r-carte…) sont ceux du layout. */
+
+  /* La gouttière du layout est locale à son composant : la même, ici. */
+  .gouttiere {
+    max-width: var(--large); margin: 0 auto;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  @media (min-width: 700px) {
+    .gouttiere {
+      padding-left: max(32px, env(safe-area-inset-left, 0px));
+      padding-right: max(32px, env(safe-area-inset-right, 0px));
+    }
   }
 
-  /* L'agenda est volontairement plus discret que le fil des décisions : même
-     structure, moins de poids. */
-  .flux.agenda { margin-top: 1.25rem; }
+  /* ── Entrée ── */
+  .entree { padding-top: var(--e6); padding-bottom: var(--e4); }
+  .entree h1 { margin: 0; font-size: clamp(44px, 11.5vw, 84px); line-height: .98; letter-spacing: -.035em; }
+  /* Rôle 1 de la teinte : la 2e ligne du titre. */
+  .entree h1 span { display: block; color: var(--teinte); }
+  .autre { margin: var(--e4) 0 0; font-size: 16px; font-weight: 600; }
+  .autre a { display: inline-block; padding-block: 10px; color: var(--encre); }
+  .presentation { max-width: 40rem; margin: var(--e3) 0 0; font-size: 18px; line-height: 1.5; }
+  .cherche { display: flex; gap: var(--e2); max-width: 34rem; margin-top: var(--e5); }
+  .champ {
+    flex: 1; min-width: 0; min-height: 52px; padding: 0 14px;
+    color: var(--encre); background: var(--carte); border: var(--t-contour) solid var(--encre);
+    border-radius: var(--r-carte); font: inherit; font-size: 16px;
+  }
+  .champ::placeholder { color: var(--gris); opacity: 1; }
+  .bouton {
+    display: inline-flex; align-items: center; justify-content: center; min-height: 52px; padding: 0 20px;
+    color: var(--papier); background: var(--encre); border: var(--t-contour) solid var(--encre);
+    border-radius: var(--r-carte); font: 600 16px var(--sans); cursor: pointer;
+  }
+  .bouton:hover { opacity: .9; }
+  @media (min-width: 1000px) {
+    .entree { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 30rem); column-gap: var(--e8); align-items: end; }
+    .entree .titre-bloc { grid-row: 1 / span 2; }
+    .presentation { margin: 0; }
+    .sous-entree { display: contents; }
+    .entree nav { grid-column: 1 / -1; }
+    .entree .portes { margin-top: var(--e6); }
+  }
 
-  /* Le prochain conseil : un bandeau, pas une carte de plus. Il se lit en une
-     ligne ; l'ordre du jour se déplie pour qui veut savoir de quoi on parlera. */
-  .prochain { display: flex; flex-direction: column; gap: .6rem; margin-bottom: 1.6rem; }
-  .prochain article {
-    border: 1px solid var(--trait); border-left: 4px solid var(--ardoise);
-    border-radius: var(--rayon); background: var(--blanc); padding: .8rem 1rem;
+  /* ── Les trois portes, sous la recherche : titre seul ── */
+  .portes { display: grid; grid-template-columns: 1fr; gap: var(--e2); margin: var(--e2) 0 0; padding: 0; list-style: none; }
+  .portes a {
+    display: flex; align-items: center; justify-content: space-between; gap: var(--e3);
+    min-height: 48px; padding: 6px var(--e4);
+    color: var(--encre); background: var(--carte); border: var(--t-contour) solid var(--encre);
+    border-radius: var(--r-carte); font: 600 20px/1.15 var(--titre); letter-spacing: -.01em; text-decoration: none;
   }
-  .prochain .quand { margin: 0; font-size: .98rem; line-height: 1.5; }
-  .prochain .etiquette {
-    display: inline-block; margin-right: .5rem; font-size: .68rem; font-weight: 700;
-    letter-spacing: .06em; text-transform: uppercase; color: var(--ardoise-fonce);
-    background: var(--ardoise-pale); border-radius: .5rem; padding: .1rem .5rem;
+  .portes a::after { content: "→" / ""; font: 400 20px var(--sans); }
+  .portes a:hover { color: var(--papier); background: var(--encre); text-decoration: none; }
+  @media (min-width: 700px) {
+    .portes { grid-template-columns: repeat(3, 1fr); gap: var(--e3); }
+    .portes a { min-height: 72px; padding: var(--e3) var(--e5); font-size: 24px; }
   }
-  .prochain details { margin-top: .5rem; }
-  .prochain summary { cursor: pointer; color: var(--ardoise); font-size: .9rem; }
-  .prochain ol { margin: .5rem 0 .4rem; padding-left: 1.4rem; font-size: .9rem; line-height: 1.5; }
-  .prochain li { margin-bottom: .2rem; }
-  .prochain .source { margin: .3rem 0 0; font-size: .8rem; color: var(--gris); }
-  .prochain .source a { color: var(--ardoise); }
-  .flux.agenda h2 { font-size: 1rem; color: var(--gris); }
 
-  section, nav.portes { max-width: 1080px; margin: 0 auto; padding: 0 1.4rem; }
+  /* La signature du portail : filet de 5 px, point rouge au milieu. */
+  .signature { position: relative; height: var(--t-signature); margin: var(--e6) 0 0; background: var(--encre); }
+  .signature::before {
+    content: ""; position: absolute; top: -5px; left: calc(50% - 7px); width: 14px; height: 14px;
+    border-radius: 50%; background: var(--rouge); box-shadow: 0 0 0 3px var(--papier);
+  }
 
-  /* ---------- entrée, conseil, dossiers (04/10/2026) ---------- */
-  /* Le titre à gauche, la recherche en face, calée à droite ; elle passe
-     dessous quand la largeur manque. */
-  .entree {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 1rem 2rem; flex-wrap: wrap; padding-top: 2.4rem; padding-bottom: 1.6rem;
+  /* ── Sections : kicker, titre, lien « tout » ── */
+  .section { padding-top: var(--e7); }
+  .kicker {
+    display: flex; align-items: center; gap: var(--e2); margin: 0 0 var(--e2);
+    color: var(--gris); font: 500 13px/1.3 var(--mono); letter-spacing: .06em; text-transform: uppercase;
   }
-  .entree h1 { font-size: clamp(2rem, 4.5vw, 2.9rem); line-height: 1.08; margin: 0 0 .4rem; }
-  .entree p { margin: 0; color: var(--gris); font-size: 1.02rem; }
-  .cherche { display: flex; gap: .5rem; flex: 0 1 26rem; margin-left: auto; }
-  .cherche input {
-    flex: 1; min-width: 0; padding: .6rem .85rem; font-size: 1rem; color: var(--encre);
-    border: 1px solid var(--trait); border-radius: var(--rayon); background: var(--blanc);
+  /* Rôle 3 de la teinte : le filet du kicker. */
+  .kicker::before { content: ""; flex: none; width: 24px; height: var(--t-traverse); background: var(--teinte); }
+  .tete-section {
+    display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
+    gap: var(--e2) var(--e4); margin-bottom: var(--e4);
   }
-  .cherche input:focus { outline: 2px solid var(--ardoise); outline-offset: 1px; }
-  .cherche button {
-    padding: .6rem 1rem; font-size: .95rem; border: none; border-radius: var(--rayon);
-    background: var(--ardoise); color: var(--blanc); cursor: pointer;
+  .tete-section h2 { margin: 0; font-size: clamp(30px, 7vw, 40px); line-height: 1.08; letter-spacing: -.025em; }
+  .agenda .tete-section h2 { font-size: clamp(24px, 5.5vw, 30px); }
+  .tout {
+    display: inline-flex; align-items: center; gap: 6px; min-height: 44px; margin-left: auto;
+    color: var(--encre); font-weight: 600; font-size: 15px;
+    text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px;
   }
-  .conseil, .dossiers { padding-bottom: 2.2rem; }
-  .conseil header, .dossiers header, .tableau header { display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap; margin-bottom: .7rem; }
-  .conseil h2, .dossiers h2, .tableau h2 { font-size: 1.35rem; margin: 0; }
-  .seances { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: .8rem; margin-bottom: 1rem; }
-  .seance {
-    display: flex; flex-direction: column; gap: .25rem; padding: .85rem 1rem; color: inherit;
-    background: var(--blanc); border: 1px solid var(--trait); border-left: 4px solid var(--ardoise);
-    border-radius: var(--rayon);
-  }
-  .seance:hover { text-decoration: none; box-shadow: var(--ombre); }
-  .seance .nature {
-    align-self: flex-start; font-size: .66rem; font-weight: 700; text-transform: uppercase;
-    color: var(--ardoise-fonce); background: var(--ardoise-pale); border-radius: .5rem; padding: .1rem .45rem;
-  }
-  .seance .nature.cc { background: var(--trait-pale); color: var(--encre); }
-  .seance .titre-clair { font-family: var(--display); font-size: 1.05rem; color: var(--encre); }
-  .seance .etat { font-size: .8rem; color: var(--gris); }
-  .chapeau-dossiers { margin: 0 0 .8rem; color: var(--gris); font-size: .92rem; max-width: 62ch; }
-  .dossiers ul { list-style: none; padding: 0; margin: 0; display: grid;
-                 grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr)); gap: .7rem; }
-  .dossiers li { padding: .75rem .9rem; background: var(--blanc); border: 1px solid var(--trait);
-                 border-radius: var(--rayon); }
-  .dossiers li a { font-family: var(--display); font-size: 1.05rem; font-weight: 600; }
-  .dossiers li p { margin: .3rem 0 0; font-size: .84rem; color: var(--gris); line-height: 1.45; }
+  .tout:hover { text-decoration-thickness: 2px; }
+  .chapo { max-width: 40rem; margin: calc(-1 * var(--e2)) 0 var(--e4); color: var(--gris); font-size: 16px; line-height: 1.5; }
+  .chapo b { color: var(--encre); }
 
-  /* ---------- le tableau de bord ---------- */
-  /* Quatre tuiles de front sur un écran large, deux sur un téléphone. Toutes
-     ont la même ossature, dans le même ordre : libellé, valeur, graphique,
-     provenance — le regard compare sans relire. */
-  .tableau { padding-bottom: 1.2rem; }
-  .tuiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: .6rem; }
-  .tuile {
-    display: flex; flex-direction: column; gap: .18rem; min-width: 0; padding: .7rem .8rem .65rem;
-    color: inherit; background: var(--blanc); border: 1px solid var(--trait); border-radius: var(--rayon);
+  /* ── LE composant carte, réglé par ses jetons ── */
+  .carte {
+    --c-fond: var(--carte); --c-bord: var(--filet); --c-ombre: none;
+    display: flex; flex-direction: column; gap: var(--e2); min-width: 0; margin: 0;
+    padding: var(--e4) var(--e5) var(--e5);
+    color: var(--encre); background: var(--c-fond); border: var(--t-contour) solid var(--c-bord);
+    border-radius: var(--r-carte); box-shadow: var(--c-ombre); text-decoration: none;
   }
-  .tuile:hover { text-decoration: none; border-color: var(--ardoise); box-shadow: var(--ombre); }
+  a.carte:hover { --c-bord: var(--encre); text-decoration: none; }
+  .carte.forte { --c-bord: var(--encre); --c-ombre: var(--ombre-forte); }
+  .etiquette {
+    align-self: flex-start; padding: 2px 8px; color: var(--encre); border: 1px solid var(--encre);
+    border-radius: var(--r-petit); font: 500 13px/1.4 var(--mono); letter-spacing: .05em; text-transform: uppercase;
+  }
+  .carte .date { font: 600 17px/1.3 var(--sans); }
+  .titre-carte { font: 600 22px/1.2 var(--titre); letter-spacing: -.01em; }
+  .tampon { margin: 0; color: var(--gris); font: 400 14px/1.45 var(--mono); }
+  .tampon::before {
+    content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 7px;
+    border-radius: 1px; background: var(--encre); vertical-align: 1px;
+  }
+  .tampon.a-venir::before { background: transparent; box-shadow: inset 0 0 0 1.5px var(--gris); }
+
+  .grille-2 { display: grid; grid-template-columns: 1fr; gap: var(--e4); }
+  .grille-3 { display: grid; grid-template-columns: 1fr; gap: var(--e4); margin: 0; padding: 0; list-style: none; }
+  @media (min-width: 700px) { .grille-2 { grid-template-columns: 1fr 1fr; gap: var(--e5); } }
+  @media (min-width: 900px) { .grille-3 { grid-template-columns: repeat(3, 1fr); gap: var(--e5); } }
+
+  .dossier h3 { margin: 0; }
+  .dossier h3 a {
+    color: var(--encre); font-size: 22px;
+    text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 4px;
+  }
+  .dossier p { margin: 0; color: var(--gris); font-size: 15px; line-height: 1.5; }
+
+  /* Le prochain conseil : une carte de plus, sa convocation dépliable. */
+  .prochains { display: flex; flex-direction: column; gap: var(--e3); margin-top: var(--e4); }
+  .quand { margin: 0; font-size: 16px; line-height: 1.5; }
+  .prochains summary { cursor: pointer; font-size: 15px; }
+  .prochains ol { margin: var(--e2) 0; padding-left: 1.4rem; font-size: 15px; line-height: 1.5; }
+  .prochains .source { margin: var(--e1) 0 0; color: var(--gris); font-size: 14px; }
+  .prochain-aucun { margin: var(--e4) 0 0; color: var(--gris); font-size: 15px; }
+
+  /* ── Chiffres : quatre tuiles, les autres dans un pli ── */
+  .tuiles { display: grid; grid-template-columns: 1fr 1fr; gap: var(--e3); }
+  @media (min-width: 900px) { .tuiles { grid-template-columns: repeat(4, 1fr); gap: var(--e4); } }
+  /* `container-type` : la valeur longue se règle sur la largeur de SA tuile. */
+  .tuile { padding: var(--e3) var(--e4) var(--e4); gap: 6px; container-type: inline-size; }
   .tuile .quoi {
-    font-family: var(--data); font-size: .64rem; letter-spacing: .07em;
-    text-transform: uppercase; color: var(--gris);
+    min-height: 2.6em; color: var(--gris);
+    font: 500 13px/1.3 var(--mono); letter-spacing: .05em; text-transform: uppercase;
   }
   .tuile b {
-    font-family: var(--display); font-size: 1.55rem; line-height: 1.1;
-    font-variant-numeric: tabular-nums; color: var(--encre);
+    font: 600 clamp(30px, 8vw, 40px)/1 var(--titre); letter-spacing: -.02em;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
   }
+  /* « 2,75 à 4,63 € » ne se coupe pas : corps réduit à la largeur de la tuile. */
+  .tuile b.longue { font-size: min(32px, 15.5cqi); line-height: 1.05; }
   .tuile.vide b { color: var(--gris); }
-  /* La place du graphique est réservée même sans série : les valeurs restent
-     alignées d'une tuile à l'autre. */
-  .tuile .graphe { display: block; height: 2.1rem; margin: .15rem 0 .2rem; }
-  .tuile .aussi { font-size: .74rem; line-height: 1.3; color: var(--gris); font-variant-numeric: tabular-nums; }
+  .tuile .graphe { display: block; min-height: 34px; margin: 2px 0; }
+  .tuile .aussi { color: var(--gris); font-size: 14px; line-height: 1.35; font-variant-numeric: tabular-nums; }
   .tuile .raison { color: var(--ambre); }
-  .provenance { margin: .6rem 0 0; font-size: .78rem; color: var(--gris); }
-  .provenance a { color: var(--ardoise); }
 
-  /* ---------- portes ---------- */
-  /* Une ligne : les trois questions sont déjà dans l'en-tête, elles rappellent
-     ici d'où part le reste du site sans redire ce que chaque page contient. */
-  nav.portes { display: flex; flex-wrap: wrap; gap: .5rem; padding-bottom: 2.4rem; }
-  .portes a {
-    display: inline-flex; align-items: center; gap: .45rem; padding: .45rem .85rem;
-    font-family: var(--display); font-size: 1rem; font-weight: 600; color: var(--encre);
-    background: var(--blanc); border: 1px solid var(--trait); border-radius: 2rem;
+  .pli { margin-top: var(--e4); border-top: var(--t-contour) solid var(--encre); }
+  .pli > summary {
+    position: relative; display: block; min-height: 48px; padding: 12px 36px 12px 0;
+    cursor: pointer; list-style: none; font-weight: 600;
   }
-  .portes a:hover { text-decoration: none; border-color: var(--ardoise); }
-  .portes a :global(.icon) { color: var(--ardoise); }
+  .pli > summary::-webkit-details-marker { display: none; }
+  .pli > summary::after {
+    content: ""; position: absolute; right: 10px; top: 18px; width: 9px; height: 9px;
+    border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg);
+  }
+  .pli[open] > summary::after { top: 22px; transform: rotate(-135deg); }
+  .pli .tuiles { margin-bottom: var(--e4); }
+  /* « Sources et limites » (composant commun) au pli de la maquette. */
+  .sources.sources :global(.limites) { max-width: none; margin: var(--e4) 0 0; font-size: 15px; color: var(--gris); border-top: var(--t-contour) solid var(--encre); }
+  .sources.sources :global(.limites > summary) {
+    position: relative; display: block; width: auto; min-height: 48px; padding: 12px 36px 12px 0;
+    cursor: pointer; list-style: none; color: var(--encre); font-weight: 600;
+  }
+  .sources.sources :global(.limites > summary::-webkit-details-marker) { display: none; }
+  .sources.sources :global(.limites > summary::after) {
+    content: ""; position: absolute; right: 10px; top: 18px; width: 9px; height: 9px;
+    border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg);
+  }
+  .sources.sources :global(.limites[open] > summary::after) { top: 22px; transform: rotate(-135deg); }
+  .sources.sources :global(.limites dl) { max-width: 48rem; margin: 0 0 var(--e4); }
+  .sources.sources :global(.limites dt) { margin-top: var(--e3); color: var(--encre); font-weight: 600; }
+  .sources.sources :global(.limites dd) { margin: 2px 0 0; line-height: 1.5; }
+  .sources.sources :global(.limites a) { color: var(--encre); text-decoration: underline; text-underline-offset: 3px; }
+  .provenance { margin: var(--e3) 0 0; color: var(--gris); font-size: 15px; }
+  .provenance a { color: var(--encre); }
 
-  /* ---------- flux ---------- */
-  .flux { padding-bottom: 2.6rem; }
-  .flux header { display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap; margin-bottom: .7rem; }
-  .flux h2 { font-size: 1.35rem; margin: 0; }
-  .arrete { font-family: var(--data); font-size: .7rem; color: var(--gris-clair); }
-  .tout { margin-left: auto; display: inline-flex; align-items: center; gap: .3rem; font-size: .85rem; }
-  .flux ul { list-style: none; padding: 0; margin: 0; background: var(--blanc);
-             border: 1px solid var(--trait); border-radius: var(--rayon); }
-  .flux li {
-    display: grid; grid-template-columns: 4.6rem 1fr auto; gap: .9rem; align-items: baseline;
-    padding: .6rem .9rem; border-bottom: 1px solid var(--trait-pale);
+  /* ── Le fil ── */
+  .fil {
+    margin: 0; padding: 0; list-style: none; background: var(--carte);
+    border: var(--t-contour) solid var(--filet); border-radius: var(--r-carte);
   }
-  .flux li:last-child { border-bottom: none; }
-  .flux time { font-family: var(--data); font-size: .74rem; color: var(--gris-clair);
-               font-variant-numeric: tabular-nums; }
-  .flux .titre { font-size: .9rem; }
-  /* Le compte d'actes et les pièces sont la MENTION d'une séance, pas son nom :
-     ils suivent le titre sans lui disputer la ligne. */
-  .flux .compte { color: var(--gris); }
-  .flux .pieces { display: block; font-size: .78rem; margin-top: .15rem; }
-  .flux .pieces .sep { color: var(--gris-clair); }
-  .genre {
-    font-family: var(--data); font-size: .64rem; letter-spacing: .05em; text-transform: uppercase;
-    padding: .12rem .42rem; border-radius: 3px; white-space: nowrap; color: var(--gris);
-    background: var(--trait-pale);
+  .fil li {
+    display: grid; grid-template-columns: 4.4rem minmax(0, 1fr); gap: 4px var(--e3);
+    padding: var(--e3) var(--e4); border-bottom: 1px solid var(--filet);
   }
-  .g-acte, .g-marche { background: var(--ardoise-pale); color: var(--ardoise); }
-  .g-argent { background: #e7f0ea; color: var(--recette); }
-  .g-legal { background: var(--ambre-pale); color: var(--ambre); }
-  .g-vie { background: #efeaf2; color: #62487a; }
+  .fil li:last-child { border-bottom: 0; }
+  .fil time { color: var(--gris); font: 400 14px/1.5 var(--mono); font-variant-numeric: tabular-nums; }
+  .fil a { color: var(--encre); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  .fil a:hover { text-decoration-thickness: 2px; }
+  .fil .quoi > a { font-weight: 600; }
+  .fil .compte { color: var(--gris); }
+  .fil .pieces { display: block; margin-top: 2px; font-size: 14px; }
+  .fil .pieces a { display: inline-block; padding-block: 4px; }
+  .fil .pieces .sep { color: var(--gris); }
+  .fil .genre {
+    grid-column: 2; justify-self: start; padding: 1px 7px; white-space: nowrap;
+    color: var(--gris); border: 1px solid var(--filet); border-radius: var(--r-petit);
+    font: 500 14px/1.5 var(--mono); letter-spacing: .04em; text-transform: uppercase;
+  }
+  @media (min-width: 800px) {
+    .fil li { grid-template-columns: 5rem minmax(0, 1fr) auto; align-items: baseline; }
+    .fil .genre { grid-column: 3; }
+  }
+  .ailleurs { margin: var(--e3) 0 0; color: var(--gris); font-size: 15px; }
 
-  @media (max-width: 900px) {
-    .cherche { flex-basis: 100%; }
-    .tuiles { grid-template-columns: repeat(2, 1fr); }
-    .flux li { grid-template-columns: 4.6rem 1fr; row-gap: .2rem; }
-    .genre { grid-column: 2; justify-self: start; }
+  @media (prefers-reduced-motion: no-preference) {
+    .portes a, a.carte, .bouton { transition: background-color .12s ease, color .12s ease, border-color .12s ease; }
   }
 </style>

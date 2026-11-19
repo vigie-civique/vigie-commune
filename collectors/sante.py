@@ -47,14 +47,19 @@ import csv
 import json
 import math
 import re
+import shutil
+import tempfile
 import unicodedata
 import urllib.request
+from pathlib import Path
 
+from . import mesure
 from .archive import HEADERS, archive_fetch, fetch_json
 from .config import COMMUNES, NATIONAL_STORE, communes_du_step
 from .db import get_conn, transaction, upsert_entity
 from .geocoder import l93_to_wgs84
-from .national_store import copier_atomiquement, est_frais
+from .national_store import (copier_atomiquement, est_frais, magasin_ecrivable,
+                             perime_lisible)
 
 SOURCE = "finess"
 DATASET = "finess-extraction-du-fichier-des-etablissements"
@@ -87,15 +92,23 @@ MOTS_SANTE = ("pharmacie", "medecin", "sante", "hopital", "clinique", "ehpad",
               "dentaire", "kine", "creche", "foyer")
 
 
-def _telecharger() -> None:
-    """Dépose l'extraction nationale dans le magasin partagé, si besoin.
+def _telecharger() -> Path:
+    """Dépose l'extraction nationale dans le magasin partagé, si besoin ;
+    rend le fichier à lire.
+
+    Quand le magasin refuse de remplacer le fichier (celui d'un autre compte,
+    dossier sticky), la copie neuve est lue dans un dossier temporaire que `run`
+    efface, au lieu de relire l'ancienne en la disant déposée.
 
     L'URL porte la date de dépôt : elle est LUE dans la fiche du jeu, jamais
     écrite ici. En flux, jamais en mémoire — 48 Mo chargés d'un bloc sur un
     petit serveur, c'est autant de pris sur une génération qui tourne à côté.
     """
     if est_frais(FICHIER, CACHE_JOURS):
-        return
+        return FICHIER
+    ecrivable = magasin_ecrivable(CACHE, FICHIER.name)
+    if not ecrivable and perime_lisible(FICHIER, CACHE_JOURS):
+        return FICHIER
     fiche = fetch_json(f"https://www.data.gouv.fr/api/1/datasets/{DATASET}/",
                        source=SOURCE, timeout=60)
     url = None
@@ -105,11 +118,21 @@ def _telecharger() -> None:
             break
     if not url:
         raise RuntimeError("FINESS : pas d'extraction géolocalisée au catalogue")
-    req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=600) as r:
-        copier_atomiquement(FICHIER, r)
-        archive_fetch(SOURCE, url, b"", content_type="text/csv", http_status=r.status)
-    print(f"  [sante] extraction nationale déposée : {FICHIER.name}")
+    cible = (FICHIER if ecrivable
+             else Path(tempfile.mkdtemp(prefix="vigie-finess-")) / FICHIER.name)
+    try:
+        req = urllib.request.Request(url, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=600) as r:
+            if not copier_atomiquement(cible, r):
+                raise OSError(f"écriture impossible dans {cible.parent}")
+            archive_fetch(SOURCE, url, b"", content_type="text/csv", http_status=r.status)
+    except BaseException:
+        if cible != FICHIER:
+            shutil.rmtree(cible.parent, ignore_errors=True)
+        raise
+    print(f"  [sante] extraction nationale {'déposée' if cible == FICHIER else 'lue hors du magasin'}"
+          f" : {FICHIER.name}")
+    return cible
 
 
 def _insee(ligne: list[str]) -> str:
@@ -128,11 +151,13 @@ def lire(chemin, codes: set[str]) -> tuple[dict, dict]:
     """
     etablissements: dict[str, dict] = {}
     positions: dict[str, tuple] = {}
+    structures = 0
     with open(chemin, encoding="utf-8", newline="") as f:
         for ligne in csv.reader(f, delimiter=";"):
             if not ligne:
                 continue
             if ligne[0] == "structureet" and len(ligne) > 30:
+                structures += 1
                 if _insee(ligne) in codes:
                     fiche = {cle: (ligne[i] or "").strip()
                              for cle, i in STRUCTURE.items() if i < len(ligne)}
@@ -143,6 +168,8 @@ def lire(chemin, codes: set[str]) -> tuple[dict, dict]:
                 if num in etablissements:
                     positions[num] = (ligne[GEO["x"]], ligne[GEO["y"]],
                                       ligne[GEO["systeme"]])
+    # Les établissements de France, avant le filtre. Sans en-tête, pas de forme.
+    mesure.lu("finess", structures, None, complete=True)
     return etablissements, positions
 
 
@@ -276,9 +303,13 @@ def _importer(conn, fiche: dict, lat, lng, commune_nom: str) -> bool:
 
 
 def run(insee: str | None = None) -> int:
-    _telecharger()
+    chemin = _telecharger()
     codes = {insee} if insee else set(communes_du_step("sante"))
-    etablissements, positions = lire(FICHIER, codes)
+    try:
+        etablissements, positions = lire(chemin, codes)
+    finally:
+        if chemin != FICHIER:
+            shutil.rmtree(chemin.parent, ignore_errors=True)
     if not etablissements:
         print(f"  [sante] aucun établissement FINESS sur {len(codes)} commune(s)")
         return 0

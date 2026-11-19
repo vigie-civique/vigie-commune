@@ -50,6 +50,23 @@ def nom_famille(r: random.Random) -> str:
     return "".join(r.choice(SYLLABES) for _ in range(r.choice((2, 3)))).capitalize()
 
 
+def tirer_unique(tirage, deja: set):
+    """Un tirage que `deja` ne contient pas, et qu'il retient.
+
+    `entities` est unique sur (type, nom) : à 400 personnes, les ~100 000
+    combinaisons prénom + nom se recoupent presque à coup sûr, et la base ne se
+    générait plus (audit du 15/11/2026). On retire tant que le nom est pris. Un
+    tirage sans collision tombe sur le même nom qu'avant : une graine qui
+    passait donne la même base.
+    """
+    for _ in range(10_000):
+        valeur = tirage()
+        if valeur not in deja:
+            deja.add(valeur)
+            return valeur
+    sys.exit("taille trop grande pour le vocabulaire du générateur : plus de noms libres.")
+
+
 def pieges() -> list[str]:
     f = ROOT / "tests" / "fixtures" / "pieges_textes.txt"
     if not f.exists():
@@ -80,8 +97,10 @@ def generer(db: Path, graine: int, taille: int) -> dict[str, int]:
     mairie = entite("service", f"Mairie de {COMMUNE}", COMMUNE, "C1")
 
     personnes = []
+    noms_pris: set = set()
     for _ in range(taille):
-        nom, prenom = nom_famille(r), r.choice(PRENOMS)
+        # L'ordre des tirages (nom, puis prénom) est celui d'avant la correction.
+        nom, prenom = tirer_unique(lambda: (nom_famille(r), r.choice(PRENOMS)), noms_pris)
         commune, perim = r.choice(communes)
         eid = entite("person", f"{prenom} {nom.upper()}", commune, perim)
         conn.execute("INSERT INTO persons (entity_id,firstname,lastname,birth_year,gender)"
@@ -90,12 +109,14 @@ def generer(db: Path, graine: int, taille: int) -> dict[str, int]:
         personnes.append(eid)
 
     entreprises = []
+    noms_entreprises: set = set()
+    sirens_pris: set = set()
     for i in range(max(8, taille // 3)):
         commune, perim = r.choice(communes)
-        nom = f"{r.choice(SECTEURS)} {nom_famille(r)}"
+        nom = tirer_unique(lambda: f"{r.choice(SECTEURS)} {nom_famille(r)}", noms_entreprises)
         eid = entite("business", nom, commune, perim)
-        siren = f"999{r.randint(0, 999999):06d}"
-        conn.execute("INSERT OR IGNORE INTO businesses (entity_id, siren) VALUES (?,?)",
+        siren = tirer_unique(lambda: f"999{r.randint(0, 999999):06d}", sirens_pris)
+        conn.execute("INSERT INTO businesses (entity_id, siren) VALUES (?,?)",
                      (eid, siren))
         entreprises.append((eid, nom, siren))
 

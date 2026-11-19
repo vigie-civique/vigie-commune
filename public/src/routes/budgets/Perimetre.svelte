@@ -35,8 +35,8 @@
   .perimetre { margin: 1rem 0 .9rem; }
   .plabel { display: block; font-size: .78rem; color: var(--gris); font-weight: 600; margin-bottom: .3rem; }
   .pseg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--trait); border-radius: 8px; overflow: hidden; }
-  .pseg button { min-height: 44px; padding: .4rem .9rem; font-size: .88rem; background: #fff; color: var(--gris); border: none; border-left: 1px solid var(--trait); cursor: pointer; }
+  .pseg button { min-height: 44px; padding: .4rem .9rem; font-size: .88rem; background: var(--carte); color: var(--gris); border: none; border-left: 1px solid var(--trait); cursor: pointer; }
   .pseg button:first-child { border-left: none; }
-  .pseg button.on { background: var(--ardoise); color: #fff; font-weight: 600; }
+  .pseg button.on { background: var(--ardoise); color: var(--papier); font-weight: 600; }
   .pphrase { margin: .45rem 0 0; font-size: .85rem; color: var(--gris); line-height: 1.5; max-width: 70ch; }
 </style>

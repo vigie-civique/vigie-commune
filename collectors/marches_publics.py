@@ -4,10 +4,24 @@ marches_publics.py — Marchés publics de la commune et de son EPCI
 Sources :
   1. DECP (Données Essentielles de la Commande Publique) — data.gouv.fr
      Fichiers JSON mensuels, filtrés par SIRET acheteur.
-     Seuil de publication : ≥ 40 000 € HT, quel que soit le type de marché
-     (art. R2196-1 du code de la commande publique, depuis le 01/01/2024).
-     Entre 25 000 et 40 000 € HT, l'acheteur publie seulement une liste annuelle,
-     sur le support de son choix ; sous 25 000 € HT, aucune obligation.
+     Ce que la loi oblige à publier : art. R2196-1 du code de la commande
+     publique, rédaction du décret n° 2022-767 du 2 mai 2022 (art. 4), en
+     vigueur depuis le 01/01/2024, relue sur Légifrance le 07/11/2026
+     (LEGIARTI000045739606) :
+       - marché d'un besoin ≥ 40 000 € HT : données essentielles sur le
+         portail national de données ouvertes, dans les deux mois suivant
+         la notification ou la modification ;
+       - marché conclu SANS publicité ni mise en concurrence (R2122-8) d'une
+         valeur ≥ 25 000 € HT : la même obligation, ou, au choix de
+         l'acheteur, une liste annuelle publiée au premier trimestre, sur le
+         support de son choix (objet, montant HT, date, attributaire et son
+         code postal) ; cette liste n'arrive donc pas forcément au DECP ;
+       - en dessous : l'article ne dit rien. Ne pas écrire « aucune
+         obligation » : c'est une lecture, pas le texte.
+     Le décret n° 2025-1386 du 29/12/2025 (JO du 30/12/2025, relu sur
+     Légifrance le 07/11/2026) ne touche pas R2196-1 : il relève le seuil de
+     dispense de R2122-8 à 100 000 € HT pour les travaux (01/01/2026) et à
+     60 000 € HT pour les fournitures et services (01/04/2026).
      Note : une commune de 1 300 hab. publie peu dans le DECP — l'EPCI est la
      source principale. Ces trois requêtes (DECP consolidé, DECP v3, DECP
      augmenté) sont nationales : elles fonctionnent sans adaptation locale.
@@ -19,45 +33,60 @@ Usage :
   python3 -m collectors.marches_publics
   python3 -m collectors.marches_publics --source decp      # DECP uniquement
   python3 -m collectors.marches_publics --source site      # sites officiels
-  python3 -m collectors.marches_publics --years 2022-2025  # plage d'années DECP
+  python3 -m collectors.marches_publics --years 2022-2025  # notifications de ces années
 """
 
 import argparse
 import contextlib
 import gzip
+import hashlib
 import json
 import re
+import os
 import shutil
+import sqlite3
 import tempfile
 import time
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
+import zlib
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 from .config import (
     COMMUNE_INSEE, COMMUNE_NAME, COMMUNES_ADRESSE, COMMUNES_CP, DEPARTEMENT,
-    COMMUNE_SIREN as COMMUNE_SIREN_CFG,
+    COMMUNE_SIREN as COMMUNE_SIREN_CFG, COMMUNE_SIRENS, COMMUNES_ABSORBEES,
     COMMUNE_SIRET as COMMUNE_SIRET_CFG, EPCI_NOM, EPCI_SIREN,
     HEADERS, NATIONAL_STORE, REQUEST_DELAY
 )
+from . import mesure
 from .db import transaction, upsert_entity
-from .national_store import (copier_atomiquement, est_frais,
-                             magasin_ecrivable)
+from .national_store import (copier_atomiquement, ecrivain, est_frais,
+                             magasin_ecrivable, perime_lisible, publier_atomiquement)
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
-# SIRET/SIREN de la commune, confirmés via recherche-entreprises.api.gouv.fr
-# le 13/08/2026 (COMMUNE DE BRASSAC, siège place de l'Hôtel de Ville).
+# SIRET/SIREN de la commune : ceux que déclare l'instance (config/instance.json).
+# À relever sur recherche-entreprises.api.gouv.fr, au SIRET du siège de la mairie.
 COMMUNE_SIRET  = COMMUNE_SIRET_CFG
 COMMUNE_SIREN  = COMMUNE_SIREN_CFG
 
 # EPCI — SIREN depuis config
 CAC_SIREN      = EPCI_SIREN
+
+# Les acheteurs relevés au titre de la commune : elle-même sous tous ses SIREN,
+# et chaque commune absorbée d'un autre code (tranché le 02/11/2026). Ces
+# dernières ne se rattachent PAS à la fiche de la commune (`acheteur_entity_id`
+# ne connaît que COMMUNE_SIRENS) : le snapshot les marque « avant fusion ».
+def sirens_acheteur() -> tuple[str, ...]:
+    return (*COMMUNE_SIRENS, *COMMUNES_ABSORBEES)
 # Jetons de reconnaissance de l'acheteur dans les libellés en texte libre du
 # DECP et du BOAMP, où l'acheteur n'est pas toujours identifié par son SIREN.
-# Dérivés de la config : « brassac », « sidobre », « vals et plateaux ».
+# Dérivés de la config ; pour Brassac, par exemple : « brassac », « sidobre »,
+# « vals et plateaux ».
 # Les mots significatifs du nom de l'EPCI : « CC », « Communauté », « de »,
 # « des » n'identifient personne. Le seuil de quatre lettres écarte les
 # articles sans avoir à les énumérer.
@@ -322,6 +351,12 @@ def discover_decp_resources() -> list[dict]:
         if (url.endswith(".json")
                 and re.search(r"decp-\d{4}", title)
                 and "global" not in title.lower()):
+            # L'URL vient du catalogue : `urlopen` lirait aussi bien un `file:`
+            # local, que le magasin servirait ensuite à toutes les instances.
+            if urllib.parse.urlsplit(url).scheme != "https":
+                print(f"  ⚠ DECP : URL refusée, https attendu ({url[:80]})")
+                _echecs_reseau.append(f"{url[:80]} → https attendu")
+                continue
             resources.append({"title": title, "url": url})
     seen = set()
     unique = []
@@ -330,12 +365,39 @@ def discover_decp_resources() -> list[dict]:
             seen.add(r["url"])
             unique.append(r)
     print(f"  {len(unique)} fichiers DECP consolidés découverts")
+    # Le catalogue grandit d'un fichier par mois ; les marchés du périmètre,
+    # eux, sont trop peu pour mesurer la source.
+    mesure.lu("decp-catalogue", len(unique), None, complete=True)
     return unique
 
 
-def year_from_title(title: str) -> int | None:
-    m = re.search(r"(\d{4})", title)
-    return int(m.group(1)) if m else None
+# Les DECP commencent en 2018 ; une année hors de [2000, année courante + 1] est
+# une date aberrante, pas un millésime (relecture vigie-securite du 08/11 : assez
+# nombreuse, elle faisait énumérer des siècles « absents » sur /marches).
+ANNEE_DECP_MIN = 2000
+
+
+def annee_notification(date) -> int | None:
+    """L'année d'une `dateNotification`, ou None si elle ne s'y lit pas."""
+    t = str(date or "")[:4]
+    if not t.isdigit():
+        return None
+    a = int(t)
+    return a if ANNEE_DECP_MIN <= a <= datetime.now().year + 1 else None
+
+
+# Un consolidé couvre une année quand au moins un marché sur cent qu'il porte y
+# a été notifié. Le TITRE du fichier ne le dit pas : `decp-2019.json` porte les
+# notifications de 2018 à 2023 (relevé du 07/11/2026 : 19 k, 144 k, 158 k,
+# 193 k, 189 k et 99 k), et data.gouv ne publie aucun `decp-2020`, `-2021` ni
+# `-2023`. Le seuil écarte les dates aberrantes (an 0001, 2089) et les marchés
+# anciens republiés (969 de 2017 dans le même fichier).
+PART_MIN_MILLESIME = 100
+
+
+def millesimes_couverts(annees: Counter) -> set[int]:
+    total = sum(annees.values())
+    return {a for a, n in annees.items() if total and n * PART_MIN_MILLESIME >= total}
 
 
 DECP_CACHE = NATIONAL_STORE / "decp"
@@ -377,7 +439,12 @@ def _consolide_decp(url: str, nom: str):
         return
 
     # Décidé AVANT d'ouvrir la connexion : une réponse HTTP ne se rembobine pas.
-    partage = magasin_ecrivable(DECP_CACHE)
+    partage = magasin_ecrivable(DECP_CACHE, nom)
+    # Seul l'écrivain du magasin le rafraîchit : un lecteur lit le périmé borné
+    # plutôt que de retélécharger 5 Go par dossier.
+    if not partage and perime_lisible(cache, DECP_CACHE_JOURS):
+        yield cache
+        return
     dossier_temporaire = None if partage else tempfile.mkdtemp(prefix="vigie-decp-")
     destination = cache if partage else Path(dossier_temporaire) / nom
 
@@ -403,8 +470,9 @@ def _consolide_decp(url: str, nom: str):
                           f"nouvelle tentative dans {attente}s…", end=" ", flush=True)
                     time.sleep(attente)
 
-        # Un fichier périmé vaut mieux que rien : on le signale comme tel.
-        if cache.exists():
+        # Source injoignable : la même règle bornée que ci-dessus, et le
+        # fichier est déclaré périmé dans le rapport. Au-delà, le step échoue.
+        if perime_lisible(cache, DECP_CACHE_JOURS):
             print(f"\n    [réseau KO] reprise du cache local ({nom})", end=" ", flush=True)
             yield cache
             return
@@ -441,7 +509,19 @@ def _chemin_des_marches(chemin: Path) -> str:
     return "marches.item" if apres.startswith("[") else "marches.marche.item"
 
 
-def extract_marches_from_file(url: str, nom: str = "") -> list[dict]:
+def dans_le_perimetre(acheteur_id: str, acheteur_nom: str) -> bool:
+    """Le marché d'un acheteur du périmètre : la commune, l'EPCI (par SIREN), ou
+    un acheteur dont le nom (en minuscules) porte un jeton du territoire. La
+    même règle sert la lecture en flux et l'index du magasin."""
+    # Un SIREN vide (commune isolée, sans EPCI déclaré) ne doit rien ouvrir :
+    # `startswith("")` faisait entrer la France entière dans le périmètre.
+    return (any(acheteur_id.startswith(s) for s in sirens_acheteur() if s)
+            or (bool(CAC_SIREN) and acheteur_id.startswith(CAC_SIREN))
+            or any(j and j in acheteur_nom for j in ACHETEUR_JETONS))
+
+
+def extract_marches_from_file(url: str, nom: str = "",
+                              annees: Counter | None = None) -> list[dict]:
     """Filtre un consolidé DECP sur le périmètre, marché par marché.
 
     Le fichier n'est jamais monté en mémoire. `json.loads` sur le consolidé 2019
@@ -449,6 +529,9 @@ def extract_marches_from_file(url: str, nom: str = "") -> list[dict]:
     poste le plus gourmand de toute une collecte, loin devant le build du site.
     Le parcours incrémental retient les quelques marchés du périmètre et laisse
     filer les 803 000 autres.
+
+    `annees`, s'il est donné, compte les années de notification de TOUS les
+    marchés du fichier, pour dire quels millésimes il couvre.
     """
     import ijson
 
@@ -467,17 +550,13 @@ def extract_marches_from_file(url: str, nom: str = "") -> list[dict]:
                 for m in ijson.items(flux, prefixe, use_float=True):
                     if not isinstance(m, dict):
                         continue
+                    if annees is not None and (a := annee_notification(m.get("dateNotification"))):
+                        annees[a] += 1
                     acheteur = m.get("acheteur") or {}
                     if not isinstance(acheteur, dict):
                         continue
-                    acheteur_id  = str(acheteur.get("id", ""))
-                    acheteur_nom = str(acheteur.get("nom", "")).lower()
-
-                    is_commune = acheteur_id.startswith(COMMUNE_SIREN)
-                    is_epci    = acheteur_id.startswith(CAC_SIREN)
-                    is_name    = any(j in acheteur_nom for j in ACHETEUR_JETONS)
-
-                    if is_commune or is_epci or is_name:
+                    if dans_le_perimetre(str(acheteur.get("id", "")),
+                                         str(acheteur.get("nom", "")).lower()):
                         found.append(m)
         except Exception as e:
             # Un consolidé qui ne se lit pas jusqu'au bout est une source
@@ -495,6 +574,247 @@ def extract_marches_from_file(url: str, nom: str = "") -> list[dict]:
                     pass
 
     return found
+
+
+# ── Index des consolidés par acheteur ────────────────────────────────────────
+#
+# Chaque dossier relisait les 5,2 Go de consolidés pour en garder une poignée
+# de marchés : ~2 min de calcul, le seul vrai poste CPU d'un dossier (audit du
+# 30/10/2026, P2). L'écrivain du magasin les indexe une fois par nuit
+# (`remplir_magasin`) ; le lecteur interroge l'index, fichier par fichier, et
+# relit le consolidé en flux dès que l'index ne lui correspond plus.
+
+# Ce que portent les lignes de l'index : la sortie de `normalize_decp_marche`.
+# À RELEVER dès que cette fonction change : un lecteur refuse tout autre numéro
+# et relit les consolidés, plutôt que de publier des marchés à l'ancien format.
+DECP_INDEX_SCHEMA = 2
+DECP_INDEX_NOM = "index-acheteurs.sqlite"
+# L'écrivain et les lecteurs ne tournent pas toujours sur la même révision du
+# moteur : l'index porte l'empreinte de `normalize_decp_marche` sur un marché
+# type, et un lecteur dont la normalisation diffère relit les consolidés.
+# Relever le schéma à la main ne suffisait pas : un oubli publiait l'ancienne.
+_MARCHE_TYPE = {
+    "id": "type", "acheteur": {"id": "acheteur-type", "nom": "Acheteur"},
+    "objet": "objet", "nature": "Marché", "procedure": "Procédure adaptée", "montant": 1.5,
+    "dateNotification": "2026-01-01", "datePublicationDonnees": "2026-01-02",
+    "dureeMois": 12, "codeCPV": "45233141-9", "lieuExecution": {"nom": "Lieu"},
+    "titulaires": [{"id": "titulaire-type", "denominationSociale": "Titulaire",
+                    "typeIdentifiant": "SIRET"}],
+}
+
+
+def empreinte_normalisation() -> str:
+    sortie = json.dumps(normalize_decp_marche(_MARCHE_TYPE), sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(sortie.encode()).hexdigest()[:16]
+
+
+# Un marché normalisé tient en quelques Ko : au-delà, le blob n'est pas un marché.
+_MARCHE_OCTETS_MAX = 1 << 20
+_TABLES_INDEX = {("table", "meta"), ("table", "fichiers"), ("table", "marches"),
+                 ("table", "donnees"), ("index", "marches_par_fichier"),
+                 ("index", "sqlite_autoindex_meta_1"), ("index", "sqlite_autoindex_fichiers_1"),
+                 ("table", "millesimes"), ("index", "sqlite_autoindex_millesimes_1")}
+_SCHEMA_INDEX_SQL = """
+CREATE TABLE meta (cle TEXT PRIMARY KEY, valeur TEXT NOT NULL);
+-- Le consolidé tel qu'il a été indexé : un lecteur ne se sert de l'index pour
+-- un fichier que si celui du magasin a toujours cette taille et cette date.
+CREATE TABLE fichiers (nom TEXT PRIMARY KEY, taille INTEGER NOT NULL,
+                       mtime_ns INTEGER NOT NULL, marches INTEGER NOT NULL);
+-- Les colonnes du filtre, étroites : le parcours d'un fichier ne lit pas les
+-- marchés eux-mêmes, rangés à part.
+CREATE TABLE marches (id INTEGER PRIMARY KEY, fichier TEXT NOT NULL, rang INTEGER NOT NULL,
+                      acheteur_id TEXT NOT NULL, acheteur_nom TEXT NOT NULL);
+-- Le marché normalisé, en JSON compressé ; vide si la normalisation a échoué :
+-- le lecteur qui le rencontre relit alors le consolidé, comme avant.
+CREATE TABLE donnees (id INTEGER PRIMARY KEY, marche BLOB NOT NULL);
+-- Les années de notification de TOUS les marchés du consolidé (schéma 2) : le
+-- titre du fichier ne dit pas les millésimes qu'il couvre.
+CREATE TABLE millesimes (fichier TEXT NOT NULL, millesime INTEGER NOT NULL,
+                         marches INTEGER NOT NULL, PRIMARY KEY (fichier, millesime));
+CREATE INDEX marches_par_fichier ON marches (fichier, rang);
+"""
+_index_ouvert: dict[Path, sqlite3.Connection | None] = {}
+
+
+def _index_decp() -> sqlite3.Connection | None:
+    """L'index du magasin en lecture seule, ou None : absent, d'un autre schéma
+    ou d'une autre normalisation, d'une forme inattendue, ou qui n'est pas
+    celui de l'écrivain du magasin. Ouvert une fois par processus."""
+    chemin = DECP_CACHE / DECP_INDEX_NOM
+    if chemin in _index_ouvert:
+        return _index_ouvert[chemin]
+    base = None
+    try:
+        info = chemin.stat()
+        # Le fichier de l'écrivain (propriétaire du dossier), que personne
+        # d'autre ne peut réécrire : un index déposé par un lecteur dans un
+        # dossier resté inscriptible ne se lit pas.
+        if info.st_uid != DECP_CACHE.stat().st_uid or info.st_mode & 0o022:
+            print(f"  [DECP] index d'un autre propriétaire ou inscriptible : ignoré")
+            raise FileNotFoundError
+        # immutable : le magasin est monté en lecture seule chez le lecteur,
+        # SQLite n'y pose ni verrou ni journal ; l'écrivain remplace le
+        # fichier par renommage, jamais sur place.
+        base = sqlite3.connect(chemin.as_uri() + "?mode=ro&immutable=1", uri=True)
+        base.execute("PRAGMA trusted_schema = OFF")
+        base.execute("PRAGMA cell_size_check = ON")
+        if set(base.execute("SELECT type, name FROM sqlite_master")) != _TABLES_INDEX:
+            raise sqlite3.DatabaseError("tables inattendues")
+        meta = dict(base.execute("SELECT cle, valeur FROM meta"))
+        if (meta.get("schema"), meta.get("normalisation")) != (
+                str(DECP_INDEX_SCHEMA), empreinte_normalisation()):
+            print(f"  [DECP] index d'un autre schéma ou d'une autre normalisation : ignoré")
+            raise FileNotFoundError
+        base.create_function("perimetre", 2,
+                             lambda i, n: dans_le_perimetre(str(i), str(n)), deterministic=True)
+    except (FileNotFoundError, sqlite3.Error) as e:
+        if isinstance(e, sqlite3.Error):
+            print(f"  [DECP] index illisible, ignoré : {e}")
+        if base is not None:
+            base.close()
+        base = None
+    _index_ouvert[chemin] = base
+    return base
+
+
+def _decoder(blob: bytes) -> dict | None:
+    """Un marché de l'index, ou None : décompression bornée, un dict attendu."""
+    if not isinstance(blob, bytes) or not blob:
+        return None
+    flux = zlib.decompressobj()
+    brut = flux.decompress(blob, _MARCHE_OCTETS_MAX)
+    if flux.unconsumed_tail:
+        return None
+    marche = json.loads(brut)
+    return marche if isinstance(marche, dict) else None
+
+
+def marches_indexes(nom: str, annees: Counter | None = None) -> list[dict] | None:
+    """Les marchés du périmètre dans le consolidé `nom`, lus dans l'index ;
+    None quand il faut relire le consolidé : chez l'écrivain, sans index, quand
+    le consolidé du magasin n'est plus celui qui a été indexé, ou sur la
+    moindre anomalie de l'index (qui ne doit jamais faire échouer le step).
+    `annees` reçoit les années de notification relevées à l'indexation."""
+    if ecrivain():
+        return None
+    cache = DECP_CACHE / nom
+    # La fraîcheur du consolidé décide, comme pour la lecture en flux ; un
+    # périmé borné se lit dans l'index aussi bien, et se déclare de même.
+    if not (est_frais(cache, DECP_CACHE_JOURS)
+            or (not magasin_ecrivable(DECP_CACHE, nom) and perime_lisible(cache, DECP_CACHE_JOURS))):
+        return None
+    base = _index_decp()
+    if base is None:
+        return None
+    try:
+        info = cache.stat()
+        if base.execute("SELECT taille, mtime_ns FROM fichiers WHERE nom = ?",
+                        (nom,)).fetchone() != (info.st_size, info.st_mtime_ns):
+            return None
+        lignes = base.execute(
+            "SELECT d.marche FROM marches m JOIN donnees d ON d.id = m.id"
+            " WHERE m.fichier = ? AND perimetre(m.acheteur_id, m.acheteur_nom) ORDER BY m.rang",
+            (nom,)).fetchall()
+        trouves = [_decoder(marche) for (marche,) in lignes]
+        releve = base.execute("SELECT millesime, marches FROM millesimes WHERE fichier = ?",
+                              (nom,)).fetchall()
+    except (sqlite3.Error, zlib.error, ValueError, OSError) as e:
+        print(f"  [DECP] index illisible pour {nom}, relu en flux : {e}")
+        return None
+    # Le filtre a porté sur les colonnes, la publication porte sur les blobs :
+    # chaque marché rendu est de nouveau éprouvé contre le périmètre.
+    if any(m is None or not dans_le_perimetre(str(m.get("acheteur_id", "")),
+                                              str(m.get("acheteur_nom", "")).lower())
+           for m in trouves):
+        return None
+    if annees is not None:
+        annees.update(dict(releve))
+    return trouves
+
+
+def remplir_magasin(departements: list[str] | None = None) -> list[str]:
+    """Pour l'écrivain du magasin : l'index des consolidés DECP présents au
+    magasin, construit à côté (`.*.part`) puis publié par renommage.
+
+    Joué APRÈS le step `marches`, qui vient de rafraîchir les consolidés. Un
+    consolidé illisible n'entre pas dans l'index (ses lecteurs le relisent en
+    flux) et revient en échec. `departements` est ignoré.
+    """
+    import ijson
+
+    echecs: list[str] = []
+    fichiers = sorted(p for p in DECP_CACHE.glob("*.json") if p.is_file() and not p.is_symlink())
+    if not fichiers:
+        print("  [DECP] aucun consolidé au magasin : pas d'index")
+        return ["aucun consolidé"]
+    final = DECP_CACHE / DECP_INDEX_NOM
+    temporaire = DECP_CACHE / f".{DECP_INDEX_NOM}.{os.getpid()}.part"
+    temporaire.unlink(missing_ok=True)
+    total = 0
+    try:
+        base = sqlite3.connect(temporaire)
+        # MEMORY et non OFF : un consolidé qui casse en cours de lecture est
+        # annulé ; sans journal, le ROLLBACK est indéfini et laissait des pages
+        # à moitié écrites, puis une base « malformed » pour toute la nuit.
+        base.execute("PRAGMA journal_mode = MEMORY")
+        base.execute("PRAGMA synchronous = OFF")
+        base.executescript(_SCHEMA_INDEX_SQL)
+        identifiant = 0
+        for chemin in fichiers:
+            info = chemin.stat()
+            lignes, rang, rates, annees = [], 0, 0, Counter()
+            try:
+                with _ouvrir_decp(chemin) as flux:
+                    for m in ijson.items(flux, _chemin_des_marches(chemin), use_float=True):
+                        if not isinstance(m, dict) or not isinstance(m.get("acheteur"), dict):
+                            continue
+                        acheteur = m["acheteur"]
+                        if a := annee_notification(m.get("dateNotification")):
+                            annees[a] += 1
+                        try:
+                            marche = zlib.compress(json.dumps(
+                                normalize_decp_marche(m), ensure_ascii=False).encode(), 6)
+                        except Exception:
+                            marche, rates = b"", rates + 1
+                        identifiant += 1
+                        rang += 1
+                        lignes.append((identifiant, chemin.name, rang, str(acheteur.get("id", "")),
+                                       str(acheteur.get("nom", "")).lower(), marche))
+                        if len(lignes) >= 20_000:
+                            _inserer_index(base, lignes)
+                            lignes = []
+                _inserer_index(base, lignes)
+                base.execute("INSERT INTO fichiers VALUES (?, ?, ?, ?)",
+                             (chemin.name, info.st_size, info.st_mtime_ns, rang))
+                base.executemany("INSERT INTO millesimes VALUES (?, ?, ?)",
+                                 [(chemin.name, a, n) for a, n in sorted(annees.items())])
+                base.commit()
+                total += rang
+                print(f"  [DECP] index : {chemin.name} — {rang} marchés"
+                      + (f", {rates} non normalisés (relus en flux)" if rates else ""))
+            except Exception as e:
+                base.rollback()
+                print(f"  ✗ [DECP] {chemin.name} non indexé : {type(e).__name__}: {e}")
+                echecs.append(chemin.name)
+        base.executemany("INSERT INTO meta VALUES (?, ?)", [
+            ("schema", str(DECP_INDEX_SCHEMA)),
+            ("normalisation", empreinte_normalisation()),
+            ("ecritLe", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
+        ])
+        base.commit()
+        base.close()
+        if total == 0:
+            return echecs + ["index vide"]
+        publier_atomiquement(final, temporaire)
+    finally:
+        temporaire.unlink(missing_ok=True)
+    print(f"  [DECP] index publié : {total} marchés, {len(fichiers) - len(echecs)} consolidés")
+    return echecs
+
+
+def _inserer_index(base: sqlite3.Connection, lignes: list[tuple]) -> None:
+    base.executemany("INSERT INTO marches VALUES (?, ?, ?, ?, ?)", [l[:5] for l in lignes])
+    base.executemany("INSERT INTO donnees VALUES (?, ?)", [(l[0], l[5]) for l in lignes])
 
 
 def normalize_decp_marche(m: dict) -> dict:
@@ -532,24 +852,60 @@ def normalize_decp_marche(m: dict) -> dict:
     }
 
 
+# Les millésimes couverts par au moins un consolidé DECP lu en entier pendant la
+# passe, avec le nombre de ces fichiers. Un zéro marché d'une année qu'aucun
+# consolidé ne couvre ne dit rien de l'acheteur : la page doit pouvoir le dire.
+# Le millésime se lit dans les dates de notification, jamais dans le titre
+# (`millesimes_couverts`).
+millesimes_lus: dict[int, int] = {}
+
+
+def enregistrer_millesimes(conn, lus: dict[int, int]) -> None:
+    """Remplace le relevé des millésimes DECP lus. Appelé seulement après une
+    passe sur TOUS les consolidés : une passe bornée (`--years`) le fausserait."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS decp_millesimes (
+                        millesime INTEGER PRIMARY KEY,
+                        fichiers  INTEGER NOT NULL,
+                        lu_le     TEXT DEFAULT (datetime('now')))""")
+    conn.execute("DELETE FROM decp_millesimes")
+    conn.executemany("INSERT INTO decp_millesimes (millesime, fichiers) VALUES (?, ?)",
+                     sorted(lus.items()))
+
+
 def fetch_decp_marches(years: list[int] | None = None) -> list[dict]:
     """Interroge le DECP et retourne tous les marchés du périmètre."""
     print("\n[DECP] Découverte des fichiers…")
     resources = discover_decp_resources()
 
-    if years:
-        resources = [r for r in resources if year_from_title(r["title"]) in years]
-        print(f"  Filtré à {len(resources)} fichiers pour années {years}")
-
     all_marches = []
+    millesimes_lus.clear()
     for i, res in enumerate(resources):
         title = res["title"]
-        year  = year_from_title(title) or "?"
         print(f"  [{i+1}/{len(resources)}] {title}…", end=" ", flush=True)
-        marches = extract_marches_from_file(res["url"], title)
-        print(f"{len(marches)} trouvé(s)")
-        all_marches.extend([normalize_decp_marche(m) for m in marches])
-        time.sleep(REQUEST_DELAY)
+        annees = Counter()
+        indexes = marches_indexes(_nom_cache(title), annees)
+        if indexes is not None:
+            print(f"{len(indexes)} trouvé(s) (index)")
+            all_marches.extend(indexes)
+        else:
+            echecs_avant = len(_echecs_reseau)
+            marches = extract_marches_from_file(res["url"], title, annees)
+            print(f"{len(marches)} trouvé(s)")
+            all_marches.extend([normalize_decp_marche(m) for m in marches])
+            time.sleep(REQUEST_DELAY)
+            # Lu jusqu'au bout seulement : un fichier injoignable ou coupé ne
+            # couvre aucun millésime.
+            if len(_echecs_reseau) != echecs_avant:
+                continue
+        for a in millesimes_couverts(annees):
+            millesimes_lus[a] = millesimes_lus.get(a, 0) + 1
+
+    # `--years` borne les marchés à leur année de NOTIFICATION. Il bornait les
+    # fichiers à l'année de leur titre, et `--years 2021` n'en lisait aucun :
+    # les marchés de 2021 sont dans `decp-2019.json`.
+    if years:
+        all_marches = [m for m in all_marches if annee_notification(m.get("date_notif")) in years]
+        print(f"  Filtré aux notifications de {years}")
 
     # Dédoublonner par raw_id
     seen_ids = set()
@@ -637,14 +993,15 @@ def fetch_decp_v3_marches() -> list[dict]:
     # périmètre — ici le CP de la commune elle-même.
     cp = ", ".join(f'"{c}"' for c in COMMUNES_CP if c == CODE_POSTAL)
 
-    clauses = [f'startswith(acheteur_id, "{COMMUNE_SIREN}")',
-               f'startswith(acheteur_id, "{CAC_SIREN}")',
-               f'(lieuexecution_typecode = "Code commune" and lieuexecution_code in ({insee}))']
+    clauses = [f'startswith(acheteur_id, "{siren}")'
+               for siren in (*sirens_acheteur(), CAC_SIREN) if siren]
+    clauses.append(f'(lieuexecution_typecode = "Code commune" and lieuexecution_code in ({insee}))')
     if cp:
         clauses.append(f'(lieuexecution_typecode = "Code postal" and lieuexecution_code in ({cp}))')
 
     print("\n[DECP-v3] Requête par acheteur et par lieu d'exécution…")
     results, seen = [], set()
+    lus, forme = 0, None
     for clause in clauses:
         offset = 0
         while True:
@@ -656,6 +1013,8 @@ def fetch_decp_v3_marches() -> list[dict]:
             if not data:
                 break
             hits = data.get("results", [])
+            lus += len(hits)
+            forme = forme or (mesure.forme_de(hits))
             for rec in hits:
                 rid = str(rec.get("id") or "")
                 if rid and rid in seen:
@@ -667,6 +1026,8 @@ def fetch_decp_v3_marches() -> list[dict]:
                 break
             time.sleep(REQUEST_DELAY)
     print(f"  [DECP-v3] {len(results)} marchés uniques")
+    # Avant la déduplication ; plafond de 500 par clause, donc stable.
+    mesure.lu("decp-v3", lus, forme, complete=True)
     return results
 
 
@@ -721,7 +1082,12 @@ def fetch_decp_eco_marches() -> list[dict]:
     import urllib.parse
     print("\n[DECP-eco] Requête directe par SIREN acheteur…")
     results, seen = [], set()
-    for label, siren in ((COMMUNE_NAME, COMMUNE_SIREN), (EPCI_NOM, CAC_SIREN)):
+    lus, forme = 0, None
+    for label, siren in (*((COMMUNE_NAME, s) for s in COMMUNE_SIRENS),
+                         *((d["nom"], s) for s, d in COMMUNES_ABSORBEES.items()),
+                         (EPCI_NOM, CAC_SIREN)):
+        if not siren:       # `startswith("")` rendrait la France entière
+            continue
         offset = 0
         while True:
             params = urllib.parse.urlencode({
@@ -735,6 +1101,8 @@ def fetch_decp_eco_marches() -> list[dict]:
             if not data:
                 break
             hits = data.get("results", [])
+            lus += len(hits)
+            forme = forme or (mesure.forme_de(hits))
             for rec in hits:
                 rid = str(rec.get("id") or "")
                 if rid and rid in seen:
@@ -748,6 +1116,7 @@ def fetch_decp_eco_marches() -> list[dict]:
             time.sleep(REQUEST_DELAY)
         print(f"  [DECP-eco] {label} ({siren}) : {offset} record(s) parcouru(s)")
     print(f"  [DECP-eco] {len(results)} marchés uniques")
+    mesure.lu("decp-eco", lus, forme, complete=True)
     return results
 
 
@@ -764,6 +1133,7 @@ def fetch_boamp_marches() -> list[dict]:
     print(f"\n[BOAMP] Recherche marchés {COMMUNE_NAME} + {EPCI_NOM}…")
     results = []
     seen_ids = set()
+    lus, forme = 0, None
     ecartes = Counter()
 
     # Le nom de l'acheteur est saisi librement par le publicateur : on interroge
@@ -798,6 +1168,8 @@ def fetch_boamp_marches() -> list[dict]:
             hits = data.get("results", [])
             if not hits:
                 break
+            lus += len(hits)
+            forme = forme or mesure.forme_de(hits)
             for hit in hits:
                 uid = hit.get("idweb") or hit.get("id") or str(offset)
                 if uid in seen_ids:
@@ -895,6 +1267,8 @@ def fetch_boamp_marches() -> list[dict]:
           + (f" — {ecartes['hors_territoire']} acheteurs hors territoire, "
              f"{ecartes['sans_rattachement']} sans rattachement, écartés"
              if ecartes else ""))
+    # Avant le recoupement d'adresse : les avis rendus, pas les retenus.
+    mesure.lu("boamp", lus, forme, complete=True)
     return results
 
 
@@ -911,6 +1285,9 @@ def fetch_avis_site() -> list[dict]:
     from .connecteurs import charger
 
     avis = charger().avis_marches()
+    # Zéro stable sans page « marchés » déclarée ; un site qui ne répond plus
+    # rend zéro sans erreur. La forme est celle du connecteur : rien à en tirer.
+    mesure.lu("site-avis", len(avis), None, complete=True)
     print(f"\n[site] {len(avis)} avis de publicité")
     return [{
         "source":       a["source"],
@@ -946,16 +1323,11 @@ def _get_commune_entity_id(conn) -> int:
 
 
 def _get_cac_entity_id(conn) -> int:
-    """Retourne l'ID de l'EPCI (acheteur)."""
-    row = conn.execute(
-        "SELECT id FROM entities WHERE type='service' AND name=? LIMIT 1",
-        (EPCI_NOM,)
-    ).fetchone()
-    if row:
-        return row["id"]
+    """Retourne l'ID de l'EPCI (acheteur), cherché par son SIREN d'abord."""
     # Pas de nom court : « CCSVP » était écrit ici, le sigle de l'EPCI d'UNE
     # instance, posé sur la fiche de l'intercommunalité de toutes les autres.
-    return upsert_entity(conn, type="service", name=EPCI_NOM, confidence="verified")
+    return upsert_entity(conn, type="service", name=EPCI_NOM, siren=CAC_SIREN,
+                         confidence="verified")
 
 
 def siren_de(valeur) -> str:
@@ -981,7 +1353,7 @@ def acheteur_par_siren(conn, siren: str) -> int | None:
     s = siren_de(siren)
     if not s:
         return None
-    if COMMUNE_SIREN and s == siren_de(COMMUNE_SIREN):
+    if s in {siren_de(c) for c in COMMUNE_SIRENS}:
         return _get_commune_entity_id(conn)
     if CAC_SIREN and s == siren_de(CAC_SIREN):
         return _get_cac_entity_id(conn)
@@ -1239,6 +1611,8 @@ def main(
 
     inserted = 0
     with transaction() as conn:
+        if source in ("all", "decp") and years is None and millesimes_lus:
+            enregistrer_millesimes(conn, millesimes_lus)
         commune_id = _get_commune_entity_id(conn)
         cac_id     = _get_cac_entity_id(conn)
         for m in all_marches:
@@ -1249,8 +1623,9 @@ def main(
     print(f"\n[marches_publics] {inserted}/{len(all_marches)} insérés")
     if inserted == 0 and source in ("all", "decp"):
         print(
-            "  Note : le DECP ne couvre que les marchés ≥ 40 000 € HT (tous types).\n"
-            f"  Les marchés sous seuil de {COMMUNE_NAME} n'y figurent pas — normal pour une petite commune."
+            "  Note : la publication au DECP n'est obligatoire qu'à partir de 40 000 € HT\n"
+            "  (25 000 € HT sans publicité ni mise en concurrence, avec option de liste annuelle,\n"
+            f"  art. R2196-1) : un marché plus petit de {COMMUNE_NAME} n'a pas à y figurer."
         )
     # Après le commit : les marchés lus sont gardés, mais le run est marqué
     # en erreur si une partie des sources n'a pas pu être lue.
@@ -1263,7 +1638,8 @@ if __name__ == "__main__":
     parser.add_argument("--source",   default="all",
                         choices=["all", "decp", "decp-eco", "boamp", "site"])
     parser.add_argument("--years", type=str, default=None,
-                        help="Plage d'années ex: 2022-2025 ou 2024")
+                        help="Années de NOTIFICATION à garder, ex: 2022-2025 ou 2024 "
+                             "(tous les consolidés sont lus)")
     args = parser.parse_args()
 
     years = None

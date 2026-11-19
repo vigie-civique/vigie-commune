@@ -86,7 +86,7 @@
     border-left: 3px solid;
     border-radius: 0 var(--rayon) var(--rayon) 0;
   }
-  .fait           { border-color: var(--recette); background: #f2f7f4; }
+  .fait           { border-color: var(--recette); background: var(--recette-voile); }
   .calcul         { border-color: var(--gris);    background: var(--papier); }
   .interpretation { border-color: var(--ambre);   background: var(--ambre-pale); }
 

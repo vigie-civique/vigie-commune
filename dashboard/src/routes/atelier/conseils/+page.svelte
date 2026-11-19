@@ -11,6 +11,7 @@
   import { authFetch, currentUser } from '#lib/stores/auth.js'
   import { auMoins } from '#lib/roles.js'
   import { heureLocale } from '#lib/heure.js'
+  import { erreurHttp, phraseErreur, phraseStatut, motifReponse } from '#lib/libelles.js'
 
   $: tranche = auMoins($currentUser, 'validator')
 
@@ -30,26 +31,21 @@
     loading = true; error = ''
     try {
       const res = await authFetch('/atelier/en-clair')
-      if (!res.ok) throw new Error(`${res.status}`)
+      if (!res.ok) throw erreurHttp(res)
       seances = await res.json()
       notes = Object.fromEntries(seances.map(s => [s.releve, s.note || '']))
-    } catch (e) { error = e.message }
+    } catch (e) { error = phraseErreur(e) }
     finally { loading = false }
   }
 
   // L'aperçu exige la session : on le charge avec le jeton, puis on l'ouvre.
   async function apercu(s) {
     const res = await authFetch(`/atelier/en-clair/${s.releve}/apercu`)
-    if (!res.ok) { avis = `Aperçu impossible (${res.status}).`; return }
+    if (!res.ok) { avis = `L'aperçu a échoué. ${phraseStatut(res.status)}`; return }
     // Dans un cadre SANS droits (`sandbox`), et non plus dans un onglet : un
     // `blob:` ouvert depuis l'atelier s'exécute à son adresse, donc avec sa
     // session. Les feuilles n'ont besoin d'aucun script pour se lire.
     feuilles = { titre: `${s.assemblee}, ${s.date}`, html: await res.text() }
-  }
-
-  async function motif(res, defaut) {
-    const d = (await res.json().catch(() => ({}))).detail
-    return (typeof d === 'object' ? d?.message : d) || defaut
   }
 
   async function decider(s, review_status) {
@@ -66,7 +62,7 @@
           + (review_status === 'retenu' ? ' La feuille sortira à la prochaine publication.' : '')
         await charger()
       } else {
-        avis = await motif(res, `L'enregistrement a échoué (${res.status}).`)
+        avis = await motifReponse(res, "L'enregistrement a échoué")
         if (res.status === 409) await charger()
       }
     } finally {
@@ -96,7 +92,7 @@
 
   {#if avis}<p class="avis">{avis}</p>{/if}
   {#if loading}<p class="msg">Chargement…</p>
-  {:else if error}<p class="msg erreur">La file n'a pas pu être chargée ({error}).</p>
+  {:else if error}<p class="msg erreur">La file n'a pas pu être chargée. {error}</p>
   {:else if !seances.length}<p class="msg">Aucun relevé de séance dans <code>data/conseils/</code>.</p>
   {:else}
     <ul class="liens">

@@ -174,6 +174,21 @@ def test_ecarte_retire_chaque_type_de_la_publication(epreuve, tmp_path):
     assert exclusions["rejete_en_atelier"] == 1
 
 
+def test_ecarter_une_organisation_garde_ses_flux_delies(epreuve, tmp_path):
+    """Écarter une fiche retire la fiche, pas l'argent public : la subvention
+    à la boulangerie écartée reste dans les flux, sous son nom, sans lien
+    (Julien, 15/11/2026)."""
+    boulangerie = epreuve[1]["entity"][0]
+    sortie = _publier(_copie_avec(epreuve, tmp_path, {"entity": ECARTE}),
+                      tmp_path / "snap")
+    flux = [f for f in json.loads(sortie["flows.json"])["flows"]
+            if f.get("description") == "Subvention d'épreuve"]
+    assert len(flux) == 1, "le flux d'une organisation écartée a disparu des totaux"
+    assert flux[0]["to_id"] is None
+    assert boulangerie not in (flux[0]["from_id"], flux[0]["to_id"])
+    assert flux[0]["to_name"] == "Boulangerie d'épreuve"
+
+
 def test_les_autres_verdicts_laissent_passer(epreuve, tmp_path):
     """Une seule publication : les verdicts tournent sur les cinq types, chacun
     posé au moins une fois — l'ancien mot `validated` compris."""
@@ -326,8 +341,9 @@ def atelier(tmp_path, monkeypatch, schema_sql):
     from collectors import db as db_mod
     monkeypatch.setattr(api, "DB_PATH", chemin)
     monkeypatch.setattr(db_mod, "DB_PATH", chemin)
-    monkeypatch.setenv("ADMIN_KEY", "cle-de-test")
-    client = TestClient(api.app, headers={"x-admin-key": "cle-de-test"})
+    monkeypatch.setattr(api, "ADMIN_KEY", "cle-de-test")
+    client = TestClient(api.app, headers={"x-admin-key": "cle-de-test"},
+                        client=("127.0.0.1", 50000))
 
     def en_tant_que(user):
         api.app.dependency_overrides[require_auth] = lambda: user

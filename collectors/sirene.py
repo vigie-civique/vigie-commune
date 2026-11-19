@@ -7,6 +7,7 @@ import json
 import time
 import urllib.parse
 import urllib.request
+from . import mesure
 from .archive import fetch_json
 from .config import SIRENE_API, COMMUNE_INSEE, COMMUNE_NAME, HEADERS, REQUEST_DELAY, naf_theme
 from .formes_juridiques import type_pour_forme
@@ -48,6 +49,11 @@ def fetch_all(insee: str = COMMUNE_INSEE) -> list[dict]:
             break
 
         items = data.get("results", [])
+        # `total_results` et non `total_count` : `fetch_json` ne compte pas
+        # cette réponse. Une page en erreur arrête la lecture sans faire
+        # échouer le step : ce compte en est la seule trace.
+        mesure.lu("recherche-entreprises", len(items),
+                  mesure.forme_de(items), complete=True)
         results.extend(items)
 
         if total is None:
@@ -154,6 +160,7 @@ def _import_one(conn, item: dict, counters: tuple, commune: str = COMMUNE_NAME):
         type=etype,
         name=nom,
         short_name=siren,
+        siren=siren,
         lat=lat,
         lng=lng,
         address=address,

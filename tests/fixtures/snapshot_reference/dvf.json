@@ -2,6 +2,7 @@
   "seuil_mediane": 5,
   "synthese": {
     "mutations": 0,
+    "lignes": 0,
     "debut": null,
     "fin": null,
     "maisons": 0,

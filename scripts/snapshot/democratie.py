@@ -27,8 +27,12 @@ def etape_elections(conn, out) -> dict:
                    ROUND(100.0*votants/NULLIF(inscrits,0), 2) AS participation_pct
             FROM elections_resultats ORDER BY scrutin, tour, commune
         """)
+        # Pas de `nuance` : le préfet l'attribue, le candidat ne l'a pas rendue
+        # publique (CE, 27/02/2026, n° 512694) ; une opinion politique hors de
+        # l'exception 9.2.e du RGPD (avis DPO et avocat du 17/11/2026). Elle
+        # reste collectée dans la base de l'atelier. verify_snapshot la refuse.
         elections["listes"] = rows(conn, """
-            SELECT scrutin, tour, insee, rang, libelle, libelle_abrege, nuance,
+            SELECT scrutin, tour, insee, rang, libelle, libelle_abrege,
                    tete_de_liste, voix, pct_exprimes, sieges_cm, sieges_cc
             FROM elections_listes ORDER BY scrutin, tour, insee, voix DESC
         """)
@@ -44,11 +48,22 @@ def etape_intercommunalite(conn, out, horloge, revue) -> None:
     # siège pour en décider, et où Lasalle se situe parmi ses pairs.
     # Les entités des 14 autres communes ne sont pas publiées en fiche
     # (cf. `publiable_dans_perimetre`) : elles n'existent ici qu'agrégées.
-    competences = rows(conn, """
-        SELECT code, libelle, categorie, obligatoire, interet_communautaire
-        FROM epci_competences
-        ORDER BY obligatoire DESC, categorie, libelle
-    """) if table_exists(conn, "epci_competences") else []
+    # La précision BANATIC sort avec l'intitulé : sans elle, une compétence
+    # se lit plus large qu'elle n'est (cf. `collectors/banatic.import_competences`).
+    # Colonnes du 07/11/2026 : une base plus ancienne ne les a pas encore.
+    competences = []
+    if table_exists(conn, "epci_competences"):
+        presentes = {r["name"] for r in rows(conn, "PRAGMA table_info(epci_competences)")}
+        precisions = ", ".join(
+            c if c in presentes else f"NULL AS {c}"
+            for c in ("description", "precision_competence",
+                      "precision_interet_communautaire"))
+        competences = rows(conn, f"""
+            SELECT code, libelle, categorie, obligatoire, interet_communautaire,
+                   {precisions}
+            FROM epci_competences
+            ORDER BY obligatoire DESC, categorie, libelle
+        """)
 
     # Un même délégué porte plusieurs relations `élu_cc` — une par source
     # (banatic, rne, cc_cac_site, élections_2026). Deux filtres, et l'ordre

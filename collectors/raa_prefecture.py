@@ -31,10 +31,11 @@ import urllib.request
 from datetime import date
 from pathlib import Path
 
+from . import mesure
 from .archive import archive_fetch
 from .connecteurs.base import date_fr
 from .config import (COMMUNES, DEPARTEMENT, EPCI_NOM, HEADERS,
-                     PREFECTURE_RAA_PATH, PREFECTURE_URL)
+                     PREFECTURE_RAA_PATH, PREFECTURE_URL, SOURCES_NON_CONFIGUREES)
 from .db import get_conn
 
 BASE = PREFECTURE_URL
@@ -264,11 +265,19 @@ def scan_pdf(conn, url: str, dry_run: bool = False) -> int:
 
 def run(year: int, limit: int | None = None, dry_run: bool = False,
         delay: float = 2.0):
+    if "raa" in SOURCES_NON_CONFIGUREES:
+        # Rien à interroger : une URL vide ne se « parcourt » pas, et un index
+        # vide n'est pas une préfecture sans recueil. La couverture publie
+        # `non_configure` à côté du statut du step.
+        print(f"[raa] non relevé : {SOURCES_NON_CONFIGUREES['raa']}")
+        return
     conn = get_conn()
     ensure_table(conn)
     print(f"[raa] Liste des recueils {year}…")
     try:
         pdfs = list_pdfs(year)
+        # L'index de l'année retombe à presque rien chaque 1er janvier.
+        mesure.lu("raa-index", len(pdfs))
     except Exception as e:
         conn.close()
         raise SourceInterrompue(

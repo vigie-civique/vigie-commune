@@ -14,6 +14,7 @@
   import { authFetch, currentUser } from '#lib/stores/auth.js'
   import { auMoins, messageErreur } from '#lib/roles.js'
   import { heureLocale } from '#lib/heure.js'
+  import { erreurHttp, phraseErreur, motifReponse } from '#lib/libelles.js'
 
   $: tranche = auMoins($currentUser, 'validator')
   $: ecrit = auMoins($currentUser, 'contributor')
@@ -57,18 +58,15 @@
     return () => window.removeEventListener('beforeunload', garde)
   })
 
-  async function motif(res, defaut) {
-    const d = (await res.json().catch(() => ({}))).detail
-    return messageErreur(d, defaut)
-  }
+  const motif = motifReponse
 
   async function charger() {
     loading = true; error = ''
     try {
       const res = await authFetch('/atelier/dossiers')
-      if (!res.ok) throw new Error(`${res.status}`)
+      if (!res.ok) throw erreurHttp(res)
       dossiers = await res.json()
-    } catch (e) { error = e.message }
+    } catch (e) { error = phraseErreur(e) }
     finally { loading = false }
   }
 
@@ -76,7 +74,7 @@
     if (sale && !confirm('Les modifications non enregistrées seront perdues. Continuer ?')) return
     avis = ''
     const res = await authFetch(`/atelier/dossiers/${slug}`)
-    if (!res.ok) { avis = await motif(res, `Ouverture impossible (${res.status}).`); return }
+    if (!res.ok) { avis = await motif(res, "L'ouverture a échoué"); return }
     ouvert = await res.json()
     texte = lu = ouvert.texte
     note = ouvert.note || ''
@@ -101,7 +99,7 @@
           ? ' Ce dossier était retenu : il ne sortira plus tant qu’un validateur ne l’aura pas relu et retenu de nouveau.'
           : '')
       } else {
-        avis = await motif(res, `L'enregistrement a échoué (${res.status}).`)
+        avis = await motif(res, "L'enregistrement a échoué")
         if (res.status === 409) avis += ' Copiez votre texte avant de recharger le dossier.'
       }
     } finally { occupe = false }
@@ -128,7 +126,7 @@
         await charger()
         if (ouvert) await rouvrir()
       } else {
-        avis = await motif(res, `La décision a échoué (${res.status}).`)
+        avis = await motif(res, 'La décision a échoué')
         if (res.status === 409) await charger()
       }
     } finally { occupe = false }
@@ -146,7 +144,7 @@
         await charger()
         await ouvrir(slug)
       } else {
-        avis = await motif(res, `La création a échoué (${res.status}).`)
+        avis = await motif(res, 'La création a échoué')
       }
     } finally { occupe = false }
   }
@@ -257,7 +255,7 @@
   {/if}
 
   {#if loading}<p class="msg">Chargement…</p>
-  {:else if error}<p class="msg erreur">La liste n'a pas pu être chargée ({error}).</p>
+  {:else if error}<p class="msg erreur">La liste n'a pas pu être chargée. {error}</p>
   {:else}
     {#if !dossiers.length}<p class="msg">Aucun dossier dans <code>dossiers/</code>.</p>{/if}
     <ul class="liens">

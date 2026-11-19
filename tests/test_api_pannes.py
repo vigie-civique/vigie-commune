@@ -31,13 +31,17 @@ def client(tmp_path, monkeypatch, schema_sql):
     conn.close()
     monkeypatch.setattr(api, "DB_PATH", chemin_db)
     monkeypatch.setattr(api_auth, "DB_PATH", chemin_db)
-    monkeypatch.setenv("ADMIN_KEY", "cle-de-test")
+    # Le verrou global et les gardes de route lisent la même valeur, celle du
+    # module, lue au démarrage.
+    monkeypatch.setattr(api, "ADMIN_KEY", "cle-de-test")
 
     @api.app.get(CHEMIN_PANNE)
     def _panne():
         raise OSError(30, "Read-only file system", "/srv/instance/dashboard/static")
 
-    yield TestClient(api.app, raise_server_exceptions=False)
+    # Depuis la boucle locale : la clé de service n'est admise que de là.
+    yield TestClient(api.app, raise_server_exceptions=False,
+                     client=("127.0.0.1", 50000))
     api.app.router.routes[:] = [r for r in api.app.router.routes
                                 if getattr(r, "path", None) != CHEMIN_PANNE]
 
@@ -68,8 +72,37 @@ def test_un_jeton_invalide_reste_refuse_en_401(client):
 
 
 def test_la_cle_admin_fonctionne_toujours(client):
-    r = client.get("/api/stats", headers={"x-admin-key": "cle-de-test"})
+    """Sur la publication. Les lectures lui sont fermées (14/11/2026)."""
+    r = client.get("/api/admin/publication", headers={"x-admin-key": "cle-de-test"})
     assert r.status_code == 200
+    assert client.get("/api/stats", headers={"x-admin-key": "cle-de-test"}).status_code == 401
+
+
+def test_le_verrou_lit_la_cle_du_module_pas_l_environnement(client, monkeypatch):
+    """Une seule source : la clé lue au démarrage. Une autre valeur posée dans
+    l'environnement après coup n'ouvre rien."""
+    monkeypatch.setenv("ADMIN_KEY", "autre-cle")
+    r = client.get(CHEMIN_PANNE, headers={"x-admin-key": "autre-cle"})
+    assert r.status_code == 401
+
+
+def test_la_cle_admin_est_refusee_hors_de_la_machine(client):
+    """La clé vaut le rôle admin sans compte ni nom. Seule une ligne de nginx,
+    recopiée à la main, l'empêchait d'arriver d'internet (revue du 13/11/2026)."""
+    import api
+    dehors = TestClient(api.app, client=("203.0.113.7", 50000))
+    assert dehors.get("/api/stats", headers={"x-admin-key": "cle-de-test"}).status_code == 403
+    # La réponse ne dit pas si la clé était la bonne.
+    assert dehors.get("/api/stats", headers={"x-admin-key": "fausse"}).status_code == 403
+
+
+def test_la_cle_admin_est_refusee_derriere_un_proxy(client):
+    """Derrière nginx et sans `--proxy-headers`, tout le monde a l'adresse
+    127.0.0.1 : c'est l'en-tête de transfert qui trahit le passage par le proxy."""
+    for en_tete in ("x-forwarded-for", "x-real-ip"):
+        r = client.get("/api/stats", headers={"x-admin-key": "cle-de-test",
+                                              en_tete: "203.0.113.7"})
+        assert r.status_code == 403, en_tete
 
 
 def test_une_base_des_comptes_illisible_est_une_panne_pas_un_refus(client, monkeypatch):

@@ -20,15 +20,8 @@ export const VERDICTS = [
 ]
 export const VERDICT = Object.fromEntries(VERDICTS.map(v => [v.cle, v]))
 
-export const FIABILITE = {
-  verified: 'Sûre', confirmed: 'Confirmée', probable: 'Probable', hypothesis: 'Hypothèse',
-}
-export const FIABILITE_AIDE = {
-  verified: 'Source officielle, écrite par un collecteur — pas encore relue par un humain',
-  confirmed: 'Recoupée ou saisie avec sa source',
-  probable: 'Déduite par croisement : ne sort pas sur le site',
-  hypothesis: 'Supposée — à vérifier : ne sort pas sur le site',
-}
+// Fiabilité : les mots vivent dans libelles.js, seul endroit où ils s'écrivent.
+export { FIABILITE, FIABILITE_AIDE } from './libelles.js'
 
 export const ORIGINES = {
   institutionnel: 'Registre officiel',

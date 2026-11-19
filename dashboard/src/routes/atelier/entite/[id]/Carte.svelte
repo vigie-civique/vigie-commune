@@ -27,11 +27,11 @@
       {#if modifiee}<span class="tag-attente">nouvelle position, à enregistrer</span>{/if}
       <a class="coords-osm-link" target="_blank" rel="noopener"
          href={`https://www.openstreetmap.org/?mlat=${form.lat}&mlon=${form.lng}#map=17/${form.lat}/${form.lng}`}>
-        Voir sur OSM ↗
+        Voir sur OpenStreetMap ↗
       </a>
     </div>
   {:else}
-    <p class="muted coords-hint">Aucune coordonnée. Saisir lat/lng ci-dessus ou cliquer sur la carte.</p>
+    <p class="muted coords-hint">Aucune position. Saisissez la latitude et la longitude ci-dessus, ou cliquez sur la carte.</p>
   {/if}
   {#key version}
     <MapEdit

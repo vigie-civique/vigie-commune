@@ -27,3 +27,14 @@ Mme Lou SALOMBE demeurant 5 rue des Lilas, 81100 Castres, sollicite | 5 rue ; Li
 Lou SALOMBE, demeurant à Testonville,\n12 bis chemin du Moulin, sollicite | chemin ; Moulin
 M. Paul DUPONT, résidant actuellement dans la commune au 14 impasse des Merles | 14 impasse ; Merles
 M. Paul DUPONT domicilié à testonville, 5 rue des Lilas | 5 rue ; Lilas
+M. Paul DUPONT, artisan, et Madame Lou SALOMBE, infirmière, son épouse, demeurant\nau moment de la transaction à Testonville (99001} aux termes d'un acte | Testonville ; 99001
+Madame Lou SALOMBE, son épouse, domiciliée lors de la vente à Testonville (99001), a cédé | Testonville ; 99001
+
+# ── adresse du bien aidé (façades, relevé le 14/11/2026 sur les extraits servis) ──
+M. et Mme SALOMBE sollicitent une aide à la rénovation de façades pour le 220 route vieille à 479 € | 220 ; route vieille
+DECIDE d'octroyer la somme de 479 € dans le cadre de l'aide à la rénovation des façades du 220 route vieille, aide régie par délibération | 220 ; route vieille
+SALOMBE Lou – 162 chemin du Pigeonnier\nMonsieur le Maire fait part de la demande d'aide à la rénovation des façades pour le 162 chemin du\nPigeonnier dont le montant | 162 ; Pigeonnier
+Façade 18 chemin de la Fontfictive\nUne délibération avait octroyé une aide financière pour la rénovation de la façade de Mme Lou SALOMBE, 18 chemin de la\nFontfictive. | 18 ; Fontfictive
+demande de M. Paul DUPONT, qui sollicite une aide à la rénovation pour la rénovation de la façade située 35 rue Fictive\nà Testonville. | 35 ; rue Fictive
+sollicite une aide à la rénovation de façades pour le 256\nCamp de Fiction dont le montant, après étude, pourrait s'élever à 819.80 € | 256 ; Camp de Fiction
+SCI DUPONT SALOMBE, 162 chemin du Pigeonnier\nMonsieur le Maire fait part de la demande d'aide à la rénovation de façades | 162 ; Pigeonnier

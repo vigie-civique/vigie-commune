@@ -203,8 +203,16 @@ class TestRelation:
         assert r.status_code == 200, r.text
         assert self._type(atelier, rid) == "président"
 
-    def test_une_relation_non_publiee_se_modifie(self, atelier):
+    def test_une_relation_non_publiee_se_modifie_par_qui_l_a_posee(self, atelier):
+        """Collectée (aucune création au journal), elle ne se modifie plus par un
+        contributeur depuis l'audit du 15/11/2026 ; posée par lui, si."""
         c, rid = atelier["client"], self._relation(atelier, "probable")
+        r = c.put(f"/api/atelier/relations/{rid}", headers=atelier["contrib"],
+                  json={"relation_type": "président"})
+        assert r.status_code == 403
+        atelier["sql"]("INSERT INTO audit_log(user_id, table_name, action, field, new_value) "
+                       "SELECT id, 'relations', 'create', 'relation_id', ? FROM users "
+                       "WHERE role='contributor'", (str(rid),))
         r = c.put(f"/api/atelier/relations/{rid}", headers=atelier["contrib"],
                   json={"relation_type": "président"})
         assert r.status_code == 200, r.text
@@ -323,3 +331,60 @@ class TestJournal:
         vu = c.get("/api/atelier/journal", headers=admin).json()
         assert {l["quoi"] for l in vu["lignes"]} == {"entities", "users"}
         assert "users" in vu["tables"]
+
+
+class TestFilePaginee:
+    """La file se lit page par page : bornée, totalisée, l'acte le plus récent d'abord."""
+
+    @staticmethod
+    def _semer(atelier):
+        sql = atelier["sql"]
+        sql("INSERT INTO propositions(nature, object_type, object_id, charge, etat) "
+            "VALUES('fiche','entity',1,'{\"name\":\"a\"}','en_attente')")
+        dates = ["2016-03-01", "2025-06-10", "2021-01-05", None, "2025-06-10"]
+        for i, d in enumerate(dates):
+            _, ev = sql("INSERT INTO events(type, date, title) VALUES('deliberation', ?, ?)",
+                        (d, f"acte {i}"))
+            sql("INSERT INTO propositions(nature, object_type, object_id, charge, etat) "
+                "VALUES('marche','marche',?, '{}', 'en_attente')", (ev,))
+        sql("INSERT INTO propositions(nature, object_type, object_id, charge, etat) "
+            "VALUES('fiche','entity',2,'{\"name\":\"b\"}','en_attente')")
+
+    def _page(self, atelier, **q):
+        qs = "&".join(f"{k}={v}" for k in q for v in [q[k]])
+        r = atelier["client"].get(f"/api/atelier/propositions?{qs}", headers=atelier["valid"])
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def test_ordre_contributeurs_puis_actes_recents_d_abord(self, atelier):
+        self._semer(atelier)
+        d = self._page(atelier)
+        assert d["total"] == 7
+        assert [p["nature"] for p in d["propositions"]] == ["fiche", "fiche"] + ["marche"] * 5
+        dates = [(p["acte"] or {}).get("date") for p in d["propositions"][2:]]
+        # Récent d'abord, à égalité l'identifiant ; l'acte sans date en dernier.
+        assert dates == ["2025-06-10", "2025-06-10", "2021-01-05", "2016-03-01", None]
+        ids = [p["id"] for p in d["propositions"][2:4]]
+        assert ids == sorted(ids)
+
+    def test_pages_disjointes_et_complete(self, atelier):
+        self._semer(atelier)
+        tout = [p["id"] for p in self._page(atelier)["propositions"]]
+        p1 = self._page(atelier, limit=3, offset=0)
+        p2 = self._page(atelier, limit=3, offset=3)
+        p3 = self._page(atelier, limit=3, offset=6)
+        assert [len(x["propositions"]) for x in (p1, p2, p3)] == [3, 3, 1]
+        assert {x["total"] for x in (p1, p2, p3)} == {7}
+        assert [p["id"] for x in (p1, p2, p3) for p in x["propositions"]] == tout
+        assert self._page(atelier, limit=3, offset=50)["propositions"] == []
+
+    def test_taille_bornee(self, atelier):
+        c, h = atelier["client"], atelier["valid"]
+        for q in ("limit=0", "limit=101", "offset=-1"):
+            assert c.get(f"/api/atelier/propositions?{q}", headers=h).status_code == 422
+        assert self._page(atelier)["limit"] == 50
+
+    def test_le_contributeur_ne_compte_que_les_siennes(self, atelier):
+        self._semer(atelier)
+        r = atelier["client"].get("/api/atelier/propositions", headers=atelier["contrib"]).json()
+        assert r["total"] == 0 and r["propositions"] == []

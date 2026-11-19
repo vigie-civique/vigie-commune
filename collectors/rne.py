@@ -44,6 +44,7 @@ import urllib.request
 from datetime import date, datetime
 from pathlib import Path
 
+from . import mesure
 from .archive import archive_fetch
 from .config import (COMMUNES, COMMUNES_INSEE, EPCI_COMMUNES, EPCI_NOM,
                      EPCI_SIREN, HEADERS, ROOT)
@@ -166,9 +167,14 @@ def fetch_rows(mandat: str, insee_list: list[str]) -> tuple[list[dict], str | No
                 f"colonne « {colonne} » absente — le schéma RNE a changé. "
                 f"Colonnes : {reader.fieldnames}")
         retenus = spec.get("siren") or cible
+        lues = 0
         for row in reader:
+            lues += 1
             if (row.get(colonne) or "").strip() in retenus:
                 gardes.append(row)
+    # Le fichier national, avant le filtre : un renouvellement de mandats le
+    # fait bouger, pas d'un cinquième.
+    mesure.lu(f"rne-{mandat}", lues, reader.fieldnames, complete=True)
 
     if gardes:
         buf = io.StringIO()

@@ -20,10 +20,12 @@
 //      embarqué dans l'archive, lui, rattrapait les adresses absolues à la
 //      volée : l'éprouver LUI aurait déclaré sain un dossier qui ne l'est que
 //      chez lui.
-//   2. ouvert en `file://` par un double-clic. Aucun module ES ne s'y charge —
-//      c'est une contrainte du navigateur, pas un défaut à corriger — mais les
-//      pages doivent s'afficher et leurs liens désigner des fichiers qui
-//      existent.
+//   2. ouvert en `file://` par un double-clic — le geste du lecteur qui n'ira
+//      ni débloquer un lanceur, ni ouvrir un terminal. Le navigateur y refuse
+//      tout module ES et tout `fetch` ; `scripts/pour_le_double_clic.mjs` les
+//      remplace par des scripts ordinaires (01/11/2026). Le site doit donc s'y
+//      HYDRATER, son sélecteur répondre, et ses fichiers chargés à la demande
+//      (recherche, carte) arriver — plus seulement s'afficher.
 //
 // Usage : node scripts/verifier_hors_ligne.mjs <répertoire du dossier>
 import { createServer } from 'node:http'
@@ -31,7 +33,7 @@ import { spawn } from 'node:child_process'
 import { createReadStream, existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { join, extname, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const BUILD = resolve(process.argv[2] || process.env.VIGIE_BUILD_DIR || 'build')
 
@@ -167,8 +169,9 @@ async function ouvrirNavigateur(url) {
       // du DOM ; Svelte 5 la laisse, et l'attendre bloquait dix secondes.)
       for (let essai = 0; essai < 40; essai++) {
         await new Promise((r) => setTimeout(r, 250))
+        // Kit 2 écrit `sveltekit:history`, Kit 3 `sveltekit:metadata`.
         const pret = await this.evaluer('document.readyState === "complete" && '
-          + 'Boolean(history.state?.["sveltekit:history"])')
+          + 'Boolean(history.state?.["sveltekit:history"] || history.state?.["sveltekit:metadata"])')
         if (pret) break
       }
       await new Promise((r) => setTimeout(r, 400))
@@ -242,10 +245,18 @@ async function eprouverServi(nav, base) {
     // ne démarre qu'une fois la page hydratée, et il annule — d'un geste
     // synchrone — le clic sur un lien interne pour naviguer lui-même. Un clic
     // que personne n'annule, c'est une page qui s'affiche et ne répond à rien.
+    // Le dossier remis porte `data-sveltekit-reload` sur son <body> (posé par
+    // offline_export.py, pour que chaque page se recharge en entier sous
+    // file://) : le routeur laisse alors passer TOUS les clics, hydraté ou non.
+    // On retire la marque dans la page éprouvée, en mémoire seulement, pour que
+    // le clic dise si le routeur est attaché. Le 25/10/2026, sans cela, quatre
+    // demandes de dossier ont échoué sur un site pourtant vivant.
     // EN DERNIER : le clic lance une navigation, la page change après lui.
     // (L'ancien signe, l'amorce `__sveltekit` disparue du DOM, ne valait que
     // sous Svelte 4 : Svelte 5 la laisse en place, hydraté ou non.)
     const routeur = await nav.evaluer(`(() => {
+      document.querySelectorAll('[data-sveltekit-reload]')
+        .forEach((e) => e.removeAttribute('data-sveltekit-reload'))
       const a = [...document.querySelectorAll('a[href]')].find((a) => {
         const u = new URL(a.getAttribute('href'), location.href)
         return u.origin === location.origin && u.pathname !== location.pathname
@@ -265,14 +276,17 @@ async function eprouverServi(nav, base) {
   }
 }
 
-async function eprouverSelecteur(nav, base) {
+async function eprouverSelecteur(nav, base, adresse = base + '/budgets') {
   console.log('\n▸ Le sélecteur d\'exercice du budget répond')
-  const reponse = await fetch(base + '/budgets', { redirect: 'follow' })
-  if (!reponse.ok) {
-    dire(`page introuvable (${reponse.status}) — déjà signalé plus haut`)
-    return
+  if (adresse.startsWith('http')) {
+    const reponse = await fetch(adresse, { redirect: 'follow' })
+    if (!reponse.ok) {
+      dire(`page introuvable (${reponse.status}) — déjà signalé plus haut`)
+      return
+    }
   }
-  await nav.aller(base + '/budgets')
+  await nav.aller(adresse)
+  const ou = adresse.startsWith('http') ? '/budgets' : 'file:// /budgets'
   const annees = await nav.evaluer(
     'JSON.stringify([...document.querySelectorAll("select option")].map(o => o.value))')
   const liste = JSON.parse(annees || '[]')
@@ -292,31 +306,77 @@ async function eprouverSelecteur(nav, base) {
   const apres = await lire()
   const retenu = await nav.evaluer('document.querySelector("select").value')
   if (retenu !== liste[liste.length - 1]) {
-    problemes.push(`/budgets : le sélecteur n'a pas retenu l'exercice ${liste[liste.length - 1]}`)
+    problemes.push(`${ou} : le sélecteur n'a pas retenu l'exercice ${liste[liste.length - 1]}`)
   } else if (avant === apres) {
     problemes.push(
-      `/budgets : changer d'exercice (${liste[0]} → ${liste[liste.length - 1]}) `
+      `${ou} : changer d'exercice (${liste[0]} → ${liste[liste.length - 1]}) `
       + "n'a RIEN changé à l'affichage — la page est inerte")
   } else {
     dire(`${liste[0]} → ${liste[liste.length - 1]} : l'affichage suit`)
   }
 }
 
+const pageFichier = (route) => pathToFileURL(join(BUILD, route, 'index.html')).href
+
+/** Les fichiers chargés à la demande que la page a reçus par leur jumeau `.js`. */
+const recus = (nav) => nav.evaluer('JSON.stringify(Object.keys(window.__vigie_fichiers || {}))')
+  .then((v) => JSON.parse(v || '[]'))
+
 async function eprouverFichier(nav) {
   console.log('\n▸ Ouvert en file:// par un double-clic')
-  // Les chemins relatifs sont posés par `prepare_offline_export`, qui vit dans
-  // le dépôt du portail. Un build brut du moteur n'est pas encore une archive
-  // remise : on le DIT, plutôt que de compter des liens absolus comme un défaut
-  // de ce build — ou, pire, de rendre un « ✓ » sur une épreuve qui n'a pas eu
-  // lieu.
-  if (!existsSync(join(BUILD, 'servir-le-dossier.py'))) {
-    dire('build brut, non passé par prepare_offline_export — condition non éprouvée')
-    nonEprouve.push('la lecture en file:// (build non mis en forme d\'archive)')
+
+  // 1. Chaque page s'hydrate : c'est tout ce que le lanceur apportait.
+  for (const page of PAGES) {
+    const route = page.replace(/^\//, '')
+    if (!existsSync(join(BUILD, route, 'index.html'))) continue
+    await nav.aller(pageFichier(route))
+    for (const e of nav.erreurs) {
+      problemes.push(`file:// ${page} : erreur console — ${String(e).slice(0, 200)}`)
+    }
+    const hydrate = await nav.evaluer('Boolean(history.state?.["sveltekit:history"] '
+      + '|| history.state?.["sveltekit:metadata"])')
+    if (!hydrate) {
+      problemes.push(`file:// ${page} : la page ne s'hydrate pas — rien n'y répond au double-clic`)
+    }
+    dire(`${page} — ${hydrate ? 'hydratée' : 'INERTE'}`)
+  }
+
+  // 2. Le sélecteur, comme servi.
+  if (existsSync(join(BUILD, 'budgets', 'index.html'))) {
+    await eprouverSelecteur(nav, null, pageFichier('budgets'))
+  }
+
+  // 3. Les fichiers chargés à la demande arrivent par leur jumeau, sans fetch.
+  if (existsSync(join(BUILD, 'recherche', 'index.html'))) {
+    await nav.aller(pageFichier('recherche'))
+    await nav.evaluer(`{const c = document.querySelector('main input');
+      if (c) { c.value = 'budget'; c.dispatchEvent(new Event('input', { bubbles: true })) }}`)
+    await new Promise((r) => setTimeout(r, 1200))
+    const r = await recus(nav)
+    if (!r.includes('data/recherche_index.json')) {
+      problemes.push('file:// /recherche : l\'index de recherche n\'arrive pas')
+    }
+    dire(`/recherche — index ${r.includes('data/recherche_index.json') ? 'reçu' : 'ABSENT'}`)
+  }
+  if (existsSync(join(BUILD, 'data', 'layers'))) {
+    await nav.aller(pageFichier('carte'))
+    await new Promise((r) => setTimeout(r, 1500))
+    const r = (await recus(nav)).filter((c) => c.startsWith('data/layers/'))
+    if (!r.length) problemes.push('file:// /carte : aucune couche de repères n\'arrive')
+    dire(`/carte — ${r.length} couche(s) de repères reçue(s)`)
+  }
+
+  // 4. Les liens. Ils ne deviennent relatifs qu'au passage par
+  // `prepare_offline_export`, qui vit dans le dépôt du portail et marque
+  // chaque <body> de `data-sveltekit-reload`. Sur un build brut, on le DIT
+  // plutôt que de compter des liens absolus comme un défaut de ce build.
+  await nav.aller(pathToFileURL(join(BUILD, 'index.html')).href)
+  const archive = await nav.evaluer('document.body.hasAttribute("data-sveltekit-reload")')
+  if (!archive) {
+    dire('build brut, non passé par prepare_offline_export — liens non éprouvés')
+    nonEprouve.push('les liens en file:// (build non mis en forme d\'archive)')
     return
   }
-  // `index.html` et non `/` : c'est le fichier sur lequel le lecteur clique.
-  const url = pathToFileURL(join(BUILD, 'index.html')).href
-  await nav.aller(url)
   const rendu = await nav.evaluer('document.body.innerText.length')
   if (!rendu || rendu < 500) {
     problemes.push('file:// : la page d\'accueil ne montre presque rien')
@@ -335,7 +395,17 @@ async function eprouverFichier(nav) {
   }
   let morts = 0
   for (const h of relatifs.filter((x) => !x.startsWith('/'))) {
-    const cible = resolve(BUILD, decodeURIComponent(h.split('#')[0].split('?')[0]))
+    // Les liens absolus du site arrivent réécrits en `file:///…/index.html` par
+    // la cale du double-clic : ils doivent rester DANS le dossier.
+    const nu = h.split('#')[0].split('?')[0]
+    const cible = nu.startsWith('file:')
+      ? fileURLToPath(nu)
+      : resolve(BUILD, decodeURIComponent(nu))
+    if (cible !== BUILD && !cible.startsWith(BUILD + sep)) {
+      morts++
+      problemes.push(`file:// : lien qui sort du dossier — ${h}`)
+      continue
+    }
     const existe = existsSync(cible)
       && (statSync(cible).isFile() || existsSync(join(cible, 'index.html')))
     if (!existe) { morts++; problemes.push(`file:// : lien vers un fichier absent — ${h}`) }
@@ -374,7 +444,7 @@ async function principal() {
   }
   console.log('\n✓ Le dossier tient servi par n\'importe quel serveur statique.')
   if (nonEprouve.length) {
-    console.log('  Non éprouvé ici : ' + nonEprouve.join(' ; ') + '.')
+    console.log('  Non éprouvé ici : ' + [...new Set(nonEprouve)].join(' ; ') + '.')
   } else {
     console.log('  Et il se lit au double-clic.')
   }

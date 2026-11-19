@@ -16,7 +16,14 @@ const lire = (nom) => {
 export function load() {
   const d = lire('elections.json')
   const resultats = d.resultats || []
-  const listes = d.listes || []
+  // Seuls les champs que la page affiche partent dans le HTML pré-rendu et
+  // son __data.json : une colonne ajoutée au snapshot ne sort pas ici sans
+  // qu'on l'ait voulu (la nuance politique en est sortie jusqu'au 17/11/2026).
+  const listes = (d.listes || []).map((l) => ({
+    scrutin: l.scrutin, tour: l.tour, insee: l.insee, rang: l.rang,
+    libelle: l.libelle, libelle_abrege: l.libelle_abrege, voix: l.voix,
+    pct_exprimes: l.pct_exprimes, sieges_cm: l.sieges_cm, sieges_cc: l.sieges_cc,
+  }))
 
   // Communes de l'intercommunalité absentes des fichiers nationaux. Il y en a
   // toujours : un conseil élu hors des dates des scrutins généraux (démission

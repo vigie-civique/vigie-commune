@@ -18,6 +18,7 @@
   import { LIBELLE_ROLE, auMoins, messageErreur } from '#lib/roles.js'
   import { heureLocale } from '#lib/heure.js'
   import { LIBELLES } from '#lib/champs.js'
+  import { FIABILITE } from '#lib/libelles.js'
 
   const LIBELLE_ETAPE = {
     aucun_apercu:        { texte: 'Aucun aperçu',        ton: 'neutre' },
@@ -510,12 +511,12 @@
         {#if !aRelire.propositions.length}
           <p class="vide">Aucune proposition en attente.</p>
         {:else}
-          <div class="table"><table>
+          <div class="table"><table class="cartes">
             <thead><tr><th>Quoi</th><th>Qui</th><th>Quand</th><th>Pourquoi</th><th></th></tr></thead>
             <tbody>
               {#each aRelire.propositions as p (p.id)}
                 <tr>
-                  <td>
+                  <td data-label="Quoi">
                     <span class="nature">{NATURE[p.nature] ?? p.nature}</span>
                     {#if p.entity_id}{' '}
                       <a class="lien" href="/atelier/entite/{p.entity_id}">{p.fiche ?? `fiche ${p.entity_id}`}</a>
@@ -529,10 +530,10 @@
                       </div>
                     {/each}
                   </td>
-                  <td>{p.propose_par ?? '—'}</td>
-                  <td class="quand">{heureLocale(p.propose_le)}</td>
-                  <td><input bind:value={pourquoi[`p${p.id}`]} placeholder="Motif (requis pour écarter)" /></td>
-                  <td class="gestes-ligne">
+                  <td data-label="Qui">{p.propose_par ?? '—'}</td>
+                  <td class="quand" data-label="Quand">{heureLocale(p.propose_le)}</td>
+                  <td data-label="Pourquoi"><input bind:value={pourquoi[`p${p.id}`]} placeholder="Motif (requis pour écarter)" /></td>
+                  <td class="gestes-ligne" data-label="">
                     <button class="valider" on:click={() => trancherProposition(p, true)} disabled={tranche}>Valider</button>
                     <button class="ecarter" on:click={() => trancherProposition(p, false)} disabled={tranche}>Écarter</button>
                   </td>
@@ -557,12 +558,12 @@
         {#if !lignes.length}
           <p class="vide">{onglet === 'contributions' ? 'Aucune fiche modifiée.' : 'Aucune fiche nouvelle.'}</p>
         {:else}
-          <div class="table"><table>
+          <div class="table"><table class="cartes">
             <thead><tr><th>Quoi</th><th>Qui</th><th>Quand</th><th>Pourquoi</th><th></th></tr></thead>
             <tbody>
               {#each lignes as l (l.id)}
                 <tr>
-                  <td>
+                  <td data-label="Quoi">
                     <a class="lien" href="/atelier/entite/{l.id}">{l.name}</a>
                     <span class="tag {VERDICT[l.verdict]?.ton ?? 'neutre'}">{VERDICT[l.verdict]?.texte ?? l.verdict}</span>
                     {#if l.champs}<div class="change muted">{fmt(l.modifications)} écriture(s) : {champs(l.champs)}</div>{/if}
@@ -572,10 +573,10 @@
                       <span class="muted">absente de l’aperçu</span>
                     {' '}{/if}
                   </td>
-                  <td>{l.par ?? ORIGINE[l.origine] ?? 'collecte'}</td>
-                  <td class="quand">{heureLocale(l.derniere)}</td>
-                  <td><input bind:value={pourquoi[`f${l.id}`]} placeholder="Note de décision" /></td>
-                  <td class="gestes-ligne">
+                  <td data-label="Qui">{l.par ?? ORIGINE[l.origine] ?? 'collecte'}</td>
+                  <td class="quand" data-label="Quand">{heureLocale(l.derniere)}</td>
+                  <td data-label="Pourquoi"><input bind:value={pourquoi[`f${l.id}`]} placeholder="Note de décision" /></td>
+                  <td class="gestes-ligne" data-label="">
                     <button class="valider" on:click={() => trancherFiche(l, 'retenu')}
                             disabled={tranche || (l.verdict === 'retenu' && (pourquoi[`f${l.id}`] || '') === (l.note || ''))}>Valider</button>
                     <button class="ecarter" on:click={() => trancherFiche(l, 'ecarte')}
@@ -673,7 +674,7 @@
         </div>
         <div class="metric">
           <span>{fmt(brouillon.stats?.map_features_public)}</span><small>points carte</small>
-          <em>{fmt(brouillon.stats?.urls_public_confirmed)} URLs confirmées</em>
+          <em>{fmt(brouillon.stats?.urls_public_confirmed)} adresses de sites confirmées</em>
         </div>
       </div>
 
@@ -801,10 +802,10 @@
   <details class="carte regles">
     <summary><h2>Règles de publication actives</h2></summary>
     <div class="puces">
-      <span>confiance : {(etat.rules?.public_confidence || []).join(', ') || '—'}</span>
-      <span>relations : {(etat.rules?.public_relation_types || []).length}</span>
-      <span>rôles personnes : {(etat.rules?.public_person_relation_types || []).length}</span>
-      <span>sources événements : {(etat.rules?.public_event_sources || []).join(', ') || '—'}</span>
+      <span>fiabilités publiées : {(etat.rules?.public_confidence || []).map(c => FIABILITE[c] ?? c).join(', ') || '—'}</span>
+      <span>types de relations publiés : {(etat.rules?.public_relation_types || []).length}</span>
+      <span>rôles publiés pour une personne : {(etat.rules?.public_person_relation_types || []).length}</span>
+      <span>sources d'événements : {(etat.rules?.public_event_sources || []).join(', ') || '—'}</span>
       <span>règles : <code>{etat.rules_path}</code></span>
     </div>
   </details>
@@ -880,7 +881,7 @@
           {/if}
           {#if rapport.sans_objet?.length}
             <p class="muted">{rapport.sans_objet.length} objet(s) connu(s), mais aucune
-              piste à arbitrer ici : un <code>run_all</code> la produira peut-être.</p>
+              piste à arbitrer ici : une nouvelle collecte la produira peut-être.</p>
           {/if}
         {/if}
       </div>
@@ -1165,5 +1166,15 @@
   }
   @media (max-width: 520px) {
     .gestes { grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 900px) {
+    .table table, .table tbody, .table tr, .table td { display: block; width: 100%; }
+    .table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    .table tr { border-bottom: 1px solid var(--bordure); padding: .5rem .2rem; }
+    .table td { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; padding: .2rem 0; border: none; }
+    .table td[data-label]::before { content: attr(data-label); flex: 0 0 4.5rem; font-size: .7rem; text-transform: uppercase; color: var(--texte-doux); }
+    .table td[data-label=""]::before { display: none; }
+    .table td input { width: 100%; box-sizing: border-box; }
   }
 </style>

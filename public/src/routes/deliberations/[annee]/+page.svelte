@@ -1,6 +1,8 @@
 <script>
   import { COMMUNE_A, SITE_NOM } from '#lib/instance.js'
   import { euros } from '#lib/data.js'
+  import { chargerJSON } from '#lib/charger.js'
+  import { contientLesMots } from '#lib/recherche.js'
   import { INSTITUTIONAL, ancreActe, instanceDe, libelleAnnee } from '#lib/actes.js'
   import { axesDe } from '#lib/provenance.js'
   import { onMount } from 'svelte'
@@ -8,7 +10,12 @@
   // Rendu au build par +page.server.js : les actes du millésime sont déjà
   // dans le HTML.
   export let data
-  $: ({ annee, items, nCM, nCC, precedente, suivante, annees, alias } = data)
+  $: ({ annee, items, decisions, seances, nCM, nCC, precedente, suivante, annees, alias } = data)
+
+  // La description ne nomme que ce que l'année contient.
+  $: nDelib = items.length - seances - decisions
+  $: contenu = [nDelib && 'délibérations', seances && 'séances', decisions && 'décisions par délégation']
+    .filter(Boolean).join(', ').replace(/, ([^,]*)$/, ' et $1')
 
   let q = '', instance = 'all'
 
@@ -21,9 +28,8 @@
     if (!ev.currentTarget.open || etat === 'pret' || etat === 'charge') return
     extraits = { ...extraits, [id]: { etat: 'charge' } }
     try {
-      const r = await fetch(`/data/extrait/${id}.json`)
-      if (!r.ok) throw new Error(String(r.status))
-      extraits = { ...extraits, [id]: { etat: 'pret', texte: (await r.json()).texte } }
+      const { texte } = await chargerJSON(`data/extrait/${id}.json`)
+      extraits = { ...extraits, [id]: { etat: 'pret', texte } }
     } catch {
       extraits = { ...extraits, [id]: { etat: 'erreur' } }
     }
@@ -36,7 +42,9 @@
     // clé datée de l'acte, que le lecteur pourra recopier sans qu'elle casse.
     const demande = decodeURIComponent(location.hash.slice(1))
     if (alias?.[demande]) history.replaceState(null, '', `#${alias[demande]}`)
-    const cible = location.hash && document.getElementById(decodeURIComponent(location.hash.slice(1)))
+    // `&&` rendait `''` sans ancre, et `''?.scrollIntoView()` lève : l'erreur
+    // tombait à chaque ouverture d'un millésime par son lien nu.
+    const cible = location.hash ? document.getElementById(decodeURIComponent(location.hash.slice(1))) : null
     cible?.scrollIntoView()
     const volet = cible?.querySelector('details.extrait')
     if (volet) volet.open = true
@@ -53,7 +61,7 @@
     : "PDF de l'acte"
   $: filtered = items
     .filter((e) => instance === 'all' || inst(e) === instance)
-    .filter((e) => !q || (e.title || '').toLowerCase().includes(q.toLowerCase()))
+    .filter((e) => contientLesMots(e.title, q))
 
   const fmtDate = (d) => {
     if (!d) return '-'
@@ -63,15 +71,15 @@
 </script>
 
 <svelte:head>
-  <title>Délibérations {libelleAnnee(annee)} - {SITE_NOM}</title>
-  <meta name="description" content="Les {items.length} actes officiels de {libelleAnnee(annee)} {COMMUNE_A} et dans son intercommunalité : délibérations du conseil municipal, procès-verbaux communautaires, votes et montants." />
+  <title>Délibérations des conseils {libelleAnnee(annee)} - {SITE_NOM}</title>
+  <meta name="description" content="Les {items.length} entrées de {libelleAnnee(annee)} {COMMUNE_A} : {contenu}." />
 </svelte:head>
 
 <section>
-  <p class="fil"><a href="/deliberations">Délibérations &amp; actes officiels</a> › {libelleAnnee(annee)}</p>
-  <h1>Actes de {libelleAnnee(annee)}</h1>
+  <p class="fil"><a href="/deliberations">Délibérations des conseils</a> › {libelleAnnee(annee)}</p>
+  <h1>Délibérations des conseils en {libelleAnnee(annee)}</h1>
   <p class="sub">
-    {items.length} acte{items.length > 1 ? 's' : ''} · {nCM} du conseil municipal ·
+    {items.length} entrée{items.length > 1 ? 's' : ''} · {nCM} du conseil municipal ·
     {nCC} de l'intercommunalité
   </p>
 
@@ -122,6 +130,9 @@
           {' '}{/if}
           {#if e.source_url}<a href={e.source_url} target="_blank" rel="noopener">{libelleDoc(e, e.source_url)}<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}
           {#if e.pdf_url && e.pdf_url !== e.source_url}<a href={e.pdf_url} target="_blank" rel="noopener">{libelleDoc(e, e.pdf_url)}<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (nouvelle fenêtre)</span></a>{/if}
+          <!-- Le portail d'actes retire la pièce après l'affichage légal : on le
+               dit plutôt que de servir un lien mort (collectors/decisions.py). -->
+          {#if e.piece_retiree}<span class="retiree">pièce retirée du portail après son affichage légal</span>{/if}
         </span>
 
         <!-- Les trois axes portés par l'acte lui-même, pas renvoyés dans une
@@ -186,15 +197,15 @@
 
   .annees { display: flex; flex-wrap: wrap; gap: .35rem; margin-bottom: 1.25rem; }
   .annees a { font-size: .82rem; padding: .25rem .6rem; border: 1px solid var(--trait);
-              border-radius: 99px; color: var(--gris); background: #fff; text-decoration: none; }
-  .annees a.on { background: var(--ardoise); border-color: var(--ardoise); color: #fff; font-weight: 600; }
+              border-radius: 99px; color: var(--gris); background: var(--carte); text-decoration: none; }
+  .annees a.on { background: var(--ardoise); border-color: var(--ardoise); color: var(--papier); font-weight: 600; }
 
   .filters { display: flex; gap: .75rem; align-items: center; margin-bottom: 1.25rem; flex-wrap: wrap; }
   input { flex: 1; min-width: 200px; padding: .5rem .7rem; border: 1px solid var(--trait); border-radius: 6px; }
   .seg { display: inline-flex; border: 1px solid var(--trait); border-radius: 6px; overflow: hidden; }
-  .seg button { padding: .45rem .8rem; font-size: .85rem; background: #fff; color: var(--gris); border: none; border-left: 1px solid var(--trait); }
+  .seg button { padding: .45rem .8rem; font-size: .85rem; background: var(--carte); color: var(--gris); border: none; border-left: 1px solid var(--trait); }
   .seg button:first-child { border-left: none; }
-  .seg button.on { background: var(--ardoise); color: #fff; }
+  .seg button.on { background: var(--ardoise); color: var(--papier); }
   .count { color: var(--gris); font-size: .85rem; }
 
   .list { list-style: none; padding: 0; margin: 0; }
@@ -218,6 +229,7 @@
   @media (max-width: 680px) { .axes { grid-column: 1; } }
 
   .extrait { grid-column: 3 / -1; margin-top: .3rem; }
+  .retiree { font-size: .72rem; color: var(--gris); }
   .cite { grid-column: 3 / -1; margin: .2rem 0 0; font-size: .78rem; color: var(--gris); }
   .cite a { color: var(--ardoise); }
   .cite .imprecis { color: var(--gris); }
@@ -239,7 +251,7 @@
      en capitales en demande 202 — le libellé recouvrait le titre de l'acte. */
   .badge { font-size: .66rem; font-weight: 700; text-transform: uppercase; letter-spacing: .02em; line-height: 1.3; padding: .12rem .5rem; border-radius: .5rem; align-self: start; justify-self: start; }
   .badge.CM { background: var(--ardoise-pale); color: var(--ardoise-fonce); }
-  .badge.CC { background: #e7f0ea; color: var(--recette); }
+  .badge.CC { background: var(--recette-pale); color: var(--recette); }
   .title { color: var(--encre); font-size: .9rem; }
   .cat { display: inline-block; font-size: .68rem; color: var(--gris); background: var(--trait-pale);
          border-radius: 99px; padding: .05rem .5rem; margin-left: .4rem; white-space: nowrap; }

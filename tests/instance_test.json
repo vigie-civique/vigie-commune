@@ -11,7 +11,7 @@
     "99002": {"nom": "Voisinbourg", "cp": "99000", "population": 400},
     "99003": {"nom": "Les Essarts-d'Épreuve", "cp": "99010", "population": 250}
   },
-  "communes_deleguees": {
+  "anciennes_communes": {
     "99004": {"nom": "Ancienville", "cp": "99000", "population": 0, "commune": "99002"}
   },
   "bruit_pv": ["MOTIF\\s+DE\\s+BRUIT\\s*$"],

@@ -17,6 +17,7 @@ import time
 import urllib.parse
 import urllib.request
 
+from . import debit, mesure
 from .archive import archive_fetch
 from .config import (HEADERS, OVERPASS, REQUEST_DELAY, TERRITOIRE,
                      registre_du_step)
@@ -98,7 +99,9 @@ def _interroger(insee: str, nom: str) -> bytes | None:
     for tentative in range(1, TENTATIVES + 1):
         req = urllib.request.Request(OVERPASS, data=donnees, headers=HEADERS)
         try:
-            with urllib.request.urlopen(req, timeout=200) as r:
+            # Overpass interdit le parallèle par adresse : une génération du
+            # portail et une collecte d'atelier ne l'interrogent pas ensemble.
+            with debit.seul("overpass-api.de"), urllib.request.urlopen(req, timeout=200) as r:
                 return r.read()
         except Exception as e:
             dernier = tentative == TENTATIVES
@@ -186,6 +189,8 @@ def import_osm():
             print(f"  [osm] {commune['nom']:26}    ? non interrogée")
             continue
         print(f"  [osm] {commune['nom']:26} {len(lot):4} POIs")
+        # Neufs ou du cache local : le périmètre entier, sommé.
+        mesure.lu("overpass-pois", len(lot), complete=True)
         features += lot
     print(f"[osm] {len(features)} POIs sur "
           f"{len(communes) - len(echecs)}/{len(communes)} communes")
@@ -259,7 +264,7 @@ def import_osm():
     # réinterroge que celles qui manquent.
     if echecs:
         raise RuntimeError(
-            f"{len(echecs)} commune(s) sur {len(COMMUNES)} non interrogées "
+            f"{len(echecs)} commune(s) sur {len(communes)} non interrogées "
             f"(Overpass limite le débit) : {', '.join(echecs[:6])}"
             + (" …" if len(echecs) > 6 else "")
             + " — relancer le step, le cache évite de refaire le travail fait.")

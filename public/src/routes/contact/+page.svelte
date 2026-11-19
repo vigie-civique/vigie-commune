@@ -37,7 +37,7 @@
 <style>
   section { max-width: 720px; margin: 0 auto; padding: 1.5rem; line-height: 1.6; }
   h1 { color: var(--encre); }
-  .card { background: #fff; border: 1px solid var(--trait); border-radius: 10px; padding: 1.25rem; margin: 1rem 0; }
+  .card { background: var(--carte); border: 1px solid var(--trait); border-radius: 10px; padding: 1.25rem; margin: 1rem 0; }
   .delay { color: var(--gris); }
   .note { color: var(--gris); font-size: .9rem; }
 </style>

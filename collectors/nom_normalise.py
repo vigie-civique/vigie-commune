@@ -183,6 +183,33 @@ def rectifier(texte: str | None) -> str | None:
     return texte
 
 
+def rectifier_nom(nom: str | None, type_: str | None = None) -> str | None:
+    """Applique les rectifications déclarées sur un nom ENTIER (clé `nom`).
+
+    `rectifier` remplace une sous-chaîne : c'est juste pour une lettre doublée
+    dans une adresse, faux pour un nom qu'une saisie écrit autrement que le
+    registre. « Tréteaux Fictifs » → « LES TRÉTEAUX FICTIFS » aurait réécrit la fiche
+    du registre elle-même en « LES LES TRÉTEAUX FICTIFS ». Ici la comparaison porte
+    sur le nom normalisé tout entier, et rien d'autre ne bouge.
+
+    C'est ce qui fait tenir une fusion : à Lasalle, quatre fiches absorbées le
+    24/09/2026 étaient revenues sous d'autres numéros, parce que la saisie qui
+    les nomme les recréait par leur nom à chaque passe.
+
+    Une entrée qui déclare un `type` ne vaut que pour lui : « TRANSMISSION »,
+    l'association, n'a pas à renommer un garage qui s'appellerait ainsi.
+    """
+    if not nom:
+        return nom
+    from .config import RECTIFICATIONS
+    cle = normaliser(nom)
+    for r in RECTIFICATIONS:
+        if (r.get("nom") and r.get("lecture") and normaliser(r["nom"]) == cle
+                and r.get("type") in (None, type_)):
+            return r["lecture"]
+    return nom
+
+
 # ── Encodage abîmé par la source ─────────────────────────────────────────────
 #
 # « L'EUZIAÃÂRE » s'affichait tel quel sur le site public le 23/08/2026, dans le

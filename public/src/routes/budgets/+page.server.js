@@ -17,6 +17,8 @@ export function load() {
     budgetVote: lire('budget_vote.json', {}),
     budget: lire('budget.json', {}),
     ofgl: lire('ofgl.json', { ofgl: [] }),
+    // Commune nouvelle : anciennes communes et comptes des absorbées, à part.
+    avantFusion: lire('avant_fusion.json', {}),
     // Le budget VOTÉ se lit dans les comptes rendus du conseil : un dossier
     // national ne les collecte pas. Sans le dire, la page paraît simplement
     // n'avoir que du réalisé.

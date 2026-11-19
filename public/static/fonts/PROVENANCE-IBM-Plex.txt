@@ -1,0 +1,12 @@
+Provenance des polices IBM Plex servies par le portail
+
+IBM Plex Sans 400 et 600, IBM Plex Mono 400 et 500 : paquets npm @fontsource/ibm-plex-sans
+et @fontsource/ibm-plex-mono, version 5.1.0, sous-ensemble latin, style normal, fichiers
+files/<nom>-normal.woff2 du paquet, renommés sans le suffixe « -normal ».
+Copyright 2018 IBM Corp. Licence SIL Open Font License 1.1 : OFL-IBMPlexSans.txt, OFL-IBMPlexMono.txt.
+
+Empreintes SHA-256, vérifiées le 05/11/2026 contre cdn.jsdelivr.net/npm/@fontsource/ibm-plex-<sans|mono>@5.1.0 :
+3c5a451f9ec27a354b0c2bcca636c6ec17a651281aabf29f8427e210a1d31e85  ibm-plex-mono-latin-400.woff2
+756026ff72eb76fd971ac4b7504cec55eef62109d2684c2cad8da32170b80b37  ibm-plex-mono-latin-500.woff2
+db71f8a28ad8501544fb4e7668e3c6d0b731760b6f20de3525ebaeba597f1922  ibm-plex-sans-latin-400.woff2
+31535a91ce3f6b8ed3ddedadab1e49957e2220263a640df1a3f14f6fdfe15eb6  ibm-plex-sans-latin-600.woff2

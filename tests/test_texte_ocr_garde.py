@@ -33,6 +33,7 @@ def pv(tmp_path, monkeypatch):
         ouverts.append(chemin.name)
         return "TEXTE LU DANS LE PDF OCÉRISÉ" if chemin.name.endswith(".ocr.pdf") else ""
     monkeypatch.setattr(conseils, "texte_pdf", lecture)
+    monkeypatch.setattr(conseils, "pages_pdf", lambda chemin: [lecture(chemin)])
     monkeypatch.setattr(cm_ocr, "_extract_text", lecture)
     # Aucun outil d'OCR sur cette machine : un appel serait une erreur du test.
     monkeypatch.setattr(shutil, "which", lambda nom: None)
@@ -78,7 +79,7 @@ def test_un_texte_vide_ne_se_garde_pas(pv, monkeypatch):
     """Il dirait « déjà lu, rien dedans » d'un document qu'on n'a pas su lire."""
     original, _ = pv
     original.with_suffix(".ocr.pdf").write_bytes(b"%PDF-1.4 ocr")
-    monkeypatch.setattr(conseils, "texte_pdf", lambda chemin: "   \n")
+    monkeypatch.setattr(conseils, "pages_pdf", lambda chemin: ["   \n"])
     conseils.ocr(original)
     assert not original.with_suffix(".ocr.txt").exists()
 
@@ -112,7 +113,7 @@ def test_la_couche_native_revient_en_tete_de_chaque_page(tmp_path, monkeypatch):
 
 def test_un_scan_pur_garde_son_texte_relu(tmp_path, monkeypatch):
     monkeypatch.setattr(conseils, "_pages_natives", lambda c: ["", "\n"])
-    monkeypatch.setattr(conseils, "texte_pdf", lambda c: "RELU")
+    monkeypatch.setattr(conseils, "pages_pdf", lambda c: ["RELU"])
     assert conseils._texte_ocerise(tmp_path / "a.pdf", tmp_path / "a.ocr.pdf") == "RELU"
 
 

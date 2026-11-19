@@ -166,7 +166,7 @@ def test_une_piece_mal_nommee_nest_pas_lue(base, monkeypatch):
     from collectors import conseils
 
     monkeypatch.setattr(conseils, "lire_document",
-                        lambda doc, avec_ocr=False: (PV_DU_3_JUIN * 20, "pdf", False))
+                        lambda doc, avec_ocr=False, budget=None: (PV_DU_3_JUIN * 20, "pdf", False))
     doc = DocumentPublie(date="2026-07-09", url=f"{UP}/2026/07/delibs-09.07.26.pdf",
                          source="cc.exemple.invalid",
                          meta={"depuis_mediatheque": True, "depose_le": "2026-07-23"})

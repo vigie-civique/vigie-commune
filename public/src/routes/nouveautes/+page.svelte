@@ -283,10 +283,10 @@
   .filtres { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
   .filtres button {
     font-size: .8rem; padding: .35rem .7rem; cursor: pointer; color: var(--gris);
-    background: #fff; border: 1px solid var(--trait); border-radius: 999px;
+    background: var(--carte); border: 1px solid var(--trait); border-radius: 999px;
   }
   .filtres button:hover { border-color: var(--trait); }
-  .filtres button.actif { background: var(--ardoise); color: #fff; border-color: var(--ardoise); }
+  .filtres button.actif { background: var(--ardoise); color: var(--papier); border-color: var(--ardoise); }
 
   h2 { font-size: 1rem; margin: 1.75rem 0 .5rem; color: var(--encre);
        display: flex; align-items: baseline; gap: .5rem; text-transform: capitalize; }
@@ -303,7 +303,7 @@
   .avenir .flux { margin-top: .6rem; }
 
   .flux { list-style: none; margin: 0; padding: 0; display: grid; gap: .3rem; }
-  .flux li { display: flex; gap: .8rem; padding: .55rem .7rem; background: #fff;
+  .flux li { display: flex; gap: .8rem; padding: .55rem .7rem; background: var(--carte);
              border: 1px solid var(--ardoise-pale); border-radius: 9px; }
   .flux li.conditionnel { border-style: dashed; border-color: #e2d5b8; }
   .jour { flex: 0 0 1.7rem; text-align: center; font-size: 1rem; font-weight: 700;
@@ -323,10 +323,10 @@
            border-radius: 5px; font-size: .7rem; }
   .statut { padding: .08rem .4rem; border-radius: 5px; font-size: .7rem;
             font-weight: 600; }
-  .corrige { background: #e7f0ea; color: #047857; padding: .08rem .4rem;
+  .corrige { background: var(--recette-pale); color: var(--vert-texte); padding: .08rem .4rem;
              border-radius: 5px; font-size: .7rem; cursor: help; }
   .statut.demande { background: var(--ambre-pale); color: var(--ambre); }
-  .statut.engage { background: #e0e7ff; color: var(--ardoise-fonce); }
+  .statut.engage { background: var(--indigo-pale); color: var(--ardoise-fonce); }
   h1.avec-icone { display: flex; align-items: center; gap: .6rem; }
   h1.avec-icone :global(.icon) { color: var(--ardoise); }
   /* L'ordre du jour d'une séance à venir, lu dans sa convocation. */

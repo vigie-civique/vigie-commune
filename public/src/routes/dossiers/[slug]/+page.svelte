@@ -149,7 +149,7 @@
   .chapeau { font-size: 1.12rem; max-width: 62ch; line-height: 1.55; margin: 0 0 .5rem; }
   .maj { color: var(--gris); font-size: .82rem; margin: 0 0 1.5rem; }
   .vide { border-left: 3px solid var(--trait); padding: .1rem 0 .1rem 1rem; color: var(--gris); }
-  .bandeau { background: #fdebd0; color: #8a4b00; padding: .5rem .8rem; border-radius: .4rem; font-size: .88rem; }
+  .bandeau { background: var(--orange-pale); color: var(--orange); padding: .5rem .8rem; border-radius: .4rem; font-size: .88rem; }
   .perime { margin: 0 0 1rem; }
   .perime p { margin: 0 0 .3rem; }
   .perime ul { margin: 0; padding-left: 1.2rem; }

@@ -13,7 +13,8 @@ export const prerender = true
 
 export function GET() {
   const corps = [
-    '# Ce site a vocation à être trouvé, cité et archivé : tout est indexable.',
+    '# Ce site a vocation à être trouvé, cité et archivé. Le texte cité des',
+    '# délibérations (/data/extrait/) est servi avec un en-tête noindex.',
     'User-agent: *',
     'Allow: /',
     '',

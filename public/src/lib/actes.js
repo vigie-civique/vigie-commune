@@ -24,7 +24,15 @@ export const INSTITUTIONAL = {
   conseil_municipal:     { label: 'Conseil municipal' },
   deliberation_cc:       { label: 'Délibération intercommunale' },
   conseil_communautaire: { label: 'Conseil communautaire' },
+  // Prises seules par le maire, le président ou le bureau, sur délégation du
+  // conseil (collectors/decisions.py). Des actes, pas des délibérations : elles
+  // ne comptent dans aucun total de délibérations (`estDecision`).
+  decision_delegation:    { label: 'Décision par délégation' },
+  decision_delegation_cc: { label: 'Décision par délégation' },
 }
+
+export const estDecision = (e) =>
+  e.type === 'decision_delegation' || e.type === 'decision_delegation_cc'
 
 // L'assemblée qui a pris l'acte se lit sur sa PORTÉE, calculée à la collecte
 // (collectors/portee.py) et publiée dans le snapshot — pas sur une

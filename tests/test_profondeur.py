@@ -15,7 +15,7 @@ Ce qui est verrouillé ici :
   - le registre de RECONNAISSANCE (`COMMUNES`) ne se réduit pas avec la
     profondeur — sans quoi un acte du conseil communautaire portant sur une
     commune membre ne se rattacherait plus à rien ;
-  - une commune déléguée suit sa commune de rattachement, jamais l'inverse ;
+  - une ancienne commune suit sa commune de rattachement, jamais l'inverse ;
   - une surcharge fautive s'arrête au chargement, pas à la collecte.
 """
 from __future__ import annotations
@@ -110,7 +110,7 @@ def test_les_cp_interroges_suivent_la_profondeur(instance):
     assert cfg.cp_du_step("fiscalite") == ["99000", "99010"]
 
 
-# ── Communes déléguées ───────────────────────────────────────────────────────
+# ── Anciennes communes ───────────────────────────────────────────────────────
 
 def test_une_deleguee_suit_sa_commune_de_rattachement(instance):
     """Ancienville est rattachée à Voisinbourg, qui n'est pas collectée en fond.
@@ -127,6 +127,23 @@ def test_la_deleguee_entre_en_fond_avec_sa_commune(instance):
     cfg = charger_config(instance(collecte={"fond": ["99001", "99002"]}))
     assert sorted(cfg.communes_du_step("dvf", adresse=True)) == [
         "99001", "99002", "99004"]
+
+
+def test_l_ancien_nom_de_la_cle_reste_lu(instance, tmp_path):
+    """`communes_deleguees` (avant le 02/11/2026) se lit comme `anciennes_communes`."""
+    data = json.loads(INSTANCE_TEST.read_text(encoding="utf-8"))
+    data["communes_deleguees"] = data.pop("anciennes_communes")
+    chemin = tmp_path / "ancienne.json"
+    chemin.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    ancienne, nouvelle = charger_config(chemin), charger_config(instance())
+    assert ancienne.ANCIENNES_COMMUNES == nouvelle.ANCIENNES_COMMUNES != {}
+    assert ancienne.COMMUNES_INSEE_ADRESSE == nouvelle.COMMUNES_INSEE_ADRESSE
+
+
+def test_les_deux_noms_ensemble_sont_refuses(instance):
+    data = json.loads(INSTANCE_TEST.read_text(encoding="utf-8"))
+    with pytest.raises(SystemExit, match="deux noms du même registre"):
+        charger_config(instance(communes_deleguees=data["anciennes_communes"]))
 
 
 # ── Surcharge ────────────────────────────────────────────────────────────────

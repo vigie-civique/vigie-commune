@@ -82,6 +82,9 @@
   {#if !c.montant_dans_citation}
     <p class="signal">Le montant lu ne figure pas dans le passage cité : le vérifier dans l'acte.</p>
   {/if}
+  {#if c.titulaire_dans_citation === false}
+    <p class="signal">Le titulaire lu ne figure pas dans le passage cité : le vérifier dans l'acte.</p>
+  {/if}
   {#if flux}
     <p class="muted">Voté par {ASSEMBLEE[c.assemblee] ?? c.assemblee} (lu dans l'acte, pas dans le rapport)
       · {c.sens === 'verse' ? 'versé à' : 'reçu de'}

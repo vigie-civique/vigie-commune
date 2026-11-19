@@ -27,7 +27,7 @@ import urllib.request
 
 from .db import get_conn
 
-from .config import COMMUNE_SIREN as SIREN, HEADERS
+from .config import HEADERS, releve_et_siren
 # Le budget annexe suivi et l'entité à laquelle il se rapporte sont propres à
 # une commune : ils se déclarent dans config/seed_local.json
 # (`"budget_annexe": {"libelle": "…", "entite": "…"}`). Sans déclaration, le
@@ -74,11 +74,22 @@ PREFIXES = ("13", "16", "20", "21", "23")
 
 
 def fetch_year(year: int) -> list[dict]:
+    return fetch_year_siren(year)[1]
+
+
+def fetch_year_siren(year: int) -> tuple[str | None, list[dict]]:
+    """`(SIREN qui a répondu, lignes)` : l'exercice se marque de son SIREN."""
+    # `None` (erreur de lecture) ne passe pas à l'ancien SIREN.
+    siren, lignes = releve_et_siren(lambda s: _fetch_year(year, s))
+    return siren, lignes or []
+
+
+def _fetch_year(year: int, siren: str) -> list[dict] | None:
     dataset = f"balances-comptables-des-communes-en-{year}"
     out, offset = [], 0
     while True:
         params = urllib.parse.urlencode({
-            "where": f'siren="{SIREN}" AND lbudg="{LBUDG}"',
+            "where": f'siren="{siren}" AND lbudg="{LBUDG}"',
             "limit": 100, "offset": offset,
         })
         url = f"{API_BASE}/{dataset}/records?{params}"
@@ -88,7 +99,7 @@ def fetch_year(year: int) -> list[dict]:
                 data = json.loads(r.read())
         except Exception as e:
             print(f"  [erreur] {year} offset={offset} : {e}")
-            break
+            return None
         recs = data.get("results", [])
         out += recs
         if len(recs) < 100:
@@ -128,7 +139,8 @@ def collect(dry_run: bool = False) -> dict:
         return {"_inserted": 0}
 
     conn = get_conn()
-    from .db import upsert_entity
+    from .db import _rattraper_colonnes, upsert_entity
+    _rattraper_colonnes(conn)   # `budget_annexe.siren` (02/11/2026)
     ENTITE_ID = upsert_entity(conn, type="service", name=decl["entite"],
                                    confidence="verified")
     report = {}
@@ -140,7 +152,7 @@ def collect(dry_run: bool = False) -> dict:
             )
         total_inserted = 0
         for year in YEARS:
-            recs = fetch_year(year)
+            siren, recs = fetch_year_siren(year)
             lignes = extract_invest(recs)
             report[year] = lignes
             for lg in lignes:
@@ -148,10 +160,11 @@ def collect(dry_run: bool = False) -> dict:
                 if not dry_run:
                     conn.execute(
                         """INSERT INTO budget_annexe
-                           (entity_id, year, section, sens, compte, libelle, montant, source, confidence)
-                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                           (entity_id, year, section, sens, compte, libelle, montant, source,
+                            confidence, siren)
+                           VALUES (?,?,?,?,?,?,?,?,?,?)""",
                         (ENTITE_ID, year, "investissement", lg["sens"],
-                         lg["compte"], lg["libelle"], lg["montant"], SOURCE, "verified"),
+                         lg["compte"], lg["libelle"], lg["montant"], SOURCE, "verified", siren),
                     )
                     total_inserted += 1
         if not dry_run:

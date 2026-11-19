@@ -32,7 +32,7 @@ from datetime import date
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from .verifier import verifier
+from .verifier import trier_anomalies, verifier
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août",
@@ -415,9 +415,10 @@ def comprendre(releve: dict, tampon: str = "", liens: dict | None = None) -> str
 
 
 def erreurs(releve: dict) -> list[str]:
-    """Ce que les documents publics de la séance ont de faux ou d'incomplet."""
-    return list(releve.get("anomalies_seance", [])) + [
-        f"Délibération n°{a['n']} : {a['anomalie']}" for a in releve["actes"] if a.get("anomalie")]
+    """Les écarts et manques relevés dans les documents publics de la séance."""
+    # Une anomalie de cartouche ou de numérotation sans « vu_sur_image » reste
+    # dans la liste « à vérifier » du vérificateur : jamais rendue.
+    return trier_anomalies(releve)[0]
 
 
 def page_erreurs(releve: dict) -> str:
@@ -426,11 +427,21 @@ def page_erreurs(releve: dict) -> str:
     liste = erreurs(releve)
     corps = ("<ul class=\"err\">" + "".join(f"<li>{e(x)}</li>" for x in liste) + "</ul>"
              if liste else "<p>Aucune erreur ni lacune relevée dans les pièces de cette séance.</p>")
+    # Ce qui manque pour comprendre la séance et que tout habitant peut demander
+    # (droit d'accès aux documents administratifs), groupé par destinataire.
+    par_qui: dict[str, list[str]] = {}
+    for d in releve["en_clair"].get("a_demander", []):
+        par_qui.setdefault(d["a"], []).append(d["texte"])
+    if par_qui:
+        corps += ('<h3>Les documents à demander</h3>' + "".join(
+            f'<p>À {e(qui)} :</p><ul class="err">'
+            + "".join(f"<li>{e(t)}</li>" for t in textes) + "</ul>"
+            for qui, textes in par_qui.items()))
     return f"""
 <section class="sheet">
   <div class="label"><span>Feuille {4 if releve['en_clair'].get('comprendre') else 3} · les documents</span><span>séance du {date_longue(s['date'])}</span></div>
   <div class="mast"><div class="name">{e(s['assemblee_court'])} · le conseil en clair</div>
-    <h1>Ce que les documents publics ont de faux ou d’incomplet</h1>
+    <h1>Les écarts et manques relevés dans les documents publics</h1>
     <div class="meta">Relevé par Vigie Civique en confrontant les pièces de la séance entre elles
     et avec les séances voisines. Ces constats portent sur les documents, pas sur les décisions.</div></div>
   {corps}

@@ -103,6 +103,13 @@ def build_popolo(entities: list[dict], relations: list[dict],
             "vigie_confidence": r.get("confidence"),
         })
 
+    # Popolo est la vue des MANDATS : une personne n'y figure qu'avec le sien.
+    # Un gérant publié au titre de SIRENE y passait pour un élu sans fonction
+    # (3 à Lasalle, 7 à Brassac, avis DPO du 26/10/2026) ; il reste dans
+    # `entities.json`, au titre qui l'y fait paraître.
+    mandatees = {m["person_id"] for m in memberships}
+    persons = [p for p in persons if p["id"] in mandatees]
+
     areas = sorted({e["commune"] for e in entities if e.get("commune")})
     return {
         "@context": "https://www.popoloproject.com/contexts/organization.jsonld",

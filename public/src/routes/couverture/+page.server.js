@@ -3,7 +3,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from '#lib/donnees.server.js'
-import { AGENDA_TYPES, INSTITUTIONAL, estSeance, instanceDe } from '#lib/actes.js'
+import { AGENDA_TYPES, INSTITUTIONAL, estDecision, estSeance, instanceDe } from '#lib/actes.js'
 
 export const prerender = true
 
@@ -25,9 +25,10 @@ function totaux() {
     events = JSON.parse(readFileSync(join(DATA_DIR, 'events.json'), 'utf8')).events || []
   } catch { return null }
   const lignes = [
-    ['Délibérations municipales', '/deliberations', (e) => INSTITUTIONAL[e.type] && !estSeance(e) && instanceDe(e) === 'CM'],
+    ['Délibérations municipales', '/deliberations', (e) => INSTITUTIONAL[e.type] && !estSeance(e) && !estDecision(e) && instanceDe(e) === 'CM'],
     ['Séances du conseil municipal', '/deliberations', (e) => INSTITUTIONAL[e.type] && estSeance(e) && instanceDe(e) === 'CM'],
-    ['Délibérations intercommunales', '/deliberations', (e) => INSTITUTIONAL[e.type] && !estSeance(e) && instanceDe(e) === 'CC'],
+    ['Délibérations intercommunales', '/deliberations', (e) => INSTITUTIONAL[e.type] && !estSeance(e) && !estDecision(e) && instanceDe(e) === 'CC'],
+    ['Décisions par délégation', '/deliberations', estDecision],
     ['Séances du conseil communautaire', '/deliberations', (e) => INSTITUTIONAL[e.type] && estSeance(e) && instanceDe(e) === 'CC'],
     ["Autorisations d'urbanisme", '/urbanisme', (e) => e.type === 'autorisation_urbanisme'],
     ['Annonces légales (BODACC)', '/acteurs-publics', (e) => (e.type || '').startsWith('bodacc')],

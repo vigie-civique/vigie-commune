@@ -42,6 +42,7 @@ import argparse
 import time
 import urllib.parse
 
+from . import mesure
 from .archive import fetch_json
 from .config import COMMUNES, REQUEST_DELAY, communes_du_step
 from .db import get_conn, transaction
@@ -129,6 +130,10 @@ def import_commune(insee: str, commune_nom: str, code_postal: str | None) -> int
     releves, couvertures, resume = [], [], []
     for cle, (jeu, _libelle) in JEUX.items():
         total = _compter(jeu, filtre)
+        # Un compte, pas des lignes : `fetch_json` ne le voit pas. Une commune
+        # en échec est avalée par `run` sans faire échouer le step ; ce total
+        # du périmètre en est la seule trace.
+        mesure.lu(f"ademe-{jeu}", total, complete=True)
         # Le code postal sert de témoin : il englobe la commune et ses voisines,
         # et permet de voir les diagnostics que la BAN n'a rattachés à aucune
         # commune. Sans ce témoin, un parc mal géocodé donnerait une part

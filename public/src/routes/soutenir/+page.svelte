@@ -1,5 +1,6 @@
 <script>
   import { SITE_NOM, CONTACT_EMAIL, EDITEUR_NOM, DON_IBAN, DON_BIC, DON_TITULAIRE } from '#lib/instance.js'
+  import { HELLOASSO } from '#lib/soutien.js'
 
   // Compte de l'association porteuse : config/instance.json, clés editeur.iban,
   // bic, titulaire (voir scripts/generer_libelles.py). IBAN vide : la page replie
@@ -7,7 +8,6 @@
   const IBAN = DON_IBAN
   const BIC = DON_BIC
   const TITULAIRE = DON_TITULAIRE
-  const HELLOASSO = 'https://www.helloasso.com/beta/associations/a-bout-de-champ/adhesions/adhesion/'
 </script>
 
 <svelte:head><title>Soutenir - {SITE_NOM}</title>
@@ -51,8 +51,8 @@
   section { max-width: 720px; margin: 0 auto; padding: 1.5rem; line-height: 1.6; }
   h1 { color: var(--encre); }
   h2 { font-size: 1.1rem; margin: 0 0 .5rem; }
-  .card { background: #fff; border: 1px solid var(--trait); border-radius: 10px; padding: 1.25rem; margin: 1rem 0; }
-  .bouton { display: inline-block; padding: .55rem 1rem; border-radius: 8px; background: var(--encre); color: #fff; font-weight: 600; text-decoration: none; }
+  .card { background: var(--carte); border: 1px solid var(--trait); border-radius: 10px; padding: 1.25rem; margin: 1rem 0; }
+  .bouton { display: inline-block; padding: .55rem 1rem; border-radius: 8px; background: var(--encre); color: var(--papier); font-weight: 600; text-decoration: none; }
   dl div { display: flex; gap: 1rem; padding: .25rem 0; flex-wrap: wrap; }
   dt { width: 6rem; color: var(--gris); }
   dd { margin: 0; overflow-wrap: anywhere; }

@@ -116,12 +116,12 @@
            text-transform: uppercase; letter-spacing: .03em; }
   .filtres { display: flex; gap: .4rem; flex-wrap: wrap; margin: 0 0 .5rem; }
   .filtres button { font-size: .8rem; padding: .35rem .7rem; cursor: pointer;
-    color: var(--gris); background: #fff; border: 1px solid var(--trait); border-radius: 999px; }
+    color: var(--gris); background: var(--carte); border: 1px solid var(--trait); border-radius: 999px; }
   .filtres button:hover { border-color: var(--trait); }
-  .filtres button.actif { background: var(--ardoise); color: #fff; border-color: var(--ardoise); }
+  .filtres button.actif { background: var(--ardoise); color: var(--papier); border-color: var(--ardoise); }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: .8rem;
           margin-top: .8rem; }
-  article { background: #fff; border: 1px solid var(--trait); border-radius: 10px; padding: .9rem 1rem; }
+  article { background: var(--carte); border: 1px solid var(--trait); border-radius: 10px; padding: .9rem 1rem; }
   article h3 { margin: 0 0 .5rem; color: var(--encre); font-size: 1.05rem; }
   /* Un élu sans fiche garde exactement la même apparence : ce qui change
      est l'absence d'affordance de lien, pas une hiérarchie entre élus. */
@@ -131,7 +131,7 @@
      libellé RNE de 45 caractères, il débordait de la carte sur la colonne
      voisine. Il passe à la ligne dans sa pastille. */
   .role { font-size: .68rem; text-transform: uppercase; letter-spacing: .02em;
-          background: var(--gris); color: #fff; padding: .14rem .55rem;
+          background: var(--gris); color: var(--papier); padding: .14rem .55rem;
           border-radius: 12px; line-height: 1.35; max-width: 100%; }
   .role.maire { background: var(--ambre); } .role.adjoint { background: var(--ardoise); }
   .role.interco { background: var(--ardoise-fonce); }

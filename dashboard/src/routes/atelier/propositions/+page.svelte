@@ -16,6 +16,13 @@
   const NATURE = {
     fiche: 'Fiche', coords: 'Point sur la carte', relation: 'Relation', correction: 'Chiffre corrigé',
     marche: 'Marché lu dans un procès-verbal', flux: 'Subvention lue dans un acte',
+    signalement: 'Signalement',
+  }
+  // Ce qu'un signalement demande (collectors/propositions.py, MOTIFS_SIGNALEMENT).
+  const DEMANDE = {
+    retirer: 'Retirer cette fiche du site',
+    doublon: "Fusionner avec une autre fiche (doublon)",
+    revoir: 'Revoir cette fiche',
   }
   const OBJET = { flow: 'flux', marche: 'marché', deliberation: 'acte' }
   // Les champs d'une relation et d'une correction n'ont pas de libellé commun
@@ -42,28 +49,56 @@
   // des dizaines d'un coup ; mêlées aux propositions des contributeurs, elles
   // les repousseraient en bas de la file.
   let nature = ''
+  // « Fusions à faire » : les doublons reconnus, gardés en attendant qu'une
+  // fusion soit faite à la main (décision de Julien, 16/11/2026).
+  let fusions = false
 
   onMount(() => {
-    nature = new URLSearchParams(window.location.search).get('nature') || ''
+    const q = new URLSearchParams(window.location.search)
+    nature = q.get('nature') || ''
+    if (q.get('issue') === 'fusion_a_faire') { fusions = true; etat = 'acceptee' }
     charger()
   })
+
+  const PAGE = 50
+  let total = 0
+  let plusEnCours = false
+
+  const adresse = (offset) =>
+    `/atelier/propositions?etat=${etat}${nature ? `&nature=${nature}` : ''}`
+    + (fusions ? '&nature=signalement&issue=fusion_a_faire' : '')
+    + `&limit=${PAGE}&offset=${offset}`
 
   async function charger() {
     chargement = true; erreur = ''
     try {
-      const r = await authFetch(`/atelier/propositions?etat=${etat}${nature ? `&nature=${nature}` : ''}`)
+      const r = await authFetch(adresse(0))
       const d = await r.json()
       if (!r.ok) { erreur = messageErreur(d.detail); return }
-      propositions = d.propositions; peutTrancher = d.peut_trancher
+      propositions = d.propositions; total = d.total; peutTrancher = d.peut_trancher
       corrigeables = d.corrigeables || {}
     } finally { chargement = false }
+  }
+
+  // « Charger plus » ajoute la page suivante ; le décalage est le nombre de
+  // lignes déjà montrées (une ligne tranchée en est retirée, et la file recule).
+  async function chargerPlus() {
+    plusEnCours = true; erreur = ''
+    try {
+      const r = await authFetch(adresse(propositions.length))
+      const d = await r.json()
+      if (!r.ok) { erreur = messageErreur(d.detail); return }
+      const vus = new Set(propositions.map(x => x.id))
+      propositions = [...propositions, ...d.propositions.filter(x => !vus.has(x.id))]
+      total = d.total
+    } finally { plusEnCours = false }
   }
 
   // La valeur a bougé depuis la proposition : la collecte ou un autre éditeur
   // sont passés. Accepter écrasera ce qui est là MAINTENANT — le dire avant.
   const aBouge = (p, c) => p.actuel && dire(p.actuel[c]) !== dire(p.avant[c])
 
-  async function trancher(p, accepter, motifDonne = null, corrections = {}) {
+  async function trancher(p, accepter, motifDonne = null, corrections = {}, issue = null) {
     const motif = (motifDonne ?? motifs[p.id] ?? '').trim()
     if (!accepter && !motif) {
       erreur = 'Refuser demande un motif : la personne qui a proposé doit savoir quoi corriger.'
@@ -72,10 +107,12 @@
     enCours = p.id; erreur = ''
     try {
       const r = await authFetch(`/atelier/propositions/${p.id}/decision`, {
-        method: 'POST', body: JSON.stringify({ accepter, motif, corrections }),
+        method: 'POST',
+        body: JSON.stringify(issue ? { accepter, motif, corrections, issue }
+                                     : { accepter, motif, corrections }),
       })
       if (!r.ok) { erreur = messageErreur((await r.json()).detail); return }
-      propositions = propositions.filter(x => x.id !== p.id)
+      propositions = propositions.filter(x => x.id !== p.id); total = Math.max(0, total - 1)
     } finally { enCours = null }
   }
 
@@ -106,7 +143,7 @@
     try {
       const r = await authFetch(`/atelier/propositions/${p.id}`, { method: 'DELETE' })
       if (!r.ok) { erreur = messageErreur((await r.json()).detail); return }
-      propositions = propositions.filter(x => x.id !== p.id)
+      propositions = propositions.filter(x => x.id !== p.id); total = Math.max(0, total - 1)
     } finally { enCours = null }
   }
 </script>
@@ -127,11 +164,15 @@
 
   <div class="filtres">
     {#each ETATS as [cle, nom]}
-      <button class:actif={etat === cle} on:click={() => { etat = cle; charger() }}>{nom}</button>
+      <button class:actif={etat === cle && !fusions} on:click={() => { etat = cle; fusions = false; charger() }}>{nom}</button>
     {/each}
+    <button class:actif={fusions}
+            on:click={() => { fusions = !fusions; etat = fusions ? 'acceptee' : 'en_attente'; nature = ''; charger() }}>
+      Fusions à faire
+    </button>
     <button class:actif={nature === 'marche'}
             on:click={() => { nature = nature === 'marche' ? '' : 'marche'; charger() }}>
-      Marchés lus dans les PV seulement
+      Marchés lus dans les procès-verbaux seulement
     </button>
     <button class:actif={nature === 'flux'}
             on:click={() => { nature = nature === 'flux' ? '' : 'flux'; charger() }}>
@@ -183,7 +224,23 @@
         <p class="avis">L'objet visé n'existe plus : cette proposition ne peut qu'être refusée.</p>
       {/if}
 
-      {#if p.nature === 'marche' || p.nature === 'flux'}
+      {#if p.nature === 'signalement'}
+        <div class="signalement">
+          <p><strong>{DEMANDE[p.charge.motif] ?? p.charge.motif}</strong>
+            {#if p.charge.motif === 'doublon'}{' '}
+              : même structure que
+              {#if p.doublon}<a href="/atelier/entite/{p.doublon.id}">{p.doublon.name}</a> (n° {p.doublon.id}).{:else}la
+              fiche n° {p.charge.doublon_de}, qui n'existe plus.{/if}
+              La fusion se fait à la main ; l'accepter ne fusionne rien.
+            {' '}{/if}
+          </p>
+          {#if p.charge.texte}<p class="texte">« {p.charge.texte} »</p>{/if}
+          {#if p.actuel?.verdict && p.actuel.verdict !== 'jamais_relu'}
+            <p class="muted">Verdict actuel de la fiche : {p.actuel.verdict === 'ecarte' ? 'écartée'
+              : p.actuel.verdict === 'a_revoir' ? 'à revoir' : 'retenue'}.</p>
+          {/if}
+        </div>
+      {:else if p.nature === 'marche' || p.nature === 'flux'}
         <LigneExtraite {p} peutTrancher={peutTrancher && etat === 'en_attente'}
           enCours={enCours === p.id} corrigeables={corrigeables[p.nature] || []}
           on:trancher={(e) => trancher(p, e.detail.accepter, e.detail.motif, e.detail.corrections)} />
@@ -216,6 +273,21 @@
         </p>
       {:else if p.nature === 'marche' || p.nature === 'flux'}
         <!-- Les gestes d'une ligne extraite vivent dans LigneExtraite. -->
+      {:else if p.nature === 'signalement' && peutTrancher}
+        <!-- Le validateur tranche avec les gestes qu'il a déjà sur une fiche. -->
+        <div class="gestes">
+          <button class="oui" disabled={enCours === p.id || p.actuel === null}
+                  on:click={() => trancher(p, true, null, {}, 'ecarte')}>Écarter la fiche — retirée du site, gardée en base</button>
+          <button class="oui" disabled={enCours === p.id || p.actuel === null}
+                  on:click={() => trancher(p, true, null, {}, 'a_revoir')}>Marquer à revoir — reste en ligne</button>
+          {#if p.charge.motif === 'doublon'}{' '}
+            <button class="oui" disabled={enCours === p.id || p.actuel === null || !p.doublon}
+                    on:click={() => trancher(p, true, null, {}, 'fusion_a_faire')}>Garder, fusion à faire — rien ne change en ligne, la fusion est demandée</button>
+          {' '}{/if}
+          <input placeholder="Motif (obligatoire pour refuser)" bind:value={motifs[p.id]} />
+          <button class="non" disabled={enCours === p.id}
+                  on:click={() => trancher(p, false)}>Refuser le signalement</button>
+        </div>
       {:else if peutTrancher}
         <div class="gestes">
           <button class="oui" disabled={enCours === p.id || p.actuel === null}
@@ -234,13 +306,23 @@
     </article>
   {/each}
 
+  {#if propositions.length}
+    <p class="muted">{propositions.length} sur {total}
+      {#if propositions.length < total}{' '}
+        · <button class="plus" on:click={chargerPlus} disabled={plusEnCours}>
+          {plusEnCours ? 'Chargement…' : 'Charger plus'}</button>
+      {' '}{/if}
+    </p>
+  {/if}
+
   {#if !propositions.length && !chargement}
-    <p class="muted vide">Aucune proposition {etat === 'en_attente' ? 'en attente' : 'dans cet état'}.</p>
+    <p class="muted vide">{fusions ? 'Aucune fusion demandée.' : `Aucune proposition ${etat === 'en_attente' ? 'en attente' : 'dans cet état'}.`}</p>
   {/if}
 </div>
 
 <style>
   .page { padding: 1.2rem; display: flex; flex-direction: column; gap: .8rem; font-size: .9rem; max-width: 60rem; }
+  .plus { background: none; border: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; padding: .4rem 0; }
   h1 { font-size: 1.2rem; color: var(--texte); }
   .intro { color: var(--texte-2); }
   .filtres { display: flex; gap: .4rem; flex-wrap: wrap; }
@@ -254,9 +336,12 @@
   td { padding: .4rem .5rem; border-bottom: 1px solid var(--bordure-douce); color: var(--texte); vertical-align: top; overflow-wrap: anywhere; }
   .avant { color: var(--danger-texte); }
   .apres { color: var(--succes); }
+  .signalement { display: flex; flex-direction: column; gap: .3rem; color: var(--texte); }
+  .signalement a { color: var(--info); }
+  .signalement .texte { color: var(--texte-2); font-style: italic; }
   .bouge { color: var(--alerte-texte); font-size: .82rem; margin-top: .2rem; }
   .gestes { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
-  .gestes input { flex: 1; min-width: 14rem; background: var(--fond); border: 1px solid var(--bordure); color: var(--texte); border-radius: 5px; padding: .4rem .5rem; }
+  .gestes input { box-sizing: border-box; max-width: 100%; flex: 1 1 14rem; min-width: 0; background: var(--fond); border: 1px solid var(--bordure); color: var(--texte); border-radius: 5px; padding: .4rem .5rem; }
   .gestes button { border-radius: 6px; padding: .45rem .8rem; border: 1px solid var(--bordure-forte); color: var(--texte); }
   .gestes button.oui { background: var(--succes-bordure); border-color: var(--succes-bordure); }
   .gestes button.non { background: transparent; }

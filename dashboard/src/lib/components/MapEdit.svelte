@@ -51,7 +51,7 @@
     }).addTo(map)
 
     L.control.layers(
-      { 'Ortho IGN': ortho, 'Plan IGN': plan, 'OSM': osm },
+      { 'Photo aérienne': ortho, 'Plan': plan, 'OpenStreetMap': osm },
       { 'Cadastre (parcelles)': cadastre },
       { collapsed: false },
     ).addTo(map)
@@ -91,7 +91,7 @@
 <div class="map-edit-wrap">
   <div bind:this={mapEl} class="map-el"></div>
   <div class="map-foot">
-    <span class="hint">Fond <b>Ortho IGN</b> par défaut : zoome sur le toit, clique/glisse le marqueur (précision &lt;5 m).</span>
+    <span class="hint">Fond <b>photo aérienne</b> par défaut : zoomez sur le toit, puis cliquez ou glissez le marqueur (précision visée : moins de 5 mètres).</span>
     {#if curLat != null}{' '}
       <span class="coords">lat {curLat.toFixed(6)} · lng {curLng.toFixed(6)} <em>(Lambert 93 calculé à l'enregistrement)</em></span>
     {' '}{/if}

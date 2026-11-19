@@ -12,12 +12,14 @@
     "preview_snapshot_dir": "audits/public_snapshot_preview",
     "license": "ODbL-1.0",
     "license_url": "https://opendatacommons.org/licenses/odbl/1-0/",
-    "_license_note": "Arbitré le 12/08/2026. 333 des 1 807 entités publiées sont des points d'intérêt OpenStreetMap importés tels quels, et 42 % des coordonnées publiées viennent d'un géocodage OSM : la contribution est substantielle et fondue dans le jeu, qui est donc une BASE DÉRIVÉE au sens de l'ODbL — pas une base collective séparable. Le partage à l'identique s'applique. La Licence Ouverte v2 (SIRENE, RNA, DVF, DECP, OFGL, RNE, élections) est compatible ODbL, à charge de citer source et date. Le SITE et ses visualisations sont un « Produced Work » au sens ODbL : l'attribution suffit. Le CODE relève d'une licence distincte (MIT, cf. LICENSE) — l'ODbL ne porte pas sur le logiciel.",
+    "_license_note": "Arbitré le 12/08/2026. Des points d'intérêt OpenStreetMap sont importés tels quels avec leurs coordonnées (leur nombre est compté à chaque construction dans le README servi ; les autres coordonnées viennent de l'IGN et de la BAN, jamais d'un géocodage OSM) : la contribution est fondue dans le jeu, qui est donc une BASE DÉRIVÉE au sens de l'ODbL — pas une base collective séparable. Le partage à l'identique s'applique. La Licence Ouverte v2 (SIRENE, RNA, DVF, DECP, OFGL, RNE, élections) est compatible ODbL, à charge de citer source et date. Le SITE et ses visualisations sont un « Produced Work » au sens ODbL : l'attribution suffit. Le CODE relève d'une licence distincte (MIT, cf. LICENSE) — l'ODbL ne porte pas sur le logiciel.",
     "attribution": "",
     "source_attributions": [
       "Contient des informations d'OpenStreetMap, mises à disposition sous Open Database License (ODbL) — © les contributeurs OpenStreetMap",
       "Contient des données publiques sous Licence Ouverte v2 (Etalab) : SIRENE et indicateurs INSEE, RNA, DVF, BODACC, OFGL et DGFiP, DECP et BOAMP, Répertoire National des Élus, résultats électoraux du ministère de l'Intérieur, BANATIC",
-      "Contient des données IGN (géocodage) sous Licence Ouverte v2"
+      "Contient des données IGN (géocodage) sous Licence Ouverte v2",
+      "Contient des données de l'Observatoire des services publics d'eau et d'assainissement (SISPEA, OFB), composition communale des services et indicateurs, téléchargées sur services.eaufrance.fr, sous Licence Ouverte v2",
+      "Contient les résultats des campagnes FDVA 2 publiés par la DRAJES Occitanie, © www.ac-montpellier.fr (https://www.ac-montpellier.fr/fdva-2-fonctionnement-global-et-nouveaux-projets-les-resultats-122195) : intitulé et montant accordé, pour les associations du territoire"
     ]
   },
   "confidence": {
@@ -58,8 +60,7 @@
       "délégué_cm",
       "élu_cc",
       "élu_cm",
-      "maire",
-      "membre_commission"
+      "maire"
     ],
     "always_hide_coordinates": true,
     "publish_birth_year": false

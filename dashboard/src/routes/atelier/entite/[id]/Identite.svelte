@@ -1,5 +1,6 @@
 <script>
   import { heureLocale } from '#lib/heure.js'
+  import { libelleType } from '#lib/libelles.js'
   import { VERDICTS, VERDICT, FIABILITE, FIABILITE_AIDE, ORIGINES, ORIGINE_AIDE } from '#lib/axes.js'
 
   export let form
@@ -22,17 +23,17 @@
       <input bind:value={form.name} />
     </label>
     <label class:modifie={m('short_name')}>
-      Nom court / abrégé
-      <input bind:value={form.short_name} placeholder="optionnel" />
+      Nom court ou abrégé
+      <input bind:value={form.short_name} placeholder="Facultatif" />
     </label>
     <label>
       Type
       <!-- Le type ne se change pas ici : l'enregistrement ne l'envoie pas. -->
-      <input value={form.type} disabled title="Le type d'une fiche ne se change pas depuis l'éditeur" />
+      <input value={libelleType(form.type)} disabled title="Le type d'une fiche ne se change pas depuis l'éditeur" />
     </label>
     <label class:modifie={m('responsible')}>
       Responsable
-      <input bind:value={form.responsible} placeholder="Nom du dirigeant / président" />
+      <input bind:value={form.responsible} placeholder="Nom du dirigeant ou de la présidente" />
     </label>
     <label class:modifie={m('confidence')}>
       Fiabilité de la source
@@ -64,6 +65,20 @@
       {' '}{/if}
       <p class="axe-effet">{VERDICT[verdict ?? entity.verdict]?.effet ?? ''}</p>
       {#if entity.verdict_note}<p class="axe-effet">« {entity.verdict_note} »</p>{/if}
+      {#if tranche && entity.ecrit_par_contributeurs?.length}
+        <!-- Avant de retenir : ce que des contributeurs ont écrit directement
+             depuis le dernier verdict. Une information, pas un blocage. -->
+        <div class="ecrit-contrib" role="note">
+          <p><strong>Modifié par des contributeurs depuis le dernier verdict</strong>
+            — à relire avant de retenir :</p>
+          <ul>
+            {#each entity.ecrit_par_contributeurs as c}
+              <li>{c.champ} : « {c.avant ?? '—'} » → « {c.apres ?? '—'} »
+                <span class="muted">— {c.par}, {heureLocale(c.le)}</span></li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
       {#if tranche}
         <div class="verdict-gestes">
           {#each VERDICTS.filter(v => v.cle !== (verdict ?? entity.verdict)) as v}
@@ -90,6 +105,9 @@
   .v-retenu { background: var(--succes-doux); color: var(--succes); }
   .v-a_revoir { background: var(--info-doux); color: var(--info); }
   .v-ecarte { background: var(--danger-doux); color: var(--danger); }
+  .ecrit-contrib { width: 100%; margin: .4rem 0; padding: .5rem .7rem; border-left: 3px solid var(--info);
+                   background: var(--surface); font-size: .9rem; }
+  .ecrit-contrib ul { margin: .3rem 0 0 1rem; padding: 0; }
   .verdict-gestes { display: flex; gap: .35rem; flex-wrap: wrap; width: 100%; margin-top: .2rem; }
   .vg { border: 1px solid var(--bordure); border-radius: 4px; padding: .25rem .6rem;
         font-size: .78rem; cursor: pointer; background: var(--surface); color: var(--texte); }

@@ -24,8 +24,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 
-from .archive import fetch_json
-from .config import (COMMUNES_DELEGUEES, HEADERS, ROOT,
+from .archive import archiver_retenues, fetch_json
+from .config import (ANCIENNES_COMMUNES, HEADERS, ROOT,
                      cp_du_step, registre_du_step)
 from .db import get_conn
 from .nom_normalise import reparer_encodage
@@ -53,14 +53,19 @@ def _norm(s: str) -> str:
 # qu'elles sont écartées.
 _REGISTRE = registre_du_step("bodacc")
 _COMMUNE_LOOKUP = {_norm(c["nom"]): c["nom"] for c in _REGISTRE.values()}
-# Alias des communes déléguées : BODACC indexe encore sous les noms d'avant la
+# Alias des anciennes communes : BODACC indexe encore sous les noms d'avant la
 # fusion. Sans ces alias, leurs annonces sont comptées « hors périmètre » et
 # disparaissent silencieusement. Les noms viennent de l'instance, jamais du
-# code — c'est le registre `communes_deleguees` de config/instance.json.
-for _code, _delegee in COMMUNES_DELEGUEES.items():
+# code — c'est le registre `anciennes_communes` de config/instance.json.
+for _code, _delegee in ANCIENNES_COMMUNES.items():
     _rattachement = _REGISTRE.get(_delegee.get("commune", ""), {}).get("nom")
     if _delegee.get("nom") and _rattachement:
         _COMMUNE_LOOKUP[_norm(_delegee["nom"])] = _rattachement
+# L'ancien nom porté par le code même de la commune (cf. rna.py).
+for _c in _REGISTRE.values():
+    for _ancien in _c.get("anciens_noms") or []:
+        if _ancien:     # vide : toute annonce sans commune serait reconnue
+            _COMMUNE_LOOKUP[_norm(_ancien)] = _c["nom"]
 
 
 def _match_commune(ville: str) -> str | None:
@@ -81,7 +86,18 @@ FAMILLE_TYPE = {
 
 
 def fetch_page(offset: int, since: str | None = None, cp: str = CP,
-               until: str | None = None) -> dict:
+               until: str | None = None, mesurer: bool = True) -> dict:
+    # Pas d'archive ici : la page porte toutes les communes du code postal.
+    # `_collecter_fenetre` archive après le filtre (`archiver_retenues`).
+    # Complète : le step ne passe jamais `since`, et les fenêtres annuelles
+    # couvrent tout ; hors d'un step, la mesure ne note rien.
+    return _reparer_encodage_partout(
+        fetch_json(url_page(offset, since, cp, until), source="bodacc", timeout=30,
+                   headers=HEADERS, archiver=False, complete=True, mesurer=mesurer))
+
+
+def url_page(offset: int, since: str | None = None, cp: str = CP,
+             until: str | None = None) -> str:
     filters = [f'cp="{cp}"']
     if since:
         filters.append(f'dateparution>="{since}"')
@@ -94,9 +110,7 @@ def fetch_page(offset: int, since: str | None = None, cp: str = CP,
         "offset": offset,
         "order_by": "dateparution ASC",
     })
-    url = f"{API_BASE}?{params}"
-    return _reparer_encodage_partout(
-        fetch_json(url, source="bodacc", timeout=30, headers=HEADERS))
+    return f"{API_BASE}?{params}"
 
 
 def _reparer_encodage_partout(obj):
@@ -317,7 +331,8 @@ def run(since: str | None = None, dry_run: bool = False, stats_only: bool = Fals
     # de Castres) rend 32 807 annonces et la collecte s'arrêtait en erreur au
     # tiers du volume, sans reprise possible. On découpe donc par année de
     # parution : chaque fenêtre reste sous le plafond, et le total est atteint.
-    sonde = fetch_page(0, since, cp)
+    # La sonde n'est qu'un compte : ses annonces sont relues par les fenêtres.
+    sonde = fetch_page(0, since, cp, mesurer=False)
     total_count = sonde.get("total_count", 0)
     if total_count <= MAX_OFFSET:
         fenetres = [(since, None)]
@@ -361,6 +376,9 @@ def _collecter_fenetre(conn, cp: str, since: str | None, until: str | None,
         if not records:
             break
 
+        retenues = [rec for rec in records if _match_commune(rec.get("ville") or "")]
+        if not dry_run:
+            archiver_retenues("bodacc", url_page(offset, since, cp, until), page, retenues)
         for rec in records:
             compteurs["lues"] += 1
             # Filtre par nom de commune : un CP déborde toujours du périmètre.
