@@ -84,10 +84,20 @@ CREATE INDEX IF NOT EXISTS idx_entities_name_norm
     ON entities(type, name_norm);
 
 -- Trigger updated_at automatique sur entities
+-- `updated_at` est le verrou optimiste de l'atelier : il doit changer à CHAQUE
+-- écriture. À la seconde (`datetime('now')`), deux écritures dans la même
+-- seconde le laissaient identique, et la troisième, faite sur une lecture
+-- périmée, passait (audit du 15/11/2026). Au millième, et strictement croissant :
+-- si l'horloge n'a pas avancé, on ajoute un millième à l'ancienne valeur.
 CREATE TRIGGER IF NOT EXISTS entities_updated_at
     AFTER UPDATE ON entities
 BEGIN
-    UPDATE entities SET updated_at = datetime('now') WHERE id = NEW.id;
+    UPDATE entities SET updated_at = CASE
+        WHEN strftime('%Y-%m-%d %H:%M:%f', 'now') > COALESCE(OLD.updated_at, '')
+        THEN strftime('%Y-%m-%d %H:%M:%f', 'now')
+        ELSE COALESCE(strftime('%Y-%m-%d %H:%M:%f', OLD.updated_at, '+0.001 seconds'),
+                      strftime('%Y-%m-%d %H:%M:%f', 'now'))
+    END WHERE id = NEW.id;
 END;
 
 -- ----------------------------------------------------------------
@@ -204,6 +214,7 @@ CREATE INDEX IF NOT EXISTS idx_places_osm ON places(osm_id);
 CREATE TABLE IF NOT EXISTS dvf_transactions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     insee           TEXT,   -- code commune : les sections cadastrales se répètent
+    id_mutation     TEXT,   -- identifiant DVF de la vente : plusieurs lignes le partagent
     date            TEXT,
     cadastre_ref    TEXT,   -- ex: "AD0180"
     section         TEXT,
@@ -252,6 +263,12 @@ CREATE TABLE IF NOT EXISTS epci_competences (
     categorie             TEXT,
     obligatoire           INTEGER,         -- 1 = compétence obligatoire
     interet_communautaire INTEGER,
+    -- Ce que BANATIC écrit sous l'intitulé, tel quel. Sans eux, « Service
+    -- public de défense extérieure contre l'incendie » se lisait comme tout le
+    -- service, quand la précision dit « Entretien des pistes DFCI. »
+    description                     TEXT,   -- `description`
+    precision_competence            TEXT,   -- `specificiteInteretCompetence`
+    precision_interet_communautaire TEXT,   -- `specificiteInteretCommunautaire`
     source                TEXT,
     collected_at          TEXT DEFAULT (datetime('now')),
     UNIQUE (epci_siren, code)
@@ -284,6 +301,96 @@ CREATE INDEX IF NOT EXISTS idx_rel_from   ON relations(from_id);
 CREATE INDEX IF NOT EXISTS idx_rel_to     ON relations(to_id);
 CREATE INDEX IF NOT EXISTS idx_rel_type   ON relations(relation_type);
 CREATE INDEX IF NOT EXISTS idx_rel_source ON relations(source);
+
+-- 15/11/2026 — Une relation venue d'un collecteur, supprimée à l'atelier, était
+-- recréée à la passe suivante : nouvel identifiant, `verified`, sans rien de ce
+-- qu'un validateur en avait dit. Le refus retient la suppression : mêmes deux
+-- bouts, même type, quelle que soit la source (deux registres qui disent le
+-- même lien disent le même faux lien). Le déclencheur l'applique à TOUTE
+-- écriture, collecteur ou script, sans qu'aucun n'ait à y penser ; il compte
+-- les tentatives, pour que le validateur voie qu'une source le dit encore.
+-- Un validateur le lève (`DELETE /api/atelier/relations/refus/{id}`), et la
+-- collecte suivante rétablit le lien. Les liens `*_présumé` n'y passent pas :
+-- leur circuit est `relation_candidates`. L'API, qui ne passe pas par
+-- `init_db`, rejoue ce bloc-ci (`collectors/db.py::assurer_refus`).
+CREATE TABLE IF NOT EXISTS relations_refusees (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_id             INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    to_id               INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    relation_type       TEXT NOT NULL,
+    relation            TEXT NOT NULL,   -- JSON : le lien supprimé, entier
+    motif               TEXT,
+    refuse_par          INTEGER REFERENCES users(id),
+    refuse_le           TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+    tentatives          INTEGER NOT NULL DEFAULT 0,
+    derniere_tentative  TEXT,
+    derniere_source     TEXT,
+    -- « Garder le refus » (validateur, journalisé) : les sources déjà vues à
+    -- cette date sont tenues pour revues ; seule une source NOUVELLE depuis
+    -- rouvre la file « refus-contredits ».
+    revu_par            INTEGER REFERENCES users(id),
+    revu_le             TEXT,
+    UNIQUE(from_id, to_id, relation_type)
+);
+-- Qui redit un lien refusé, source par source : une collecte quotidienne
+-- redit le même lien chaque jour, une date de dernière tentative seule
+-- rouvrirait la file à chaque passe, revue ou non.
+CREATE TABLE IF NOT EXISTS relations_refus_sources (
+    refus_id    INTEGER NOT NULL REFERENCES relations_refusees(id) ON DELETE CASCADE,
+    source      TEXT NOT NULL,
+    premiere    TEXT NOT NULL,
+    derniere    TEXT NOT NULL,
+    tentatives  INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(refus_id, source)
+);
+CREATE TRIGGER IF NOT EXISTS relations_refus_respecte
+    BEFORE INSERT ON relations
+    WHEN EXISTS (SELECT 1 FROM relations_refusees x
+                  WHERE x.from_id = NEW.from_id AND x.to_id = NEW.to_id
+                    AND x.relation_type = NEW.relation_type)
+BEGIN
+    UPDATE relations_refusees
+       SET tentatives = tentatives + 1,
+           derniere_tentative = strftime('%Y-%m-%d %H:%M:%f', 'now'),
+           derniere_source = NEW.source
+     WHERE from_id = NEW.from_id AND to_id = NEW.to_id
+       AND relation_type = NEW.relation_type;
+    INSERT INTO relations_refus_sources(refus_id, source, premiere, derniere)
+    SELECT x.id, COALESCE(NEW.source, ''), strftime('%Y-%m-%d %H:%M:%f', 'now'),
+           strftime('%Y-%m-%d %H:%M:%f', 'now')
+      FROM relations_refusees x
+     WHERE x.from_id = NEW.from_id AND x.to_id = NEW.to_id
+       AND x.relation_type = NEW.relation_type
+    ON CONFLICT(refus_id, source) DO UPDATE
+       SET derniere = excluded.derniere, tentatives = tentatives + 1;
+    SELECT RAISE(IGNORE);
+END;
+-- Un lien refusé peut aussi revenir par une réécriture : la fusion de deux
+-- fiches repointe les relations de l'absorbée (`scripts/fusionner_entites.py`,
+-- `UPDATE OR IGNORE`). La ligne reste alors sur l'absorbée, et part avec elle.
+-- Ni la fusion ni une modification à l'atelier ne sont une source qui redit
+-- le lien : écartées sans être comptées.
+CREATE TRIGGER IF NOT EXISTS relations_refus_respecte_maj
+    BEFORE UPDATE OF from_id, to_id, relation_type ON relations
+    WHEN EXISTS (SELECT 1 FROM relations_refusees x
+                  WHERE x.from_id = NEW.from_id AND x.to_id = NEW.to_id
+                    AND x.relation_type = NEW.relation_type)
+BEGIN
+    SELECT RAISE(IGNORE);
+END;
+-- fin du refus mémorisé
+
+-- 15/11/2026 — La fiche qu'une saisie d'entité a créée (`cree` = 1) ou rejointe
+-- (0). Le rejeu passait par le nom : renommée à l'atelier, la fiche n'était plus
+-- retrouvée et la saisie en recréait une. Ici et pas dans `saisies.json` : un
+-- identifiant de ligne ne vaut que pour CETTE base, le fichier voyage entre
+-- machines. Base refaite : le rejeu retombe sur le nom, comme avant. Rejoué
+-- par `collectors/db.py::assurer_rattachement` avant chaque rejeu des saisies.
+CREATE TABLE IF NOT EXISTS saisies_entites (
+    saisie_id   TEXT PRIMARY KEY,
+    entity_id   INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    cree        INTEGER NOT NULL DEFAULT 0
+);
 
 -- ----------------------------------------------------------------
 -- ÉVÉNEMENTS — délibérations, transactions, articles, arrêtés
@@ -510,6 +617,28 @@ CREATE TABLE IF NOT EXISTS collector_runs (
     error        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_collector_runs ON collector_runs(collector, finished_at DESC);
+
+-- Ce que la SOURCE a rendu à chaque passe (collectors/mesure.py), à côté de ce
+-- que la table a gagné : avec INSERT OR IGNORE, une source tarie et une source
+-- sans nouveauté laissent le même items_added = 0.
+--   nature 'reponses' : une ligne par hôte interrogé (statuts, types de
+--                       contenu, taille annoncée, hôtes de redirection) ;
+--   nature 'elements' : une ligne par source déclarée (éléments lus, forme).
+CREATE TABLE IF NOT EXISTS collector_mesures (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id     INTEGER NOT NULL REFERENCES collector_runs(id) ON DELETE CASCADE,
+    nature     TEXT NOT NULL,      -- reponses | elements
+    cle        TEXT NOT NULL,      -- l'hôte, ou le nom de la source
+    requetes   INTEGER,            -- échanges HTTP, sauts de redirection compris
+    statuts    TEXT,               -- JSON {"200": 12, "301": 1, "erreur:URLError": 1}
+    types      TEXT,               -- JSON {"application/json": 12}
+    vers       TEXT,               -- JSON, hôtes vers lesquels on a été renvoyé
+    octets     INTEGER,            -- somme des Content-Length, NULL si l'un manque
+    elements   INTEGER,            -- éléments lus
+    forme      TEXT,               -- JSON, clés ou en-têtes tels que lus (lot 2)
+    complete   INTEGER,            -- 1 : source relue en entier à chaque passe
+    UNIQUE (run_id, nature, cle)
+);
 
 -- ----------------------------------------------------------------
 -- FEED DE MONITORING — nouvelles données détectées
@@ -805,7 +934,8 @@ CREATE TABLE IF NOT EXISTS budget_annexe (
     source          TEXT NOT NULL,
     source_event_id INTEGER REFERENCES events(id),
     confidence      TEXT DEFAULT 'verified' CHECK(confidence IN ('verified','probable','hypothesis')),
-    created_at      TEXT DEFAULT (datetime('now'))
+    created_at      TEXT DEFAULT (datetime('now')),
+    siren           TEXT   -- SIREN qui a répondu : une ancienne commune = « avant fusion »
 );
 
 -- Détail par budget annexe, depuis les balances DGFiP (collectors/budgets_annexes.py).
@@ -824,6 +954,7 @@ CREATE TABLE IF NOT EXISTS budget_annexe_balance (
     solde_fonctionnement    REAL,
     source                  TEXT NOT NULL DEFAULT 'dgfip-balances',
     created_at              TEXT DEFAULT (datetime('now')),
+    siren                   TEXT,
     UNIQUE(year, budget)
 );
 
@@ -897,6 +1028,10 @@ CREATE TABLE IF NOT EXISTS embeddings (
     chunk_text   TEXT    NOT NULL,
     vector       BLOB    NOT NULL,
     created_at   TEXT    DEFAULT (datetime('now')),
+    -- Le modèle qui a calculé le vecteur, et son empreinte Ollama (12 car.) :
+    -- un index d'un autre modèle ne se compare pas (collectors/index_sens.py).
+    modele           TEXT,
+    modele_empreinte TEXT,
     UNIQUE(source_table, source_id)
 );
 CREATE INDEX IF NOT EXISTS idx_embeddings_entity ON embeddings(entity_id);
@@ -1143,6 +1278,20 @@ CREATE TABLE IF NOT EXISTS audit_log (
     ip_hash     TEXT,
     at          TEXT DEFAULT (datetime('now'))
 );
+-- Le journal est écrit à la seconde (`datetime('now')`), alors que le verrou
+-- optimiste `entities.updated_at` l'est au millième : pour dire QUI a écrit
+-- depuis la lecture d'une fiche, il faut comparer deux horloges de même finesse
+-- (encadré de conflit, audit du 15/11/2026 : l'ancienne valeur s'affichait « — »).
+-- Un déclencheur plutôt qu'un nouveau DEFAULT : un DEFAULT ne se change pas sur
+-- une table existante. Il ne touche qu'une ligne datée par le défaut, jamais
+-- une date posée à la main. `'now'` est figé pour toute l'instruction, le
+-- déclencheur compris : la comparaison ne peut pas tomber à cheval sur deux secondes.
+CREATE TRIGGER IF NOT EXISTS audit_log_at_milliemes
+    AFTER INSERT ON audit_log
+    WHEN NEW.at = strftime('%Y-%m-%d %H:%M:%S', 'now')
+BEGIN
+    UPDATE audit_log SET at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = NEW.id;
+END;
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_id);
 CREATE INDEX IF NOT EXISTS idx_audit_user   ON audit_log(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_at     ON audit_log(at DESC);
@@ -1244,7 +1393,24 @@ CREATE TABLE IF NOT EXISTS budget_annuel (
     montant     REAL,
     source      TEXT DEFAULT 'dgfip',
     created_at  TEXT DEFAULT (datetime('now')),
+    siren       TEXT,
     UNIQUE(year, compte, categorie)
+);
+
+-- Les comptes d'une commune ABSORBÉE d'un autre code (Véronne dans Saillans),
+-- relevés sous son propre SIREN. Table à part : la série de la commune et celle
+-- d'une absorbée ne s'additionnent jamais (tranché le 02/11/2026).
+CREATE TABLE IF NOT EXISTS budget_annuel_absorbees (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    siren       TEXT NOT NULL,
+    year        INTEGER NOT NULL,
+    categorie   TEXT NOT NULL,
+    compte      TEXT NOT NULL,
+    libelle     TEXT,
+    montant     REAL,
+    source      TEXT DEFAULT 'dgfip',
+    created_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE(siren, year, compte, categorie)
 );
 
 -- Les comptes des SYNDICATS auxquels l'intercommunalité adhère — eau, déchets,
@@ -1289,7 +1455,24 @@ CREATE TABLE IF NOT EXISTS ofgl_agregats (
     rural               TEXT,
     source              TEXT DEFAULT 'ofgl',
     created_at          TEXT DEFAULT (datetime('now')),
+    siren               TEXT,
     UNIQUE(year, agregat)
+);
+
+-- Même chose qu'`ofgl_agregats`, pour une commune absorbée (cf. budget_annuel_absorbees).
+CREATE TABLE IF NOT EXISTS ofgl_agregats_absorbees (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    siren               TEXT NOT NULL,
+    year                INTEGER NOT NULL,
+    agregat             TEXT NOT NULL,
+    montant             REAL,
+    euros_par_habitant  REAL,
+    population          INTEGER,
+    tranche_population  TEXT,
+    rural               TEXT,
+    source              TEXT DEFAULT 'ofgl',
+    created_at          TEXT DEFAULT (datetime('now')),
+    UNIQUE(siren, year, agregat)
 );
 
 CREATE TABLE IF NOT EXISTS dotations_etat (

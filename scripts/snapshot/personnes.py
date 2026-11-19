@@ -54,7 +54,9 @@ def beneficiaires_argent_public(conn) -> set[int]:
 
 
 def etape_personnes_publiques(conn, relations_ecartees) -> dict:
-    # 1) Personnes à rôle civique : élus, candidats, membres de commission.
+    # 1) Personnes à rôle civique : élus, candidats. Un membre de commission
+    #    n'en est pas un à ce seul titre (`ROLES_SANS_TITRE_PROPRE`).
+    roles = sorted(RULES["people"]["publish_only_with_relation_types"])
     civic_person_ids = {
         r["entity_id"] for r in rows(conn, f"""
             SELECT DISTINCT e.id AS entity_id
@@ -63,12 +65,12 @@ def etape_personnes_publiques(conn, relations_ecartees) -> dict:
             WHERE e.type = 'person'
               AND e.confidence IN ({",".join("?" for _ in RULES["confidence"]["public"])})
               AND r.confidence IN ({",".join("?" for _ in RULES["confidence"]["public"])})
-              AND r.relation_type IN ({",".join("?" for _ in RULES["people"]["publish_only_with_relation_types"])})
+              AND r.relation_type IN ({",".join("?" for _ in roles)})
               {pas_ecartee}
         """, [
             *sorted(RULES["confidence"]["public"]),
             *sorted(RULES["confidence"]["public"]),
-            *sorted(RULES["people"]["publish_only_with_relation_types"]),
+            *roles,
             relations_ecartees,
         ])
     }

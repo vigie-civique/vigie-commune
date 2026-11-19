@@ -40,10 +40,12 @@
   {#if $searchResults.length}
     <ul class="results">
       {#each $searchResults as item}
-        <li on:click={() => selectResult(item)}>
-          <span class="dot" style="background:{TYPE_COLORS[item.type] ?? 'var(--serie-gris)'}"></span>
-          <span class="name">{item.name}</span>
-          <span class="type">{item.type}</span>
+        <li>
+          <button type="button" on:click={() => selectResult(item)}>
+            <span class="dot" style="background:{TYPE_COLORS[item.type] ?? 'var(--serie-gris)'}"></span>
+            <span class="name">{item.name}</span>
+            <span class="type">{item.type}</span>
+          </button>
         </li>
       {/each}
     </ul>
@@ -78,15 +80,22 @@
     list-style: none;
     margin-top: 2px;
   }
-  li {
+  button {
     display: flex;
     align-items: center;
     gap: .5rem;
+    width: 100%;
     padding: .4rem .75rem;
-    cursor: pointer;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
     font-size: .82rem;
+    text-align: left;
+    cursor: pointer;
   }
-  li:hover { background: var(--fond); }
+  button:hover, button:focus-visible { background: var(--fond); }
+  button:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .type { font-size: .7rem; color: var(--texte-doux); flex-shrink: 0; }

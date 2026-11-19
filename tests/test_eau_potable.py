@@ -13,12 +13,19 @@ Ce que ces essais protègent :
      publié doit survivre ;
   4. rejouer une page n'écrit rien deux fois ;
   5. trois fractions d'un même paramètre (microcystine totale, dissoute, dans
-     la biomasse) sont trois résultats, pas un.
+     la biomasse) sont trois résultats, pas un ;
+  6. interrogés par lot, les réseaux gardent chacun le suivi de SA requête ; une
+     ligne qui ne cite aucun réseau du lot fait relire le lot réseau par réseau ;
+  7. une pagination plus courte que le `count` annoncé fait échouer le lot ;
+  8. un réseau qui ne répond pas fait échouer le step (Mascaras, 27/10/2026).
 """
 from __future__ import annotations
 
-from collectors.eau_potable import (depart, enregistrer_resultats, ensure_tables,
-                                    ligne_udi, noter_suivi)
+import pytest
+
+from collectors import eau_potable
+from collectors.eau_potable import (LotAmbigu, avancer_suivi, depart, enregistrer_resultats,
+                                    ensure_tables, fetch_resultats, ligne_udi, lire_lot)
 
 
 def _resultat(prel="03000199114", param="7010", reseaux=("030000476",),
@@ -39,6 +46,27 @@ def _resultat(prel="03000199114", param="7010", reseaux=("030000476",),
         "conformite_references_pc_prelevement": "N",
         "reseaux": [{"code": c, "nom": "—"} for c in reseaux],
     }
+
+
+def _servir(module, pages, count=None):
+    """Remplace Hub'Eau : rend `pages` dans l'ordre, chaînées par `next`."""
+    total = sum(len(p) for p in pages) if count is None else count
+    reponses = [{"count": total, "data": p, "next": f"page{i + 2}" if i + 1 < len(pages) else None}
+                for i, p in enumerate(pages)]
+    appels = []
+
+    def lire(url, *a, **k):
+        appels.append(url)
+        return reponses[len(appels) - 1] if len(appels) <= len(reponses) else reponses[-1]
+    module._get_json = lire
+    return appels
+
+
+@pytest.fixture(autouse=True)
+def _hubeau_d_origine():
+    origine = eau_potable._get_json
+    yield
+    eau_potable._get_json = origine
 
 
 def _reseaux_de(base, prel):
@@ -86,8 +114,8 @@ def test_la_reprise_part_du_dernier_prelevement_lu_pour_le_reseau(base):
     ensure_tables(base)
     page = [_resultat(prel="A", date="2024-03-01T08:00:00Z"),
             _resultat(prel="B", date="2026-07-13T13:14:00Z")]
-    enregistrer_resultats(base, page, "030000476")
-    noter_suivi(base, "030000476", page, None)
+    _servir(eau_potable, [page])
+    fetch_resultats(base, ["030000476"], "2016-01-01")
     assert depart(base, "030000476", None) == "2026-07-13"
     assert depart(base, "030000476", "2020-01-01") == "2020-01-01"
 
@@ -96,17 +124,17 @@ def test_un_rattachement_venu_d_un_voisin_ne_fait_pas_sauter_l_histoire(base):
     """Le bourg (473) rapporte un prélèvement de 2026 partagé avec Thoiras
     (476) : Thoiras n'a encore rien lu lui-même, il repart de 2016."""
     ensure_tables(base)
-    page = [_resultat(reseaux=("030000473", "030000476"))]
-    enregistrer_resultats(base, page, "030000473")
-    noter_suivi(base, "030000473", page, None)
+    _servir(eau_potable, [[_resultat(reseaux=("030000473", "030000476"))]])
+    fetch_resultats(base, ["030000473"], "2016-01-01")
     assert "030000476" in _reseaux_de(base, "03000199114")
     assert depart(base, "030000476", None) == "2016-01-01"
 
 
-def test_une_annee_vide_ne_recule_pas_le_suivi(base):
+def test_le_suivi_ne_recule_jamais(base):
     ensure_tables(base)
-    noter_suivi(base, "030000476", [_resultat(date="2025-06-01T08:00:00Z")], None)
-    noter_suivi(base, "030000476", [], "2025-06-01T08:00:00Z")
+    avancer_suivi(base, "030000476", "2025-06-01T08:00:00Z")
+    avancer_suivi(base, "030000476", "2019-01-01T08:00:00Z")
+    avancer_suivi(base, "030000476", None)
     assert depart(base, "030000476", None) == "2025-06-01"
 
 
@@ -159,3 +187,75 @@ def test_une_commune_sans_desserte_connue_ne_publie_rien(base):
     assert export_eau_potable(base, "99001") is None, "table absente"
     ensure_tables(base)
     assert export_eau_potable(base, "99001") is None
+
+
+def test_un_lot_garde_le_suivi_de_chaque_reseau(base):
+    """Lot (473, 476) : 476 n'est cité que par un prélèvement de 2018, 473 par
+    un de 2026. Chacun repart de ce que SA requête aurait rendu."""
+    ensure_tables(base)
+    appels = _servir(eau_potable, [[_resultat(prel="A", reseaux=("030000476",),
+                                              date="2018-05-02T08:00:00Z")],
+                                   [_resultat(prel="B", reseaux=("030000473",))]])
+    fetch_resultats(base, ["030000473", "030000476"], "2016-01-01")
+    assert "code_reseau=030000473%2C030000476" in appels[0]
+    assert len(appels) == 2, "une requête paginée pour le lot, pas une par réseau et par année"
+    assert depart(base, "030000473", None) == "2026-07-13"
+    assert depart(base, "030000476", None) == "2018-05-02"
+    assert _reseaux_de(base, "A") == {"030000476"}
+
+
+def test_un_reseau_du_lot_sans_ligne_garde_sa_reprise(base):
+    ensure_tables(base)
+    _servir(eau_potable, [[_resultat(reseaux=("030000473",))]])
+    fetch_resultats(base, ["030000473", "030000476"], "2016-01-01")
+    assert depart(base, "030000476", None) == "2016-01-01"
+
+
+def test_une_ligne_sans_reseau_du_lot_fait_relire_reseau_par_reseau(base):
+    ensure_tables(base)
+    ligne = _resultat(reseaux=())
+    with pytest.raises(LotAmbigu):
+        enregistrer_resultats(base, [ligne], ["030000473", "030000476"])
+    assert base.execute("SELECT COUNT(*) FROM eau_potable_prelevements").fetchone()[0] == 0
+    appels = []
+    eau_potable._get_json = lambda url, *a, **k: (appels.append(url)
+                                                  or {"count": 1, "data": [ligne], "next": None})
+    lire_lot(base, ["030000473", "030000476"], "2016-01-01")
+    assert len(appels) == 3
+    assert "code_reseau=030000476&" in appels[2]
+    assert _reseaux_de(base, "03000199114") == {"030000473", "030000476"}
+
+
+def test_une_pagination_coupee_fait_echouer_le_lot(base):
+    ensure_tables(base)
+    _servir(eau_potable, [[_resultat()]], count=20001)
+    with pytest.raises(RuntimeError, match="20001"):
+        fetch_resultats(base, ["030000476"], "2016-01-01")
+    assert depart(base, "030000476", None) == "2016-01-01", "le suivi n'avance pas"
+
+
+def test_un_reseau_muet_fait_echouer_le_step(base, monkeypatch):
+    ensure_tables(base)
+    monkeypatch.setattr(eau_potable, "get_conn", lambda: _SansFermer(base))
+    monkeypatch.setattr(eau_potable, "communes_du_step", lambda step: ["65303"])
+    udi = {"code_commune": "65303", "nom_quartier": None, "code_reseau": "065000767",
+           "nom_reseau": "ARROS-LUC", "debut_alim": None, "annee": "2026"}
+
+    def lire(url, *a, **k):
+        if "communes_udi" in url:
+            return {"count": 1, "data": [udi], "next": None}
+        raise OSError("HTTP Error 503: Service Unavailable")
+    eau_potable._get_json = lire
+    with pytest.raises(RuntimeError, match="065000767"):
+        eau_potable.run()
+
+
+class _SansFermer:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, nom):
+        return getattr(self._conn, nom)
+
+    def close(self):
+        pass

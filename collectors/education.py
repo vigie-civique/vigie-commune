@@ -55,7 +55,8 @@ def fetch_commune(insee: str) -> list[dict]:
             "limit": 100,
             "offset": offset,
         })
-        data = fetch_json(f"{API}?{params}", source="education", timeout=20)
+        data = fetch_json(f"{API}?{params}", source="education", timeout=20,
+                          complete=True)
         lot = data.get("results") or []
         resultats.extend(lot)
         offset += len(lot)

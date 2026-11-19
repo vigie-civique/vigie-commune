@@ -21,6 +21,7 @@
   const TYPE_COLORS = {
     business: '#9a6b12', association: '#2c6e4f', service: '#14556b',
     place: '#6c5b8f', person: '#a4453a', property: '#5c6b72',
+    monument: '#7b2d5b',
   }
   // Calques cartographiables (les personnes restent masquées : règle de publication).
   const LAYERS = [
@@ -28,11 +29,17 @@
     { key: 'associations', type: 'association', label: 'Associations' },
     { key: 'services',     type: 'service',     label: 'Services publics' },
     { key: 'places',       type: 'place',       label: 'Lieux' },
+    { key: 'monuments',    type: 'monument',    label: 'Monuments historiques' },
   ]
+  // Les monuments historiques sont des lieux (couche `places`) qui portent une
+  // protection Mérimée : on les sépare au chargement, pour qu'un monument
+  // fusionné avec sa fiche OSM (« lieu de culte ») se voie comme tel, sans
+  // être compté deux fois.
+  const estMonument = (f) => (f.properties?.monuments_historiques || []).length > 0
   let groups = {}             // key -> L.layerGroup
   let counts = {}             // key -> nb features affichées
   let sources = {}            // key -> FeatureCollection complète
-  let visible = { businesses: true, associations: true, services: true, places: true }
+  let visible = { businesses: true, associations: true, services: true, places: true, monuments: true }
   // Une carte sans fond reste utile : les repères sont là, et leur position
   // aussi. Le dire vaut mieux que de laisser croire à une carte cassée.
   let fondAbsent = ''
@@ -76,14 +83,18 @@
       const gardees = (fc.features || []).filter(retenu)
       counts[layer.key] = gardees.length
       groups[layer.key] = L.geoJSON({ type: 'FeatureCollection', features: gardees }, {
+        // Un monument ne se distingue pas par sa seule couleur (avis vigie-ux,
+        // 02/11/2026) : repère plus grand, cerné de sombre.
         pointToLayer: (feat, latlng) => L.circleMarker(latlng, {
-          radius: 5, color: '#fff', weight: 1.5,
-          fillColor: TYPE_COLORS[feat.properties?.type] || '#5c6b72', fillOpacity: 0.9,
+          ...(layer.key === 'monuments'
+            ? { radius: 7, color: '#1f1a24', weight: 2 }
+            : { radius: 5, color: '#fff', weight: 1.5 }),
+          fillColor: TYPE_COLORS[layer.type] || '#5c6b72', fillOpacity: 0.9,
         }),
         onEachFeature: (feat, lyr) => {
           const p = feat.properties || {}
           lyr.bindPopup(
-            `<strong>${p.name || '?'}</strong><br><span style="color:#5c6b72">${TYPE_LABELS[p.type] || p.type || ''}</span>` +
+            `<strong>${p.name || '?'}</strong><br><span style="color:#5c6b72">${layer.key === 'monuments' ? 'Monument historique' : (TYPE_LABELS[p.type] || p.type || '')}</span>` +
             (p.id ? `<br><a href="/entite/${p.id}">Voir la fiche →</a>` : '')
           )
         },
@@ -121,8 +132,14 @@
       if (!fond.ok) fondAbsent = fond.raison
 
       for (const layer of LAYERS) {
+        if (layer.key === 'monuments') continue
         try { sources[layer.key] = await loadJSON(`layers/${layer.key}.geojson`) }
         catch { continue }
+      }
+      if (sources.places) {
+        const tous = sources.places.features || []
+        sources.monuments = { type: 'FeatureCollection', features: tous.filter(estMonument) }
+        sources.places = { ...sources.places, features: tous.filter((f) => !estMonument(f)) }
       }
       sources = { ...sources }
       dessiner()
@@ -193,7 +210,7 @@
     {#each LAYERS as layer}
       <button class="chip" class:off={!visible[layer.key]} on:click={() => toggle(layer.key)}
               aria-pressed={visible[layer.key]}>
-        <span class="dot" style="background:{TYPE_COLORS[layer.type]}"></span>
+        <span class="dot" class:dot-mh={layer.key === 'monuments'} style="background:{TYPE_COLORS[layer.type]}"></span>
         {layer.label}{#if counts[layer.key]}{' '} <em>{counts[layer.key]}</em>{/if}
       </button>
     {/each}
@@ -212,7 +229,7 @@
     background: rgba(255,255,255,.94); color: var(--gris);
     font-size: .8rem; cursor: pointer; box-shadow: var(--ombre);
   }
-  .portee-carte button.on { background: var(--encre); color: #fff; border-color: var(--encre); }
+  .portee-carte button.on { background: var(--encre); color: var(--papier); border-color: var(--encre); }
   .portee-carte em { font-style: normal; opacity: .7; }
 
   .carte { position: relative; height: calc(100dvh - 58px); min-height: 480px; }
@@ -275,4 +292,5 @@
     .map { position: relative; height: 68vh; }
     .legende { position: static; transform: none; margin: .75rem 1rem; justify-content: flex-start; }
   }
+  .dot-mh { box-shadow: 0 0 0 2px #1f1a24; }
 </style>

@@ -29,6 +29,11 @@ EnvironmentFile=/opt/vigie/.env
 # n'est pas inscriptible (`ProtectHome`) : on lui en donne un, dans ses données.
 #   install -d -o vigie -m 0750 /opt/vigie/audits/.home
 Environment=HOME=/opt/vigie/audits/.home
+# Le serveur d'aperçu (scripts/servir_apercu.py, lancé par l'atelier) prend le
+# compte dans l'en-tête que nginx pose d'après la session, jamais dans un cookie
+# que le visiteur écrit. Exige le bloc d'aperçu à jour du gabarit nginx
+# (`auth_request`, `X-Vigie-Compte`) : le poser AVANT de recharger cette unité.
+Environment=VIGIE_APERCU_COMPTE_PAR_ENTETE=1
 # venv créé sur le serveur :
 #   python3 -m venv /opt/vigie/venv && /opt/vigie/venv/bin/pip install -r requirements.txt
 #
@@ -76,7 +81,8 @@ ReadWritePaths=-/opt/vigie/public-data -/opt/vigie/decisions
 # renommer un répertoire demande d'écrire dans son PARENT — un point de montage
 # lui-même ne se renomme pas. Ni `dashboard/` ni `dashboard/src` : le code du
 # tableau de bord reste en lecture seule. Avant le 04/10/2026, cette ligne
-# nommait `dashboard/static/api`, qui n'est écrit par rien.
+# nommait `dashboard/static/api` seul ; il est écrit (les synthèses,
+# `SYNTHESES_DIR` d'api.py), et reste couvert par la ligne ci-dessous.
 ReadWritePaths=-/opt/vigie/dashboard/static
 # Les dossiers thématiques s'écrivent depuis l'atelier (`dossiers/<slug>.md`).
 ReadWritePaths=-/opt/vigie/dossiers

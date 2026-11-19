@@ -18,7 +18,7 @@ import unicodedata
 from collections import Counter
 
 from scripts.snapshot.popolo import POPOLO_ROLES
-from scripts.snapshot.socle import RULES, rows, safe_url
+from scripts.snapshot.socle import ROLES_SANS_TITRE_PROPRE, RULES, rows, safe_url
 
 
 # ── Présentation des libellés publics ────────────────────────────────────────
@@ -196,8 +196,11 @@ def _formes_du_nom(p: dict) -> tuple[list[str], str]:
 
 def _ids_nommables(conn, ids_publics: set[int]) -> set[int]:
     """Les personnes publiques : publiées en fiche, ou qui ont SIÉGÉ ou tenu un
-    mandat — un mandat clos reste un mandat."""
-    mandats = sorted(set(POPOLO_ROLES) | set(RULES["people"]["publish_only_with_relation_types"]))
+    mandat — un mandat clos reste un mandat. Siéger en commission n'en est
+    pas un : la requête ne filtre pas la confiance, et un membre non élu lu
+    dans un PV (`probable`) serait devenu nommable dans tous les textes."""
+    mandats = sorted((set(POPOLO_ROLES) | set(RULES["people"]["publish_only_with_relation_types"]))
+                     - ROLES_SANS_TITRE_PROPRE)
     return ids_publics | {r["entity_id"] for r in rows(conn, f"""
         SELECT ee.entity_id
         FROM event_entities ee JOIN events ev ON ev.id = ee.event_id
@@ -347,7 +350,9 @@ _MAJ, _MIN = "A-ZÀ-ÖØ-ÞŒŠŽŸ", "a-zß-öø-ÿœšž"
 # doit pas emporter le verbe qui suit, écrit en capitales.
 _LIEU = (rf"(?-i:[{_MAJ}])[\w'’\-]+"
          rf"(?:[ \-](?:sur|sous|en|de|du|des|la|le|les|lès|(?-i:[{_MAJ}][{_MIN}'’\-]+)))*"
-         r"(?:\s*\(\s*\d[\d\s]*\))?")
+         # L'océrisation lit souvent la parenthèse fermante comme une accolade :
+         # « Testonville (99001} » laissait le code postal derrière le masque.
+         r"(?:\s*[({]\s*\d[\d\s]*[)}\]])?")
 _NAISSANCE = re.compile(
     rf"\b(?P<est>est\s+)?n(?P<genre>[ée](?:\(e\)|e)?)\s+(?:"
     rf"le\s+(?P<date>{_DATE_COMPLETE})(?P<lieu>\s+à\s+{_LIEU})?"
@@ -376,7 +381,12 @@ _DOMICILE = re.compile(
     rf"(?:\s+à\s+{_LIEU})?{_CP_VILLE}"
     # La commune d'abord, la voie ensuite : « demeurant à Testonville, 5 rue des
     # Lilas ». La voie numérotée est un domicile, civilité ou non.
-    rf"|(?P<lieudit>\s+(?:à|au|aux|en)\s+(?:lieu[- ]dit\s+)?{_LIEU})"
+    # Une incise en minuscules peut séparer le verbe du lieu : « demeurant au
+    # moment de la transaction à Testonville (99001) » (acte de la CC publié
+    # en clair, relevé par l'avis DPO du 26/10/2026). Le lieu exige toujours
+    # une majuscule, et une civilité avant le verbe (`domicile`).
+    rf"|(?P<lieudit>(?:\s+(?-i:[{_MIN}'’]+)(?:\s+(?-i:[{_MIN}'’]+)){{0,5}}?)?"
+    rf"\s+(?:à|au|aux|en)\s+(?:lieu[- ]dit\s+)?{_LIEU})"
     rf"(?P<voie_apres>\s*,{_ADRESSE_NUMEROTEE}\s*[^,.;\n]{{0,80}}?(?=\s*[,.;]|\s*\n|\s*$))?"
     r")", re.I)
 # « Mme FENAUDIN Lou, 14 rue des Tilleuls à Fictiville » : l'adresse suit le nom sans
@@ -386,6 +396,164 @@ _ADRESSE_DE_PARTICULIER = re.compile(
     r"(?P<qui>\b(?:Monsieur|Madame|Mademoiselle|M\.|Mme|Mlle)\s+[^\n,.;:–—]{1,50}?)"
     rf"\s*[,–—\-]\s*(?P<adr>\d{{1,4}}\s*(?:bis|ter)?\s*,?\s*{_VOIE}\b[^,.;:\n]{{0,60}}?)"
     rf"(?=\s+à\s|\s*[,.;:]|\s*\n|\s*$)(?:\s+à\s+{_LIEU})?", re.I)
+# ⚖️ L'adresse du BIEN aidé (arbitrage de Julien du 14/11/2026, sur avis du DPO) :
+# une aide à la rénovation d'une façade se délibère « pour le 220 route vieille »,
+# « façades du 7 chemin Fictif », « la façade située 35 rue Fictive », ou sous
+# un intertitre « NOM Prénom – 162 chemin du Pigeonnier ». Aucun verbe de domicile,
+# pas toujours de civilité devant : ni `_DOMICILE` ni `_ADRESSE_DE_PARTICULIER`
+# ne la voyaient, et sept extraits la servaient en clair (audit du 14/11). Le
+# bien aidé est presque toujours le domicile du demandeur. Dans un texte qui
+# parle d'une telle aide, TOUTE adresse est donc masquée, où qu'elle soit ; le
+# nom, la décision et le montant restent.
+#
+# Le déclencheur est large à dessein (relecture sécurité du 14/11) : exiger
+# « aide » puis « façade » dans la même phrase laissait sortir « Opération
+# façades : participation pour le 12 rue … », « une aide ⏎ pour la façade du … »
+# et toute aide dite d'un autre mot. « Façade » ou « ravalement » suffit, où que
+# ce soit ; pour un toit, un logement ou un immeuble, il faut en plus le
+# vocabulaire d'une aide. Le prix : l'adresse d'un bâtiment public est masquée
+# aussi dans ces textes.
+_AIDE_AU_BIEN = re.compile(
+    r"fa[çc]ades?|\bravalement|\bOPAH\b|prime\s+(?:à\s+l['’])?habitat"
+    r"|\b(?:aide|prime|subvention|participation)s?\b[^\n]{0,200}?"
+    r"\b(?:toiture|logement|immeuble|habitation|maison)s?\b", re.I)
+# Les voies qu'on ne cherche qu'ici, derrière un numéro : « cours » ou « bd »
+# seraient trop larges pour le masque général des domiciles.
+_VOIE_DU_BIEN = _VOIE[:-1] + r"|bd|av|ch|faubourg|fg|grand['’]?rue|cours)"
+_NUMERO = r"(?:n°\s*)?\d{1,4}(?:\s*(?:bis|ter)\b|[A-Da-d]\b)?"
+# Un numéro puis un mot de voie (« 12 rue », « n°12 de la rue ») ; ou, derrière
+# « le », « du », « au », « située », un numéro puis un toponyme en casse de
+# titre (« pour le 256 Camp de Fiction »). Sans ce qui précède, un numéro de page
+# suivi d'un mot à majuscule sur la ligne suivante (« 2 ⏎ Envoyé en
+# préfecture », « 2025, ⏎ Le Conseil ») passait pour une adresse : mesuré le
+# 14/11/2026 sur les extraits servis. Pas un mois (« le 15 Novembre 2023 »), pas
+# un mot de séance (« le 15 Conseillers », « au 30 Pour cent »), pas une route
+# classée (« la 999 route départementale »).
+_DEBUT_D_ADRESSE = re.compile(
+    rf"(?<![\w.,/]){_NUMERO}\s*,?\s+"
+    rf"(?=(?:(?:de\s+la|du|de\s+l['’])\s*)?(?i:{_VOIE_DU_BIEN})\b"
+    r"(?!\.?\s+(?i:d[ée]partementale|nationale|communale|foresti[èe]re)\b))"
+    r"|(?P<avant>\b(?:le|du|au|situ[ée]e?s?|sise?)\s+)"
+    rf"{_NUMERO}\s+"
+    rf"(?!(?i:{_MOIS_RE}|le|la|les|l|pour|conseil\w*|pr[ée]sents?|votants?|voix|euros?|membres?)\b)"
+    rf"(?=(?-i:[{_MAJ}][{_MIN}]))")
+# La voie d'abord, le numéro ensuite : « rue des Lilas n° 12 », « rue des Lilas, 12 – ».
+# Le numéro doit FINIR l'adresse : derrière un « n° » écrit, ou suivi d'une
+# ponctuation. « Travaux rue de la Gare, 3 lots » et « chemin de Ronde, 15 voix »
+# perdaient leur nombre (relecture sécurité du 14/11/2026).
+_VOIE_PUIS_NUMERO = re.compile(
+    rf"\b{_VOIE_DU_BIEN}\b\.?(?:[ \t]+[\w'’\-]+){{1,5}}?\s*"
+    r"(?:,?\s*n°\s*\d{1,4}\b(?!\s*\d)|,\s*\d{1,4}(?=\s*(?:[–—;:)]|-\s|\.(?!\d)|,(?!\d)|\n|$)))", re.I)
+# Sans numéro : un lieu-dit, un mas, un hameau (la forme courante hors des
+# bourgs), et la parcelle cadastrale, qui situe aussi bien qu'une adresse.
+_LIEU_DIT_DU_BIEN = re.compile(
+    r"\b(?:lieu[- ]dit|mas|hameau)\s+(?:(?:de|du|des|la|le|les)\s+|l['’]\s*)*"
+    rf"(?-i:[{_MAJ}])[\w'’\-]+(?:[ \-](?:de|du|des|la|le|les|(?-i:[{_MAJ}][{_MIN}'’\-]+)))*", re.I)
+# Les numéros suivants n'entrent que derrière leur propre « n° » : « section AB
+# n° 123, 1 500 € accordés » devenait « [adresse masquée] 500 € », un montant faux.
+_PARCELLE = re.compile(r"\bsection\s+[A-Z]{1,2}\s*,?\s*n°\s*\d+\b(?:\s*(?:,|et)\s*n°\s*\d+\b)*")
+_MOT_D_ADRESSE = re.compile(r"[\w'’\-]+")
+_SAUT_D_ADRESSE = re.compile(r"([ \t]*\n[ \t]*|[ \t]+)?")
+_VOIE_SEULE = re.compile(_VOIE_DU_BIEN, re.I)
+_LIAISON_D_ADRESSE = {"de", "du", "des", "la", "le", "les", "d", "l", "aux", "au"}
+MENTION_ADRESSE = "[adresse masquée]"
+
+
+def _fin_d_adresse(texte: str, debut: int) -> int:
+    """Où s'arrête le nom de la voie qui commence à `debut` (après le numéro).
+
+    Mot à mot plutôt que par un motif : l'océrisation coupe la ligne au milieu
+    (« 162 chemin du ⏎ Pigeonnier ») et la phrase continue sans ponctuation (« pour
+    le 220 route vieille à 479 € »). Un mot entre s'il est une
+    liaison, s'il porte une majuscule, ou s'il suit le mot de voie (« route
+    neuve ») ; un retour à la ligne ne se franchit qu'après une liaison, ou du
+    mot de voie vers une liaison (« rue ⏎ de la Gravière »).
+    """
+    fin, precedent, n, voie_vue, apres_voie, nom_vu, date = debut, None, 0, False, False, False, 0
+    while n < 8:
+        saut = _SAUT_D_ADRESSE.match(texte, fin).group(0) or ""
+        if precedent is not None and not saut:
+            break
+        mot = _MOT_D_ADRESSE.match(texte, fin + len(saut))
+        if not mot:
+            break
+        w = mot.group(0)
+        liaison = w.lower().rstrip("'’") in _LIAISON_D_ADRESSE
+        est_voie = bool(_VOIE_SEULE.fullmatch(w))
+        # « rue de l'Abbaye », « rue d'Alès » : l'article élidé tient au nom.
+        elide = bool(re.match(rf"[ldLD]['’][{_MAJ}]", w))
+        if precedent is not None:
+            apres_liaison = precedent.lower().rstrip("'’") in _LIAISON_D_ADRESSE
+            if "\n" in saut and not (apres_liaison or (apres_voie and liaison)):
+                break
+            # « rue du 8 Mai 1945 » : le jour n'entre que juste après la voie et
+            # ses liaisons, devant un mois écrit ; puis le mois, puis l'année.
+            # Tout autre nombre arrête la course : « 9 rue des Essais
+            # 1 200 € » devenait « [adresse masquée] 200 € », et « rue de la Gare
+            # du 12 mars 2024 » perdait son jour (troisième relecture du 14/11).
+            suite = texte[mot.end():mot.end() + 14]
+            if date == 0 and w.isdigit() and apres_liaison and not nom_vu and re.match(
+                    rf"\s+{_MOIS_RE}\b", suite, re.I):
+                date_de_voie, date = True, 1
+            elif date == 1 and re.fullmatch(_MOIS_RE, w, re.I):
+                date_de_voie, date = True, 2
+            elif date == 2 and re.fullmatch(r"(?:1[89]|20)\d{2}", w):
+                date_de_voie, date = True, 3
+            else:
+                date_de_voie = False
+                if w.isdigit():
+                    break
+            # « n°12 de la rue … » : la voie peut venir après ses liaisons.
+            if not (liaison or elide or w[0].isupper() or apres_voie or date_de_voie
+                    or (est_voie and not voie_vue)):
+                break
+        fin, precedent, n = mot.end(), w, n + 1
+        # « route neuve » : un mot en minuscules n'entre qu'après le PREMIER mot
+        # de voie. Après un nom qui en est un aussi (« 4 chemin de la Place
+        # le montant »), la phrase reprend.
+        apres_voie = est_voie and not voie_vue
+        nom_vu = nom_vu or (voie_vue and not liaison and not est_voie)
+        voie_vue = voie_vue or est_voie
+        if est_voie and texte[fin:fin + 1] == ".":    # « av. », « ch. », « bd. »
+            fin += 1
+    # Une liaison en fin de course n'appartient pas à l'adresse (« … de la »).
+    while True:
+        m = re.search(r"\s+([\w'’]+)$", texte[debut:fin])
+        if not m or m.group(1).lower().rstrip("'’") not in _LIAISON_D_ADRESSE:
+            return fin
+        fin = debut + m.start()
+
+
+def masquer_adresses_du_bien(texte: str, compteur: Counter) -> str:
+    """Masque toute adresse d'un texte qui parle d'une aide à un bien."""
+    if not _AIDE_AU_BIEN.search(texte):
+        return texte
+    morceaux, curseur = [], 0
+    for m in _DEBUT_D_ADRESSE.finditer(texte):
+        if m.start() < curseur:
+            continue
+        fin = _fin_d_adresse(texte, m.end())
+        if fin == m.end():
+            continue
+        morceaux += [texte[curseur:m.start()], m.group("avant") or "", MENTION_ADRESSE]
+        curseur = fin
+        compteur["adresse_du_bien"] += 1
+    sortie = "".join(morceaux) + texte[curseur:]
+    for motif in (_VOIE_PUIS_NUMERO, _PARCELLE):
+        sortie, k = motif.subn(MENTION_ADRESSE, sortie)
+        compteur["adresse_du_bien"] += k
+
+    # Un hameau ou un lieu-dit ne situe quelqu'un que si quelqu'un est nommé à
+    # côté : « l'assainissement du hameau de X » reste (mesure du 14/11/2026).
+    def lieu_dit(m):
+        autour = sortie[max(0, m.start() - VOISINAGE_D_UNE_PERSONNE):m.end() + VOISINAGE_D_UNE_PERSONNE]
+        if not _PERSONNE_DANS_UN_TITRE.search(autour):
+            return m.group(0)
+        compteur["adresse_du_bien"] += 1
+        return MENTION_ADRESSE
+    return _LIEU_DIT_DU_BIEN.sub(lieu_dit, sortie)
+
+
 # Un domicile sans numéro n'en est un que pour une PERSONNE : « M. et Mme X
 # domiciliés à Croix de Castres » — mais « l'association domiciliée à Viane ».
 _CIVILITE_AVANT = re.compile(r"(?:\bM\.|\bMM\.|\bMmes?\b|\bMonsieur\b|\bMadame\b)[^\n]{0,60}$")
@@ -426,6 +594,12 @@ _RESIDU = re.compile(
     rf"|\b(?:domicili[ée]e?s?|demeurant|r[ée]sidant){_ADRESSE_NUMEROTEE}"
     r"|\b(?:domicili[ée]e?s?|demeurant|r[ée]sidant)\b[^.;]{0,80}?"
     rf"\b\d{{1,4}}\s*(?:bis|ter)?\s*,?\s*{_VOIE}\b", re.I)
+
+# Le filet de l'adresse du bien : il ne cherche pas comme le masque (mot à mot
+# depuis le numéro) mais un voisinage, un numéro puis un mot de voie.
+_VOIE_NUMEROTEE = re.compile(
+    rf"(?<![\w.,/])\d{{1,4}}\s*(?:bis|ter)?\s*,?\s+{_VOIE_DU_BIEN}\b"
+    r"(?!\.?\s+(?:d[ée]partementale|nationale|communale|foresti[èe]re)\b)", re.I)
 
 
 def _age(naissance: str, jour: str | None) -> int | None:
@@ -471,6 +645,117 @@ def convocation_publique(c: dict, jour: str | None, noms_publics, masquages, red
     if points:
         sortie["ordre_du_jour"] = points
     return sortie
+
+
+# ⚖️ Le TITRE d'un acte ne nomme plus un particulier (règle du 27/10/2026, qui
+# reprend l'arbitrage du 16/09 pour les titres seulement ; le texte de l'acte,
+# déplié dessous, reste cité). Un titre sort partout : fiches, recherche, fil,
+# flux RSS, fichiers ODbL, et un flux repris par un agrégateur ne se rectifie
+# plus. La personne y est donc désignée par son rôle, et l'acte garde sa nature,
+# son montant et son lien. Sont nommés : qui siège ou tient un mandat
+# (`noms_publics`). Cf. SECURITY.md, « Une donnée publiée à tort ».
+MENTION_AGENT = "un agent"
+# Les façons de désigner une personne devant son nom. Élargies le 14/11/2026
+# (relecture sécurité) : « Mr », « Melle », « Vve », les capitales, « M.NOM »
+# sans espace, et ce qui désigne un foyer (« consorts », « époux », « famille »,
+# « indivision ») sortaient intacts.
+_CIVILITE_DE_TITRE = (r"(?:Monsieur|Madame|Mademoiselle|MONSIEUR|MADAME|MADEMOISELLE"
+                      r"|MM\.|M\.|Mr\.?|MR\.?|Mmes?|MMES?|Mlle|MLLE|Melle|MELLE|Vve|VVE|Veuve|VEUVE)")
+_FOYER_DE_TITRE = (r"(?:[Cc]onsorts|CONSORTS|[ÉEée]poux|[ÉE]POUX|[Ff]amille|FAMILLE"
+                   r"|[Ii]ndivision|INDIVISION)")
+_ET_CIVILITE = r"(?:\s+(?:et|ET)\s+(?:Madame|Monsieur|Mme|MME|MADAME|MONSIEUR|M\.))?"
+_PERSONNE_DANS_UN_TITRE = re.compile(
+    rf"(?<!\w)(?:{_CIVILITE_DE_TITRE}{_ET_CIVILITE}\s*|{_FOYER_DE_TITRE}\s+)"
+    # Pas « Monsieur Le Maire », « Madame La Présidente ».
+    r"(?!(?:Le|La|Les|L['’])\b)(?:"
+    # Un patronyme en capitales, prénom avant ou après.
+    rf"(?:[{_MAJ}][{_MIN}'’\-]+\s+){{0,2}}[{_MAJ}][{_MAJ}'’\-]+(?:\s+[{_MAJ}][{_MAJ}'’\-]+)*"
+    rf"(?:\s+[{_MAJ}][{_MIN}'’\-]+)?"
+    # Ou tout en casse de titre : « M. et Mme Martinot », « Monsieur Martinot Paul ».
+    rf"|[{_MAJ}][{_MIN}'’\-]+(?:\s+[{_MAJ}][{_MIN}'’\-]+)?)")
+_MOTS_DE_CIVILITE = {"M", "MM", "MR", "MME", "MMES", "MLLE", "MELLE", "VVE", "VEUVE", "MONSIEUR",
+                     "MADAME", "MADEMOISELLE", "CONSORTS", "EPOUX", "ÉPOUX", "FAMILLE",
+                     "INDIVISION", "ET"}
+# Une mesure individuelle de ressources humaines vise un agent, pas un usager.
+_MESURE_RH = re.compile(
+    r"\bagents?\b|mise\s+à\s+disposition|recrutement|\brecruter\b|stagiaire|titularisation"
+    r"|avancement\s+de\s+grade|\bvacataire|\bapprenti", re.I)
+# Le numéro d'une autorisation d'urbanisme joint au nom d'un particulier, c'est
+# son terrain : les permis Sitadel le retirent déjà (`_sources_note`).
+_NUMERO_D_AUTORISATION = re.compile(
+    r"\b(?:PC|DP|PA|PD|CU[ab]?)\s*(?:n°\s*)?\d{3}\s*\d{3}(?:\s*\d{2}\s*[A-Z]?\s*\d{3,5})?\b")
+# Ce qui n'est pas un titre d'acte, mais un morceau de tableau ou de tampon que
+# la découpe du procès-verbal a pris pour tel (avis DPO du 27/10/2026).
+_DEBUT_DE_FRAGMENT = re.compile(
+    r"^\s*(?:\||AR\s+CONTR[ÔO]LE\b|D[ée]lib[ée]r[ée]\b|R[ée]sultat\s+du\s+vote\b)", re.I)
+
+
+# Un titre qui parle d'un MANDAT : là seulement, un patronyme seul peut être
+# l'élu. Des tournures propres au mandat, pas des mots courants : « commission »,
+# « titulaire », « représentant », « maire » gardaient « M. NOM » dans « Aide aux
+# façades sur avis de la commission – M. NOM » (relecture sécurité du 14/11/2026).
+_ACTE_DE_MANDAT = re.compile(
+    r"d[ée]signation|[ée]lection|\b[ée]lue?s?\b|\bd[ée]l[ée]gu[ée]e?s?\b"
+    r"|d[ée]l[ée]gations?\s+(?:de|du|des|au|aux|à)\b|indemnit[ée]s?\s+de\s+fonction"
+    r"|installation\s+du\s+conseil|\bd[ée]mission|\bprocuration|secr[ée]taire\s+de\s+s[ée]ance"
+    r"|\badjointe?s?\b|\bsuppl[ée]ante?s?\b", re.I)
+# Et un titre qui parle d'un bien ou d'une aide ne nomme jamais par un doute.
+_ACTE_ENVERS_UN_PARTICULIER = re.compile(
+    r"\baides?\b|\bsubvention|\bprime\b|fa[çc]ade|\bvente\b|\bcession\b|\bacquisition\b"
+    r"|\bbail\b|\bloyer|\bterrain\b|\bparcelle|\bpermis\b|\bsecours\b|\bremise\b", re.I)
+
+
+def _est_publique(personne: str, noms_publics: set[str], titre: str = "") -> bool:
+    """La personne écrite dans ce TITRE est-elle publique ?
+
+    Prénom et nom reconnus : oui. Un patronyme seul (« M. NOM », « M. et Mme
+    NOM ») est un homonyme possible ; jusqu'au 14/11/2026 le doute gardait le
+    nom, et le couple bénéficiaire d'une aide sortait dans le titre, la
+    recherche et les fichiers parce qu'un élu portait le même nom. Les deux
+    erreurs n'ont pas le même prix (avis DPO du 14/11) : taire un élu dans un
+    titre ne coûte presque rien, le texte cité dessous le nomme ; nommer un
+    particulier part partout et ne se rattrape plus. Le doute profite donc au
+    rôle, sauf dans un titre qui parle d'un mandat et de rien d'autre, et
+    jamais pour un couple ou un foyer.
+    """
+    haut = personne.upper()
+    mots = [m for m in re.findall(r"[\w'’\-]+", haut) if m not in _MOTS_DE_CIVILITE]
+    if any(" ".join(mots[i:j]) in noms_publics
+           for i in range(len(mots)) for j in range(i + 2, len(mots) + 1)):
+        return True
+    foyer = bool(re.search(r"\bET\s+(?:MME|MADAME|M\.|MONSIEUR)|CONSORTS|[ÉE]POUX|FAMILLE|INDIVISION", haut))
+    return (len(mots) == 1 and not foyer
+            and bool(_ACTE_DE_MANDAT.search(titre))
+            and not _ACTE_ENVERS_UN_PARTICULIER.search(titre)
+            and any(mots[0] in n.split() for n in noms_publics))
+
+
+def titre_d_acte(titre: str, jour: str | None, noms_publics: set[str],
+                 compteur: Counter) -> tuple[str | None, str | None]:
+    """Le titre publiable d'un acte, ou `(None, motif)` s'il n'est pas un titre."""
+    if _DEBUT_DE_FRAGMENT.match(titre):
+        return None, "titre_fragment"
+    texte = masquer_donnees_personnelles(titre, jour, noms_publics, compteur)
+    role = MENTION_AGENT if _MESURE_RH.search(texte) else MENTION_PARTICULIER
+    remplaces = 0
+
+    def personne(m):
+        nonlocal remplaces
+        if _est_publique(m.group(0), noms_publics, texte):
+            return m.group(0)
+        remplaces += 1
+        return role
+
+    sortie = _PERSONNE_DANS_UN_TITRE.sub(personne, texte)
+    if not remplaces:
+        return sortie, None
+    compteur["titre_designe_par_son_role"] += remplaces
+    sortie = _NUMERO_D_AUTORISATION.sub("[numéro retiré]", sortie)
+    sortie = re.sub(rf"\b([Dd])e ({role})\b", r"\1'\2", sortie)
+    # « | M. Prénom NOM », tiré d'un tableau : il ne reste aucune décision.
+    if len(re.findall(r"[^\W\d_]{3,}", sortie.replace(role, " "))) < 2:
+        return None, "titre_reduit_a_un_nom"
+    return sortie, None
 
 
 def masquer_donnees_personnelles(texte: str, jour: str | None,
@@ -533,7 +818,8 @@ def masquer_donnees_personnelles(texte: str, jour: str | None,
         compteur["domicile"] += 1
         return f"{m.group('qui')}, [domicile masqué]"
 
-    courant = _TABLEAU_DES_ELUS.sub(tableau, texte)
+    courant = masquer_adresses_du_bien(texte, compteur)
+    courant = _TABLEAU_DES_ELUS.sub(tableau, courant)
     courant = _NAISSANCE.sub(naissance, courant)
     courant = _DATE_DE_NAISSANCE.sub(date_de_naissance, courant)
     courant = _DOMICILE.sub(domicile, courant)
@@ -606,10 +892,160 @@ def champ_publiable(valeur, jour: str | None, noms_publics: set[str],
     return CHAMP_RETIRE if refus else texte
 
 
+# ⚖️ Les actes dont le TEXTE ne sort pas (arbitrage de Julien du 14/11/2026, sur
+# avis du DPO et de l'avocat du conseil). Le texte d'une délibération est cité
+# tel que la collectivité l'a publié, noms compris ; mais quand la décision porte
+# sur la situation d'une personne, le site n'en reproduit pas le texte : il garde
+# le titre (qui désigne la personne par son rôle), la date, le montant et le lien
+# vers la pièce de la collectivité. Un masque par motifs a déjà manqué ces textes
+# plusieurs fois ; une catégorie entière tient par construction.
+#
+# Deux régimes (relecture sécurité du 14/11) :
+# - TOUJOURS : ce qui liste des débiteurs ou des personnes protégées, souvent
+#   dans un tableau sans civilité (« NOM Prénom 45,00 € », que rien ne
+#   distingue d'une ligne de budget) ;
+# - SI UNE PERSONNE Y EST NOMMÉE qui n'est pas publique : un règlement qui
+#   décrit le licenciement, un régime indemnitaire qui cite le congé de longue
+#   maladie, une subvention au CCAS pour l'aide sociale, la protection
+#   fonctionnelle du maire se lisent ; la mesure prise envers quelqu'un, non.
+_SANS_EXTRAIT_TOUJOURS = (
+    ("creance_ou_impaye", re.compile(
+        r"admissions?\s+en\s+non[- ]valeurs?|cr[ée]ances?\s+(?:[ée]teintes?|irr[ée]couvrables?)"
+        r"|surendettement|effacement\s+de\s+(?:la\s+|sa\s+)?dette", re.I)),
+    # Ce qui se PRONONCE envers quelqu'un, nom écrit avec ou sans civilité : le
+    # régime « si une personne est nommée » laissait sortir « NOM Prénom, adjoint
+    # technique, est placé en congé de longue maladie » (seconde relecture
+    # sécurité du 14/11/2026), une donnée de santé. La règle générale qui ne
+    # fait que citer ces mots (un règlement, un régime indemnitaire) n'emploie
+    # pas ces tournures.
+    ("mesure_individuelle_agent", re.compile(
+        r"sanction\s+disciplinaire|conseil\s+de\s+discipline|exclusion\s+temporaire"
+        r"|plac[ée]e?s?\s+en\s+(?:cong[ée]|disponibilit[ée])"
+        r"|prononce\s+(?:le\s+licenciement|la\s+r[ée]vocation)|licenciement\s+pour\s+inaptitude", re.I)),
+    ("logement_d_habitation", re.compile(
+        r"bail\s+d['’]habitation|\bexpulsion\s+d[eu]\b", re.I)),
+    # Pas « tuteur » (de stage, d'apprentissage) ni « sous tutelle du ministère » :
+    # les treize occurrences des extraits servis le 14/11/2026 étaient celles-là.
+    ("personne_protegee", re.compile(
+        r"\bcuratelle\b|sauvegarde\s+de\s+justice|\b(?:plac[ée]e?s?|mise?s?)\s+sous\s+tutelle"
+        r"|\btutelle\s+d[e'’]\s*(?:M\.|Mme|Monsieur|Madame)", re.I)),
+)
+_SANS_EXTRAIT_SI_PERSONNE = (
+    ("aide_sociale", re.compile(
+        # Pas « secours » seul (le service d'incendie et de secours), ni
+        # « situation financière » seule (celle de la commune, à chaque budget).
+        r"\baides?\s+sociales?\b|\bsecours\s+(?:exceptionnels?|d['’]urgence|financiers?|alimentaires?)"
+        r"|\bun\s+secours\b|\baides?\s+(?:alimentaires?|d['’]urgence)\b|\bbons?\s+alimentaires?"
+        r"|\baides?\s+(?:financi[èe]res?\s+)?exceptionnelles?"
+        r"|situation\s+(?:familiale|sociale|personnelle)"
+        r"|situation\s+financi[èe]re\s+(?:difficile|pr[ée]caire|d[ée]licate)", re.I)),
+    ("creance_ou_impaye", re.compile(
+        r"remises?\s+gracieuses?|\bimpay[ée]s?\b|retards?\s+de\s+(?:loyers?|paiement)"
+        r"|\bd[ée]gr[èe]vement", re.I)),
+    ("logement_d_habitation", re.compile(
+        r"\bexpulsion\b"
+        r"|\b(?:logement|appartement)s?\b[^\n]{0,160}?\b(?:bail|lou[ée]e?s?|loyers?|locataires?|occupante?s?)\b"
+        r"|\b(?:bail|loyers?|locataires?|occupante?s?)\b[^\n]{0,160}?\b(?:logement|appartement)s?\b", re.I)),
+    ("mesure_individuelle_agent", re.compile(
+        r"disciplinaire|conseil\s+de\s+discipline|\blicenciement\b|rupture\s+conventionnelle"
+        r"|\br[ée]vocation\b|\binaptitude\b|cong[ée]s?\s+(?:de\s+)?(?:longue\s+|grave\s+)?maladie"
+        r"|maladie\s+ordinaire|cong[ée]s?\s+de\s+longue\s+dur[ée]e|protection\s+fonctionnelle"
+        r"|temps\s+partiel\s+th[ée]rapeutique|retraite\s+pour\s+invalidit[ée]"
+        r"|mise\s+en\s+disponibilit[ée]|\breclassement\b|(?:comit[ée]|conseil)\s+m[ée]dical", re.I)),
+    # Pas « tribunal » ni « recours » seuls : presque chaque délibération finit
+    # par la mention des voies de recours (« peut faire l'objet d'un recours pour
+    # excès de pouvoir devant le Tribunal administratif », 430 occurrences sur
+    # 682 extraits mesurés le 14/11/2026). Il faut le vocabulaire d'un différend.
+    ("litige_avec_un_particulier", re.compile(
+        r"ester\s+en\s+justice|protocole\s+transactionnel|\bassignation\b|\blitige\b"
+        r"|\bcontentieux\s+(?:opposant|avec|engag[ée]|en\s+cours)"
+        r"|d[ée]fendre\s+(?:les\s+int[ée]r[êe]ts\s+de\s+)?la\s+(?:commune|communaut[ée])"
+        r"|\brequ[êe]te\s+(?:de|d[ée]pos[ée]e|pr[ée]sent[ée]e|introduite)\b"
+        r"|\bmise\s+en\s+demeure\b|\baffaire\s+(?:opposant|l['’]opposant)"
+        # « peut être saisi par l'application Télérecours » est au pied de 790
+        # extraits sur 3 356 : seul « a été saisi par » dit un différend engagé.
+        r"|\ba\s+[ée]t[ée]\s+saisie?\s+par\b|recours\s+gracieux"
+        r"|\bindemnisation\s+d[eu]\b|\bpr[ée]judice\s+subi", re.I)),
+)
+
+
+# Sur une même ligne, et pas le tampon de la préfecture (« GARD Envoyé en
+# préfecture », « VIGAN Reçu le », 300 occurrences sur les extraits servis).
+_NOM_PUIS_PRENOM = re.compile(
+    rf"(?<![\w'’\-])([{_MAJ}][{_MAJ}'’\-]{{2,}})[ \t]+"
+    r"(?!(?:Envoy[ée]|Reçu|Date|Abstentions?|Pour|Contre|Nombre|Causses)\b)"
+    rf"[{_MAJ}][{_MIN}]{{2,}}(?:-[{_MAJ}][{_MIN}]+)?\b")
+_CAPITALES_D_UN_ACTE = {
+    "CONSEIL", "COMMUNE", "COMMUNAUTE", "COMMUNAUTÉ", "MAIRE", "MAIRIE", "DECIDE", "DÉCIDE",
+    "APPROUVE", "AUTORISE", "DIT", "PRECISE", "PRÉCISE", "CHARGE", "ADOPTE", "FIXE", "ACCEPTE",
+    "DEMANDE", "VALIDE", "PREND", "EMET", "ÉMET", "VOTE", "RAPPELLE", "CONSIDERANT",
+    "CONSIDÉRANT", "VU", "ARTICLE", "BUDGET", "ANNEXE", "OBJET", "DELIBERATION", "DÉLIBÉRATION",
+    "SEANCE", "SÉANCE", "POUR", "CONTRE", "ABSTENTION", "ABSTENTIONS", "TOTAL", "MONTANT",
+    "ANNEE", "ANNÉE", "SECTION", "CHAPITRE", "COMPTE", "DEPENSES", "DÉPENSES", "RECETTES",
+    "SARL", "SAS", "SCI", "EURL", "SA", "SCOP", "EARL", "GAEC", "ASSOCIATION", "SYNDICAT",
+    "SOCIETE", "SOCIÉTÉ", "ENTREPRISE", "ETS", "CCAS", "SDIS", "EPCI", "RIFSEEP", "DETR",
+    "PLU", "CDG", "HT", "TTC", "TVA", "IFSE", "CIA", "PRESENTS", "PRÉSENTS", "ABSENTS",
+    "EXCUSES", "EXCUSÉS", "VOTANTS", "SECRETAIRE", "SECRÉTAIRE", "PRESIDENT", "PRÉSIDENT",
+}
+#: Autour du mot, la distance où une personne nommée est celle que la mesure
+#: vise. Un texte entier nomme presque toujours quelqu'un qui n'est pas élu (un
+#: agent, un notaire, un demandeur d'un autre point) : sans cette borne, un
+#: règlement qui cite le licenciement perdait son texte pour un nom écrit trois
+#: pages plus loin (mesure du 14/11/2026 sur les extraits servis).
+VOISINAGE_D_UNE_PERSONNE = 300
+
+
+def _nomme_une_personne_privee(texte: str, noms_publics: set[str]) -> bool:
+    """Le texte nomme-t-il, derrière une civilité, quelqu'un qui n'est pas public ?
+
+    Un patronyme seul partagé avec une personne publique compte pour elle : dans
+    un procès-verbal, « M. NOM expose » est d'abord l'adjoint qui rapporte, et
+    le traiter en particulier retirerait le texte de la moitié des actes.
+    """
+    trouvees = [m.group(0) for m in _PERSONNE_DANS_UN_TITRE.finditer(texte)]
+    # « DUPONT Paul 150 € », dans un tableau : un patronyme en capitales puis un
+    # prénom, sans civilité. Les mots d'un acte écrits en capitales n'en sont pas.
+    trouvees += [m.group(0) for m in _NOM_PUIS_PRENOM.finditer(texte)
+                 if m.group(1) not in _CAPITALES_D_UN_ACTE]
+    for forme in trouvees:
+        mots = [w for w in re.findall(r"[\w'’\-]+", forme.upper())
+                if w not in _MOTS_DE_CIVILITE]
+        if not mots:
+            continue
+        if any(" ".join(mots[i:j]) in noms_publics
+               for i in range(len(mots)) for j in range(i + 2, len(mots) + 1)):
+            continue
+        if len(mots) == 1 and any(mots[0] in n.split() for n in noms_publics):
+            continue
+        return True
+    return False
+
+
+def motif_sans_extrait(titre: str | None, texte: str | None,
+                       noms_publics: set[str]) -> str | None:
+    """Pourquoi le texte de cet acte ne sort pas, ou None s'il peut sortir."""
+    ensemble = f"{titre or ''}\n{texte or ''}"
+    for motif, marque in _SANS_EXTRAIT_TOUJOURS:
+        if marque.search(ensemble):
+            return f"sans_extrait_{motif}"
+    for motif, marque in _SANS_EXTRAIT_SI_PERSONNE:
+        for m in marque.finditer(ensemble):
+            # Autour du mot, et en tête : un intertitre « Situation de M. X »
+            # porte le nom, la mesure vient trois paragraphes plus bas.
+            autour = (ensemble[:VOISINAGE_D_UNE_PERSONNE] + "\n"
+                      + ensemble[max(0, m.start() - VOISINAGE_D_UNE_PERSONNE):
+                                 m.end() + VOISINAGE_D_UNE_PERSONNE])
+            if _nomme_une_personne_privee(autour, noms_publics):
+                return f"sans_extrait_{motif}"
+    return None
+
+
 def texte_publiable(texte: str, jour: str | None, noms_publics: set[str],
                     compteur: Counter) -> tuple[str | None, str | None]:
     """Le texte d'une délibération tel qu'il sort — ou le motif de son refus."""
     masque = masquer_donnees_personnelles(texte.strip(), jour, noms_publics, compteur)
     if _RESIDU.search(masque):
         return None, "donnee_personnelle_non_masquee"
+    if _AIDE_AU_BIEN.search(masque) and _VOIE_NUMEROTEE.search(masque):
+        return None, "adresse_du_bien_non_masquee"
     return masque, None

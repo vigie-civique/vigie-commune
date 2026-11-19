@@ -70,7 +70,7 @@ def test_les_deux_modules_partagent_la_meme_declaration():
     pytest.importorskip("pdfplumber",
                         reason="job « tests-deps » : pip install -r requirements.txt")
     from collectors import cm_ocr, conseils
-    assert conseils.OPTIONS_OCRMYPDF is cm_ocr.OPTIONS_OCRMYPDF, (
+    assert conseils.options_ocrmypdf is cm_ocr.options_ocrmypdf, (
         "les deux modules tiennent deux objets distincts : la déclaration a été "
         "dupliquée au lieu d'être importée")
 
@@ -97,3 +97,60 @@ def test_la_rasterisation_atteint_la_resolution_du_calque_de_texte():
     valeur = OPTIONS_OCRMYPDF[OPTIONS_OCRMYPDF.index("--oversample") + 1]
     assert int(valeur) >= 300, (
         f"rastérisation à {valeur} ppi, sous les 300 ppi du calque de texte")
+
+
+def test_les_pages_couchees_sont_redressees_meme_sous_un_bandeau_droit():
+    """Une page scannée couchée se redresse avant d'être lue.
+
+    Le 16/04/2026, des pages A3 couchées (90°) sous un bandeau de
+    télétransmission resté droit ont donné 48 fausses délibérations publiées.
+    Tesseract voyait la rotation avec une confiance de 12,86 : sous le seuil par
+    défaut d'ocrmypdf (14), la page n'était pas redressée. La borne est cette
+    mesure — remonter le seuil au-dessus la ferait relire de travers.
+    """
+    pytest.importorskip("pdfplumber",
+                        reason="job « tests-deps » : pip install -r requirements.txt")
+    from collectors.cm_ocr import OPTIONS_OCRMYPDF
+    assert "--rotate-pages" in OPTIONS_OCRMYPDF, (
+        "aucun redressement : une page scannée couchée est lue de travers")
+    assert "--rotate-pages-threshold" in OPTIONS_OCRMYPDF, (
+        "seuil par défaut (14) : la page couchée du 16/04/2026 (12,86) n'est pas redressée")
+    seuil = OPTIONS_OCRMYPDF[OPTIONS_OCRMYPDF.index("--rotate-pages-threshold") + 1]
+    assert float(seuil) < 12.86, (
+        f"seuil {seuil} : la page couchée du 16/04/2026 (confiance 12,86) "
+        f"ne serait pas redressée")
+
+
+def test_le_delai_de_locr_suit_la_longueur_du_document():
+    """Le recueil de 521 pages du 29/10/2025 a dépassé un délai fixe de 1 800 s
+    sur le serveur, à 5,8 s par page mesurées : il lui en fallait plus de 3 000."""
+    pytest.importorskip("pdfplumber",
+                        reason="job « tests-deps » : pip install -r requirements.txt")
+    from collectors.conseils import DELAI_OCR_MIN, delai_ocr
+    assert delai_ocr(521) > 521 * 5.8, "le recueil de 521 pages échouerait encore"
+    assert delai_ocr(3) == DELAI_OCR_MIN, "un document court perd son délai d'avant"
+    assert delai_ocr(0) == DELAI_OCR_MIN, "un PDF illisible n'a plus de délai"
+
+
+@pytest.mark.parametrize("aide,attendu", [
+    ("  --invalidate-digital-signatures\n        Normally, OCRmyPDF will refuse", True),
+    ("usage: ocrmypdf [-h] [--force-ocr]", False),   # 14.0.1 de Debian 12 (VPS)
+])
+def test_la_signature_ne_s_invalide_que_si_l_outil_le_sait(monkeypatch, aide, attendu):
+    """Un PV signé (Saillans, 27/10/2026) : ocrmypdf récent le refuse sans
+    l'option ; une version qui ne la connaît pas la refuserait comme inconnue.
+    Décision de Julien (01/11/2026) : invalider sur la copie de travail."""
+    pytest.importorskip("pdfplumber",
+                        reason="job « tests-deps » : pip install -r requirements.txt")
+    from collectors import cm_ocr
+
+    class _Sortie:
+        stdout = aide
+    monkeypatch.setattr(cm_ocr.subprocess, "run", lambda *a, **k: _Sortie())
+    cm_ocr.options_ocrmypdf.cache_clear()
+    try:
+        options = cm_ocr.options_ocrmypdf()
+    finally:
+        cm_ocr.options_ocrmypdf.cache_clear()
+    assert (cm_ocr.OPTION_SIGNATURE in options) is attendu
+    assert options[:len(cm_ocr.OPTIONS_OCRMYPDF)] == cm_ocr.OPTIONS_OCRMYPDF

@@ -1,6 +1,6 @@
 # Données publiques — Vigie Civique Testonville
 
-Généré le 2026-10-19T22:05:14 depuis la base de travail, sans la modifier.
+Généré le 2026-11-14T22:27:08 depuis la base de travail, sans la modifier.
 
 Ces fichiers sont le snapshot public : ce que le site sert, et rien d'autre. Ils sont produits par `scripts/build_public_snapshot.py` et contrôlés par `scripts/verify_snapshot.py`, qui refuse de publier tout type de relation absent de l'allowlist.
 
@@ -10,7 +10,7 @@ Ce jeu de données est publié sous **ODbL-1.0** ([Open Database License](https:
 
 Vous pouvez le copier, le modifier et l'utiliser, y compris commercialement, à trois conditions : **citer** la source, **partager à l'identique** toute base dérivée que vous redistribuez, et ne pas la diffuser sous verrou technique sans en fournir aussi une version libre.
 
-Ce choix découle des sources : 333 des entités publiées sont des points d'intérêt OpenStreetMap et une large part des coordonnées vient d'un géocodage OSM. La contribution est substantielle et fondue dans le jeu — c'est donc une base dérivée au sens de l'ODbL, et le partage à l'identique s'applique.
+Aucune des 3 entités publiées ne vient d'OpenStreetMap dans cette construction. Les coordonnées viennent du géocodage de l'IGN (Géoplateforme) et de la Base Adresse Nationale, sous Licence Ouverte.
 
 ### Attribution
 
@@ -19,6 +19,8 @@ Ce choix découle des sources : 333 des entités publiées sont des points d'int
 - Contient des informations d'OpenStreetMap, mises à disposition sous Open Database License (ODbL) — © les contributeurs OpenStreetMap
 - Contient des données publiques sous Licence Ouverte v2 (Etalab) : SIRENE et indicateurs INSEE, RNA, DVF, BODACC, OFGL et DGFiP, DECP et BOAMP, Répertoire National des Élus, résultats électoraux du ministère de l'Intérieur, BANATIC
 - Contient des données IGN (géocodage) sous Licence Ouverte v2
+- Contient des données de l'Observatoire des services publics d'eau et d'assainissement (SISPEA, OFB), composition communale des services et indicateurs, téléchargées sur services.eaufrance.fr, sous Licence Ouverte v2
+- Contient les résultats des campagnes FDVA 2 publiés par la DRAJES Occitanie, © www.ac-montpellier.fr (https://www.ac-montpellier.fr/fdva-2-fonctionnement-global-et-nouveaux-projets-les-resultats-122195) : intitulé et montant accordé, pour les associations du territoire
 
 Le **site** et ses visualisations sont un « Produced Work » au sens de l'ODbL : les reprendre demande l'attribution, pas le partage à l'identique. Le **code** relève d'une licence distincte (MIT) — l'ODbL ne porte pas sur le logiciel.
 
@@ -39,11 +41,12 @@ Ce modèle est conçu pour être rejoué sur une autre commune. Le périmètre s
 | `flows.json` | Flux financiers publics (subventions, participations) | `flows` |
 | `marches.json` | Marchés publics et attributaires | `marches` |
 | `budget.json` · `budget_vote.json` · `ofgl.json` | Budgets votés et agrégats financiers | `annuel`/`annexe`, `budget_vote`, `ofgl` |
+| `avant_fusion.json` | Commune nouvelle : ses anciennes communes, et les comptes de celles absorbées sous un autre code, à part (jamais additionnés) | `predecesseurs`, `absorbees` |
 | `intercommunalite.json` | Compétences, délégués, sièges de l'EPCI | racine |
 | `elus_rne.json` | Conseils municipaux (Répertoire National des Élus) | `elus` |
 | `elections.json` | Résultats des municipales par commune | `resultats` |
 | `fiscalite.json` · `impots` | Taux d'imposition comparés, et leur rang parmi les communes | `taux`, `reperes` |
-| `dvf.json` | Mutations immobilières (DVF), en agrégats : par année, par nature de bien — aucune vente à l'unité | `synthese`, `par_annee`, `par_nature` |
+| `dvf.json` | Mutations immobilières (DVF), en agrégats : par année, par nature de bien, comptées par mutation et non par ligne — aucune vente à l'unité | `synthese`, `par_annee`, `par_nature` |
 | `urbanisme.json` | Autorisations d'urbanisme | `autorisations` |
 | `environnement.json` | Eau (prix, contrôle sanitaire), déchets, forêt et feux, risques, ICPE, catastrophes naturelles | racine |
 | `territoire.json` | Indicateurs INSEE, équipements, télécoms, écoles et accueil du jeune enfant | racine |

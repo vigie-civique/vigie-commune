@@ -22,6 +22,13 @@ d'identification — cf. `MILLESIMES`. L'export 2022 (PLF 2024) est publié CASS
 une seule colonne par ligne : il est écarté, et l'écart est écrit ici plutôt
 que découvert à nouveau.
 
+Les exports sont les mêmes pour tous les dossiers : ils vivent au magasin
+national (`NATIONAL_STORE/jaune/`), déposés la nuit par l'écrivain
+(`scripts/rafraichir_magasin.py`, `STEPS_NATIONAUX`). Un dossier les lit ; il ne
+les télécharge que s'ils manquent, et une copie périmée se lit en le disant
+(`national_store.deposer`). Avant le 31/10/2026, chaque dossier retéléchargeait
+les quatre exports : de 19 à 289 s, et 45 Mo de plus dans `raw_documents`.
+
 Usage :
   python3 -m collectors.jaune_associations
   python3 -m collectors.jaune_associations --dry-run
@@ -33,14 +40,20 @@ import io
 import re
 import sqlite3
 
-import requests
-
-from .archive import archive_fetch
-from .config import DB_PATH, HEADERS
+from . import mesure
+from .config import DB_PATH, NATIONAL_STORE
 from .db import beneficiaire_local, beneficiaires_locaux, pivot_ids
+from .national_store import deposer, ecrivain, retirer_hors_magasin
 
 API_BASE = "https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets"
 SOURCE = "jaune-associations"
+CACHE = NATIONAL_STORE / "jaune"
+# Un millésime publié ne change plus (dernières modifications : 13/12/2018 pour
+# le PLF 2014, 23/12/2024 pour le PLF 2025, relevées le 31/10/2026) ; le suivant
+# arrive par une ligne de MILLESIMES, donc par un fichier absent du magasin, lu
+# tout de suite. Trois mois rattrapent une republication corrigée sans
+# retélécharger 60 Mo chaque nuit ; la copie périmée reste lisible six mois.
+CACHE_JOURS = 90
 
 # (exercice annoncé, jeu, colonnes). L'exercice est RELU dans la colonne
 # `millesime` quand le jeu en porte une : le jeu nommé « plf-2016 » contient
@@ -65,18 +78,27 @@ MILLESIMES = [
 _MILLESIME_RE = re.compile(r"Subventions\s+(\d{4})", re.I)
 
 
-def _telecharger(session: requests.Session, jeu: str) -> list[dict]:
+def _telecharger(jeu: str, colonnes: dict) -> list[dict]:
     """L'export intégral d'un millésime, filtré ici et non par l'API — même
     raison que `occitanie_region` : le compte de ce qui est écarté doit être
-    mesurable. Une quinzaine de mégaoctets par millésime."""
-    r = session.get(f"{API_BASE}/{jeu}/exports/csv",
-                    params={"delimiter": ";"}, timeout=300)
-    r.raise_for_status()
-    archive_fetch(SOURCE, r.url, r.content,
-                  content_type=r.headers.get("Content-Type"),
-                  http_status=r.status_code)
-    texte = r.content.decode("utf-8-sig", errors="replace")
-    return list(csv.DictReader(io.StringIO(texte), delimiter=";"))
+    mesurable. Une quinzaine de mégaoctets par millésime, lus au magasin."""
+    url = f"{API_BASE}/{jeu}/exports/csv?delimiter=%3B"
+    fichier = CACHE / f"{jeu}.csv"
+    chemin = deposer(url, fichier, SOURCE, CACHE_JOURS)
+    try:
+        texte = chemin.read_bytes().decode("utf-8-sig", errors="replace")
+    finally:
+        retirer_hors_magasin(chemin, fichier)
+    lecteur = csv.DictReader(io.StringIO(texte), delimiter=";")
+    # Le magasin ne lit pas un CSV : un export tronqué ou une page d'erreur y
+    # vivrait trois mois en ne rendant que des « hors périmètre ».
+    absentes = {colonnes[c] for c in ("programme", "montant")} - set(lecteur.fieldnames or ())
+    if absentes:
+        raise ValueError(f"{fichier.name} : colonne(s) absente(s) {', '.join(sorted(absentes))}")
+    lignes = list(lecteur)
+    # Un millésime figé : il ne rend moins que tronqué ou abîmé au magasin.
+    mesure.lu(jeu, len(lignes), lecteur.fieldnames, complete=True)
+    return lignes
 
 
 def _propre(valeur) -> str:
@@ -116,7 +138,7 @@ def importer(conn, lignes: list[dict], annonce: int, colonnes: dict,
              etat_id: int, dry_run: bool = False) -> dict:
     index = beneficiaires_locaux(conn)
     stats = {"lignes": len(lignes), "retenues": 0, "inserees": 0, "deja": 0,
-             "hors_perimetre": 0, "sans_identifiant": 0}
+             "hors_perimetre": 0, "sans_identifiant": 0, "fdva_deja_accorde": 0}
 
     for rec in lignes:
         ident = identifiant(rec, colonnes)
@@ -140,6 +162,15 @@ def importer(conn, lignes: list[dict], annonce: int, colonnes: dict,
         # année (FDVA fonctionnement, puis FDVA formation).
         prog = programme.split(" ")[0] if programme else "?"
         description = f"[P{prog}] {objet}"[:250]
+
+        # Le FDVA ACCORDÉ (`fdva_resultats`, l'année même) et le FDVA VERSÉ (ce
+        # jaune, trois ans plus tard) décrivent la même subvention : les deux
+        # lignes restent, liées, et ne s'additionnent pas. Tant que ce lien
+        # n'est pas codé, la rencontre se signale à chaque passe.
+        if prog == "163" and conn.execute(
+                "SELECT 1 FROM financial_flows WHERE source='fdva-drajes' AND to_id=? AND year=?"
+                " LIMIT 1", (to_id, annee)).fetchone():
+            stats["fdva_deja_accorde"] += 1
 
         if conn.execute(
             "SELECT 1 FROM financial_flows WHERE source=? AND to_id=? AND year=?"
@@ -175,23 +206,22 @@ def importer(conn, lignes: list[dict], annonce: int, colonnes: dict,
 
 
 def run(dry_run: bool = False):
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     etat_id = pivot_ids(conn)["etat"]
 
     total = 0
+    manquants = []
     for annonce, jeu, colonnes in MILLESIMES:
         print(f"\n[jaune] Subventions {annonce} — {jeu}")
         try:
-            lignes = _telecharger(session, jeu)
-        except requests.RequestException as exc:
+            lignes = _telecharger(jeu, colonnes)
+        except (OSError, RuntimeError, ValueError) as exc:
             # Un millésime qui ne répond pas n'empêche pas les autres ; le
             # compteur final dira qu'il manque.
             print(f"  ⚠️ millésime indisponible : {exc}")
+            manquants.append(str(annonce))
             continue
         stats = importer(conn, lignes, annonce, colonnes, etat_id, dry_run=dry_run)
         total += stats["inserees"]
@@ -203,12 +233,20 @@ def run(dry_run: bool = False):
         # qu'un zéro se lise — jeu vide, ou périmètre sans identifiant ?
         print(f"  hors périmètre      : {stats['hors_perimetre']}")
         print(f"  sans identifiant    : {stats['sans_identifiant']}")
+        if stats["fdva_deja_accorde"]:
+            print(f"  ⚠️ FDVA déjà lu comme ACCORDÉ (fdva-drajes) : {stats['fdva_deja_accorde']} "
+                  f"ligne(s) — accordé et versé ne s'additionnent pas, rapprochement à coder "
+                  f"(chantier subventions)")
 
     if not dry_run:
         conn.commit()
     conn.close()
     prefix = "[DRY-RUN] " if dry_run else ""
     print(f"\n{prefix}✅ Jaune associations : {total} flux")
+    # L'écrivain du magasin, lui, ne passe pas un millésime sous silence : la
+    # passe de nuit doit le compter en échec, sans quoi le magasin vieillit.
+    if manquants and ecrivain():
+        raise RuntimeError(f"millésime(s) non déposé(s) au magasin : {', '.join(manquants)}")
 
 
 if __name__ == "__main__":

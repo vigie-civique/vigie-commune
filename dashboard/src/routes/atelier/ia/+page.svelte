@@ -2,6 +2,7 @@
   import { COMMUNE } from '#lib/instance.js'
   import { authFetch, currentUser } from '#lib/stores/auth.js'
   import { auMoins, messageErreur } from '#lib/roles.js'
+  import { phraseErreur, phraseStatut } from '#lib/libelles.js'
   import { onMount } from 'svelte'
 
   let question  = ''
@@ -10,7 +11,11 @@
   let error     = ''
   let sources   = []
   let mode      = 'search'  // search | ask — la recherche d'abord, cf. plus bas
-  let config    = null      // {enabled, embed_model, chat_model, chunks}
+  let config    = null      // {enabled, ask_enabled, embed_model, chat_model, chunks}
+  // « Faire résumer » n'existe que si le serveur a ouvert la génération
+  // (RAG_ASK_ENABLED) : un atelier qui n'a que le modèle d'embeddings ne
+  // montre pas un bouton qui échouerait faute de modèle de conversation.
+  $: if (config && !config.ask_enabled && mode === 'ask') mode = 'search'
 
   // L'interface annonçait « nomic-embed-text + Gemma 3 » en dur et proposait la
   // recherche quel que soit l'état réel : fonction désactivée, index jamais
@@ -79,18 +84,25 @@
           method: 'POST',
           body: JSON.stringify({ question, limit: 6 }),
         })
-        if (!res.ok) throw new Error(await res.text())
+        if (!res.ok) throw new Error(await lireErreur(res))
         const data = await res.json()
         answer  = data.answer
         sources = data.sources ?? []
         if (data.error) error = data.error
       } else {
         const res = await authFetch(`/rag/search?q=${encodeURIComponent(question)}&limit=10`)
-        if (!res.ok) throw new Error(await res.text())
+        // 409 : l'index vient d'un autre modèle ; le message dit quoi relancer.
+        if (!res.ok) throw new Error(await lireErreur(res))
         sources = await res.json()
       }
-    } catch(e) { error = e.message }
+    } catch(e) { error = phraseErreur(e) }
     finally { loading = false }
+  }
+
+  // Le motif de l'API quand il y en a un, sinon une phrase tirée du code.
+  async function lireErreur(res) {
+    const texte = await res.text()
+    try { return messageErreur(JSON.parse(texte).detail, phraseStatut(res.status)) } catch { return phraseStatut(res.status) }
   }
 
   function scoreColor(s) {
@@ -102,7 +114,7 @@
   function onKey(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit() } }
 </script>
 
-<svelte:head><title>IA — Atelier {COMMUNE}</title></svelte:head>
+<svelte:head><title>Recherche par sens — Atelier {COMMUNE}</title></svelte:head>
 
 <div class="ia-page">
   <div class="page-header">
@@ -167,10 +179,12 @@
     </details>
   {/if}
 
-  <div class="mode-toggle">
-    <button class:active={mode === 'search'} on:click={() => mode='search'}>Chercher</button>
-    <button class:active={mode === 'ask'}    on:click={() => mode='ask'}>Faire résumer</button>
-  </div>
+  {#if config?.ask_enabled}
+    <div class="mode-toggle">
+      <button class:active={mode === 'search'} on:click={() => mode='search'}>Chercher</button>
+      <button class:active={mode === 'ask'}    on:click={() => mode='ask'}>Faire résumer</button>
+    </div>
+  {/if}
   {#if mode === 'ask'}
     <!-- Mesuré le 15/08/2026 : à « combien la commune a-t-elle versé de
          subventions en 2024 », le modèle a répondu 350 € en résumant fidèlement

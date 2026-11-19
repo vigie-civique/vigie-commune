@@ -151,7 +151,9 @@ from scripts.snapshot.textes import (  # noqa: E402,F401
     nettoyer_titre_evenement,
     noms_des_personnes_publiques,
     norm_nom,
+    motif_sans_extrait,
     texte_publiable,
+    titre_d_acte,
     TITRES_VIDES,
 )
 from scripts.snapshot.etapes import ETAPES  # noqa: E402

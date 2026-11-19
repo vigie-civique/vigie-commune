@@ -81,5 +81,5 @@
   .liste p { margin: .3rem 0 0; line-height: 1.5; font-size: .92rem; max-width: 66ch; }
   .maj { color: var(--gris); font-size: .8rem; }
   .brouillon { margin-left: .5rem; font-size: .68rem; font-weight: 700; text-transform: uppercase;
-               color: #8a4b00; background: #fdebd0; border-radius: .5rem; padding: .1rem .45rem; }
+               color: var(--orange); background: var(--orange-pale); border-radius: .5rem; padding: .1rem .45rem; }
 </style>

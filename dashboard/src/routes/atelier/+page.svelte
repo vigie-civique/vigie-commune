@@ -14,6 +14,8 @@
   import { authFetch, currentUser } from '#lib/stores/auth.js'
   import { auMoins, LIBELLE_ROLE } from '#lib/roles.js'
   import { heureLocale } from '#lib/heure.js'
+  import { pageOuverte } from '#lib/menu.js'
+  import { erreurHttp, phraseErreur, texteApi } from '#lib/libelles.js'
 
   let files   = []
   let minutes = 10
@@ -25,13 +27,13 @@
   onMount(async () => {
     try {
       const res = await authFetch('/atelier/files')
-      if (!res.ok) throw new Error(`${res.status}`)
+      if (!res.ok) throw erreurHttp(res)
       const d = await res.json()
       files = d.files
       minutes = d.reservation_minutes
       jour = d.premier_jour ?? jour
     } catch (e) {
-      error = e.message
+      error = phraseErreur(e)
     } finally {
       loading = false
     }
@@ -59,12 +61,12 @@
     // son zéro (collectors/files.py, `vide`).
     if (f.sans_collecte && f.vide) return f.vide
     if (f.sans_collecte) return "Rien n'attend un geste pour l'instant."
-    if (!p) return "Aucune passe de collecte connue pour cette file : ce zéro "
-                 + "n'a jamais été mesuré ici."
+    if (!p) return "Rien n'attend un geste dans cette file. Aucune mise à jour "
+                 + "automatique n'est enregistrée pour l'instant : la page peut quand même montrer des lignes déjà sûres."
     const quand = p.le ? heureLocale(p.le) : 'à une date inconnue'
     if (p.issue === 'error' || p.issue === 'timeout')
       return `Le dernier passage de « ${p.collecteur} » (${quand}) a échoué : `
-           + `ce zéro dit l'échec, pas l'absence.`
+           + `ce zéro dit l'échec, pas l'absence de lignes.`
     return `« ${p.collecteur} » est passé ${quand} et n'a rien trouvé de neuf. `
          + `Rien n'attend un geste pour l'instant.`
   }
@@ -94,11 +96,11 @@
   {#if loading}
     <p class="msg">Relevé des files…</p>
   {:else if error}
-    <p class="msg erreur">Les files n'ont pas pu être relevées ({error}).</p>
+    <p class="msg erreur">Les files n'ont pas pu être relevées. {error}</p>
   {:else}
 
     <div class="files">
-      {#each aFaire as f (f.cle)}
+      {#each aFaire.filter(f => pageOuverte(f.route, $currentUser)) as f (f.cle)}
         {@const ouvert = auMoins($currentUser, f.role_min)}
         <section class="file" class:vide={f.reste === 0} class:ferme={!ouvert}>
           <h2>{f.titre}</h2>
@@ -153,7 +155,11 @@
             <p class="interdit">
               Trancher ici demande le rôle
               « {LIBELLE_ROLE[f.role_min] ?? f.role_min} ».
-              <a href={f.route}>Vous pouvez regarder la file</a>.
+              {#if pageOuverte(f.route, $currentUser)}{' '}
+                <a class="lien-bloc" href={f.route}>Vous pouvez regarder la file</a>.
+              {' '}{:else}{' '}
+                Cette file n'est pas visible avec votre rôle.
+              {' '}{/if}
             </p>
           {/if}
         </section>
@@ -171,7 +177,7 @@
           {#each jour.miens as g}
             <li>
               <a href={g.route}>{g.titre}</a>
-              <p>{g.pourquoi}</p>
+              <p>{texteApi(g.pourquoi)}</p>
             </li>
           {/each}
         </ul>
@@ -186,7 +192,7 @@
           {#if toutVoir}
             <ul class="herites">
               {#each jour.herites as g}
-                <li><a href={g.route}>{g.titre}</a> <p>{g.pourquoi}</p></li>
+                <li><a href={g.route}>{g.titre}</a> <p>{texteApi(g.pourquoi)}</p></li>
               {/each}
             </ul>
           {/if}

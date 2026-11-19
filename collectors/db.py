@@ -4,7 +4,7 @@ import json
 import re
 import sqlite3
 from .config import DB_PATH, SCHEMA_PATH
-from .nom_normalise import normaliser, rectifier, reparer_encodage
+from .nom_normalise import normaliser, rectifier, rectifier_nom, reparer_encodage
 
 
 def get_conn(read_only: bool = False) -> sqlite3.Connection:
@@ -45,6 +45,11 @@ def transaction():
 # versionnées, la liste ci-dessous est le rattrapage minimal — chaque entrée
 # est jouée une fois, et ne fait rien si la colonne est déjà là.
 _COLONNES_AJOUTEES = [
+    # 14/11/2026 — l'identifiant DVF de la mutation. Sans lui, le site comptait
+    # des lignes (un local, une parcelle, une culture) et les appelait des
+    # ventes : 339 affichées à Lasalle pour 141 mutations.
+    ("dvf_transactions", "id_mutation", "TEXT"),
+
     # 06/10/2026 — la catégorie juridique de l'exploitant d'une installation
     # classée : c'est elle qui dit si la publication peut le nommer.
     ("icpe_installations", "forme_juridique", "TEXT"),
@@ -124,6 +129,21 @@ _COLONNES_AJOUTEES = [
     ("propositions",         "cle", "TEXT"),
     # 04/10/2026 — HT ou TTC : un procès-verbal écrit l'un ou l'autre.
     ("marches_publics",      "montant_base", "TEXT"),
+    # 02/11/2026 — le SIREN sous lequel un exercice a été lu : une année de
+    # l'ancienne commune se publie « avant fusion », pas sous le nom actuel.
+    ("ofgl_agregats",         "siren", "TEXT"),
+    ("budget_annuel",         "siren", "TEXT"),
+    ("budget_annexe_balance", "siren", "TEXT"),
+    ("budget_annexe",         "siren", "TEXT"),
+    # 07/11/2026 — le modèle qui a calculé chaque vecteur de l'index de
+    # recherche par sens, cf. collectors/index_sens.py. Vides sur un index
+    # antérieur : la recherche le refuse jusqu'à sa reconstruction.
+    ("embeddings",            "modele", "TEXT"),
+    ("embeddings",            "modele_empreinte", "TEXT"),
+    # 07/11/2026 — la précision BANATIC d'une compétence, cf. collectors/banatic.py.
+    ("epci_competences",      "description", "TEXT"),
+    ("epci_competences",      "precision_competence", "TEXT"),
+    ("epci_competences",      "precision_interet_communautaire", "TEXT"),
 ]
 
 
@@ -152,6 +172,28 @@ def _rattraper_index(conn) -> None:
         if not set(c.strip() for c in colonnes.split(",")) <= presentes:
             continue
         conn.execute(f"CREATE INDEX IF NOT EXISTS {nom} ON {table}({colonnes})")
+
+
+# Déclencheurs dont la définition a changé depuis la création des bases :
+# `CREATE TRIGGER IF NOT EXISTS` laisse l'ancienne en place, on la remplace.
+_DECLENCHEURS_REVUS = ("entities_updated_at", "audit_log_at_milliemes")
+
+
+def _rattraper_declencheurs(conn, schema: str) -> None:
+    for nom in _DECLENCHEURS_REVUS:
+        m = re.search(rf"CREATE TRIGGER IF NOT EXISTS {nom}\b.*?\bEND;", schema, re.S)
+        if not m:
+            continue
+        voulu = m.group(0)
+        actuel = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (nom,)).fetchone()
+        # sqlite_master garde le texte sans « IF NOT EXISTS » ni « ; » final.
+        attendu = voulu.replace(" IF NOT EXISTS", "", 1).rstrip(";").split()
+        if actuel and actuel[0].rstrip(";").split() == attendu:
+            continue
+        conn.execute(f"DROP TRIGGER IF EXISTS {nom}")
+        conn.execute(voulu)
 
 
 def _rattraper_colonnes(conn) -> None:
@@ -228,6 +270,7 @@ def init_db():
         conn.executescript(schema)
         _rattraper_colonnes(conn)
         _rattraper_index(conn)
+        _rattraper_declencheurs(conn, schema)
         conn.commit()
         elargir_statut_flux(conn)
         print(f"[db] Schéma initialisé → {DB_PATH}")
@@ -282,11 +325,35 @@ def _entite_existante(conn, type_, name, commune):
     return candidats[0] if len(candidats) == 1 else None
 
 
+def _ligne_connue(conn, type_, name, commune, siren):
+    """La fiche déjà en base pour ce nom (déjà rectifié) et ce SIREN, ou None."""
+    par_siren = entite_par_siren(conn, siren) if siren else None
+    if par_siren is not None:
+        row = conn.execute("SELECT id,lat,lng,address,commune FROM entities"
+                           " WHERE id=?", (par_siren,)).fetchone()
+        if row is not None:
+            return row
+    return _entite_existante(conn, type_, name, commune)
+
+
+def entite_connue(conn, *, type, name, commune=None, siren=None) -> int | None:
+    """L'id que `upsert_entity` rendrait, sans rien créer ni mettre à jour.
+
+    Même rectification du nom, même recherche (SIREN puis nom) : une route de
+    lecture retrouve ainsi la fiche des collecteurs, et rend None où ils
+    l'auraient créée."""
+    name = rectifier_nom(rectifier(reparer_encodage(name)), type)
+    row = _ligne_connue(conn, type, name, commune, siren)
+    return row["id"] if row else None
+
+
 def upsert_entity(conn, *, type, name, short_name=None,
                   lat=None, lng=None, address=None,
-                  confidence="verified", commune=None) -> int:
+                  confidence="verified", commune=None, siren=None) -> int:
     """
     Retourne l'id de l'entité, créée si elle n'existe pas.
+    siren : quand la source le donne, la fiche est d'abord cherchée par lui
+    (`entite_par_siren`), et le nom ne sert qu'à défaut.
     La recherche tolère les variantes d'écriture (accents, tirets, casse) au
     sein d'une même commune — cf. `_entite_existante`.
     Si l'entité existe, met à jour lat/lng/address (+ commune si encore vide) si fournis.
@@ -310,10 +377,13 @@ def upsert_entity(conn, *, type, name, short_name=None,
     # « L'EUZIAÈRE » ne rejoindrait jamais « L'EUZIÈRE » sans ça. Réparer ici
     # vaut aussi pour la déduplication : deux graphies d'un même nom, dont une
     # abîmée, faisaient deux fiches.
-    name = rectifier(reparer_encodage(name))
+    name = rectifier_nom(rectifier(reparer_encodage(name)), type)
     address = rectifier(reparer_encodage(address))
 
-    row = _entite_existante(conn, type, name, commune)
+    # L'identifiant d'abord, le nom ensuite : deux sources qui écrivent la même
+    # personne morale de deux façons (« et DE Pays » / « et DU Pays ») font sinon
+    # deux fiches, et aucune passe sur le nom ne peut les réunir.
+    row = _ligne_connue(conn, type, name, commune, siren)
     if row is None:
         # Colonne toujours écrite, même à NULL : plus aucun défaut implicite ne
         # peut se glisser entre le collecteur et la base.
@@ -349,9 +419,74 @@ def upsert_entity(conn, *, type, name, short_name=None,
     return eid
 
 
+def entite_par_siren(conn, siren) -> int | None:
+    """La fiche que désigne un SIREN (ou un SIRET), ou None.
+
+    Celle dont l'extension `businesses` ou `associations` le porte, puis, pour
+    le SIREN de l'intercommunalité que déclare l'instance, la fiche nommée par
+    `epci_nom` : c'est elle que les collecteurs retrouvent par le nom, et elle
+    n'a pas de ligne `businesses` tant que SIRENE n'y a pas écrit. Faute de ce
+    second chemin, SIRENE créait à côté sa propre fiche de la même
+    communauté de communes : deux fiches à Saillans et à Brassac, une fusion
+    à la main à Lasalle le 24/10/2026.
+    """
+    s = re.sub(r"\D", "", str(siren or ""))
+    s = s[:9] if len(s) in (9, 14) else ""
+    if not s:
+        return None
+    r = conn.execute(
+        "SELECT entity_id FROM businesses WHERE siren=?"
+        " UNION ALL SELECT entity_id FROM associations WHERE siren=? LIMIT 1",
+        (s, s)).fetchone()
+    if r:
+        return r[0]
+    from .config import EPCI_NOM, EPCI_SIREN
+    if EPCI_NOM and s == re.sub(r"\D", "", EPCI_SIREN or "")[:9]:
+        r = _entite_existante(conn, "service", EPCI_NOM, None)
+        return r["id"] if r else None
+    return None
+
+
+def _bloc_du_schema(debut: str, fin: str) -> str:
+    """Le texte de `db/schema.sql` de `debut` à `fin` inclus : une seule
+    définition, rejouée telle quelle par qui ne passe pas par `init_db`."""
+    schema = SCHEMA_PATH.read_text()
+    i = schema.index(debut)
+    return schema[i:schema.index(fin, i) + len(fin)]
+
+
+def assurer_refus(conn) -> None:
+    """La table des relations refusées ET ses déclencheurs, ensemble.
+
+    Jamais l'une sans l'autre : un refus sans déclencheur ne retiendrait rien,
+    et un déclencheur sans table ferait échouer toute écriture de relation.
+    Un refus n'existe qu'après le passage de l'API par ici : une base qui n'a
+    pas la table n'a rien à respecter."""
+    conn.executescript(_bloc_du_schema(
+        "CREATE TABLE IF NOT EXISTS relations_refusees",
+        "-- fin du refus mémorisé"))
+
+
+def assurer_rattachement(conn) -> None:
+    """La table qui rattache une saisie d'entité à SA fiche (cf. schéma)."""
+    conn.execute(_bloc_du_schema("CREATE TABLE IF NOT EXISTS saisies_entites", ");"))
+
+
+def refus_de_relation(conn, from_id, to_id, rel_type):
+    """Le refus qui retient ce lien (mêmes bouts, même type), ou None."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
+                        " AND name='relations_refusees'").fetchone():
+        return None
+    return conn.execute(
+        "SELECT * FROM relations_refusees WHERE from_id=? AND to_id=? AND relation_type=?",
+        (from_id, to_id, rel_type)).fetchone()
+
+
 def upsert_relation(conn, from_id, to_id, rel_type,
                     source, since=None, until=None,
                     confidence="verified", metadata=None):
+    # Un lien qu'un validateur a supprimé n'est pas réécrit : le déclencheur
+    # `relations_refus_respecte` l'écarte ici comme dans toute autre écriture.
     conn.execute(
         "INSERT OR IGNORE INTO relations"
         " (from_id,to_id,relation_type,source,since,until,confidence,metadata)"
@@ -380,8 +515,8 @@ def log_run_start(conn, collector: str, items_before: int | None) -> int:
     chemin d'appel (run_all en cron mensuel, collect_loop en pipeline, appel
     manuel). Sans ça, une source morte ne produit aucun signal : DECP est resté
     figé 577 jours et `api-dvf.cerema.fr` répond NXDOMAIN depuis des mois sans
-    que rien ne le remonte. `scripts/qa_loop.py::check_silent_source` s'appuie
-    sur cette table.
+    que rien ne le remonte. `scripts/collect_loop.py::sante()` s'appuie sur
+    cette table.
     """
     cur = conn.execute(
         "INSERT INTO collector_runs (collector, items_before) VALUES (?,?)",
@@ -413,7 +548,7 @@ def stats(conn) -> dict:
     return dict(row) if row else {}
 
 
-def pivot_ids(conn) -> dict:
+def pivot_ids(conn, creer: bool = True) -> dict:
     """Identifiants des entités structurantes, créées si elles manquent.
 
     Quatre collecteurs portaient ces identifiants en dur (`COMMUNE_ID = 63`,
@@ -422,20 +557,23 @@ def pivot_ids(conn) -> dict:
     financier de l'État vers la commune devenait un flux entre deux entreprises
     prises au hasard, sans que rien ne signale l'erreur. On les résout donc par
     le nom, à l'exécution.
+
+    `creer=False` : lecture seule, un pivot absent vaut None. C'est le chemin de
+    `/api/pivots` — une route de lecture n'écrit pas en base (14/11/2026). Les
+    collecteurs gardent la création, sur laquelle ils comptent.
     """
-    from .config import COMMUNE_NAME, DEPARTEMENT, EPCI_NOM, PREFECTURE_NOM
-    return {
-        "commune": upsert_entity(conn, type="service",
-                                 name=f"Commune de {COMMUNE_NAME}",
-                                 short_name=COMMUNE_NAME, commune=COMMUNE_NAME,
-                                 confidence="verified"),
-        "epci":    upsert_entity(conn, type="service", name=EPCI_NOM,
-                                 confidence="verified"),
-        "etat":    upsert_entity(conn, type="service", name="État français",
-                                 confidence="verified"),
-        "prefecture": upsert_entity(conn, type="service", name=PREFECTURE_NOM,
-                                    confidence="verified"),
+    from .config import COMMUNE_NAME, EPCI_NOM, EPCI_SIREN, PREFECTURE_NOM
+    pivots = {
+        "commune": dict(type="service", name=f"Commune de {COMMUNE_NAME}",
+                        short_name=COMMUNE_NAME, commune=COMMUNE_NAME),
+        "epci": dict(type="service", name=EPCI_NOM, siren=EPCI_SIREN),
+        "etat": dict(type="service", name="État français"),
+        "prefecture": dict(type="service", name=PREFECTURE_NOM),
     }
+    if creer:
+        return {k: upsert_entity(conn, confidence="verified", **v) for k, v in pivots.items()}
+    return {k: entite_connue(conn, **{c: x for c, x in v.items() if c != "short_name"})
+            for k, v in pivots.items()}
 
 
 def beneficiaires_locaux(conn) -> dict[str, dict[str, int]]:

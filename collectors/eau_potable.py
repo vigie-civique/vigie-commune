@@ -22,8 +22,14 @@ chaque réseau repart du dernier prélèvement que SA requête a rapporté, not�
 `eau_potable_suivi`. Pas du dernier prélèvement qui lui est rattaché : un
 prélèvement partagé, arrivé par la requête d'un réseau voisin, lui donnerait une
 date récente, et sa propre histoire ne serait jamais collectée — c'est arrivé au
-premier essai, le 30/09/2026 : le réseau de Thoiras avait perdu 2016-2020. Découpée par année :
-Hub'Eau refuse de paginer au-delà de 20 000 résultats par requête.
+premier essai, le 30/09/2026 : le réseau de Thoiras avait perdu 2016-2020.
+
+Une requête par LOT de réseaux (`code_reseau` accepte une liste), sur toute la
+période : 9 réseaux depuis 2016 coûtaient 99 requêtes et 469 s (dossier du
+26/10/2026), 5 réseaux tiennent en 2 requêtes. Le découpage par année venait
+d'un plafond de pagination à 20 000 résultats que Hub'Eau n'applique plus
+(499 566 résultats lus en 25 pages sur Lyon, le 31/10/2026) ; le total lu est
+quand même comparé au `count` annoncé, et l'écart fait échouer le lot.
 
 Usage :
   python3 -m collectors.eau_potable                     # collecte incrémentale
@@ -31,16 +37,17 @@ Usage :
   python3 -m collectors.eau_potable --stats             # état par réseau
 """
 import argparse
-import datetime as dt
-import time
 import urllib.parse
 
+from . import mesure
 from .config import communes_du_step
 from .db import get_conn
 from .qualite_eau import _get_json
 
 API = "https://hubeau.eaufrance.fr/api/v1/qualite_eau_potable"
 PAGE_SIZE = 5000
+# Réseaux ou communes par requête : une URL courte, et un échec n'emporte qu'un lot.
+LOT = 20
 # Le contrôle sanitaire publié par Hub'Eau commence en 2016.
 DEBUT = "2016-01-01"
 
@@ -107,7 +114,7 @@ def ensure_tables(conn):
             PRIMARY KEY (code_prelevement, code_parametre, code_lieu_analyse,
                          libelle_parametre)
         );
-        -- Jusqu'où la requête de CE réseau a été lue, année close par année close.
+        -- Jusqu'où la requête de CE réseau a été lue en entier.
         CREATE TABLE IF NOT EXISTS eau_potable_suivi (
             code_reseau         TEXT PRIMARY KEY,
             dernier_prelevement TEXT NOT NULL,
@@ -144,19 +151,40 @@ def ligne_resultat(r: dict) -> tuple:
             r.get("reference_qualite_parametre"))
 
 
-def enregistrer_resultats(conn, lignes: list[dict], code_reseau: str) -> int:
-    """Écrit une page de `resultats_dis`. Rend le nombre de résultats nouveaux.
+class LotAmbigu(Exception):
+    """Une ligne d'un lot ne cite aucun des réseaux demandés : on ne sait plus
+    au titre duquel elle est venue. Le lot se relit réseau par réseau."""
 
-    Le réseau interrogé est toujours rattaché, même si la réponse n'en liste
-    pas : c'est à son titre que le prélèvement a été demandé.
-    """
+
+def codes_reseaux(r: dict) -> set[str]:
+    return {x["code"] for x in r.get("reseaux") or [] if x.get("code")}
+
+
+def demandeurs(r: dict, lot: list[str]) -> set[str]:
+    """Les réseaux du lot dont la requête aurait rendu cette ligne.
+
+    Seul, le réseau interrogé est toujours rattaché, même si la réponse n'en
+    liste pas : c'est à son titre que le prélèvement a été demandé. En lot, la
+    ligne vaut pour les réseaux du lot qu'elle cite ; si elle n'en cite aucun,
+    rien ne dit lequel l'a demandée."""
+    if len(lot) == 1:
+        return set(lot)
+    cites = codes_reseaux(r) & set(lot)
+    if not cites:
+        raise LotAmbigu(r.get("code_prelevement"))
+    return cites
+
+
+def enregistrer_resultats(conn, lignes: list[dict], lot: str | list[str]) -> int:
+    """Écrit une page de `resultats_dis`. Rend le nombre de résultats nouveaux."""
+    lot = [lot] if isinstance(lot, str) else lot
+    rattaches = [codes_reseaux(r) | demandeurs(r, lot) for r in lignes]   # lève avant d'écrire
     nouveaux = 0
-    for r in lignes:
+    for r, reseaux in zip(lignes, rattaches):
         conn.execute(
             "INSERT OR IGNORE INTO eau_potable_prelevements VALUES"
             " (?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))", ligne_prelevement(r))
-        reseaux = {x["code"] for x in r.get("reseaux") or [] if x.get("code")}
-        for code in reseaux | {code_reseau}:
+        for code in reseaux:
             conn.execute(
                 "INSERT OR IGNORE INTO eau_potable_prelevement_reseaux VALUES (?,?)",
                 (r["code_prelevement"], code))
@@ -167,18 +195,38 @@ def enregistrer_resultats(conn, lignes: list[dict], code_reseau: str) -> int:
     return nouveaux
 
 
+def lire_pages(url: str):
+    """Les pages d'une requête, jusqu'au bout de `next`. Lève si le total lu
+    n'est pas celui que Hub'Eau annonce : une pagination coupée en silence
+    laisserait croire à un historique complet."""
+    attendu, lus = None, 0
+    while url:
+        data = _get_json(url)
+        lignes = data.get("data") or []
+        if attendu is None:
+            attendu = data.get("count")
+        lus += len(lignes)
+        yield lignes
+        url = data.get("next")
+    if attendu is not None and lus != attendu:
+        raise RuntimeError(f"Hub'Eau annonçait {attendu} ligne(s), {lus} lue(s)")
+
+
 def fetch_udi(conn, communes: list[str]) -> list[str]:
-    """Les réseaux qui desservent ces communes, toutes années confondues."""
-    for insee in communes:
-        url = f"{API}/communes_udi?{urllib.parse.urlencode({'code_commune': insee, 'size': 1000})}"
-        while url:
-            data = _get_json(url)
+    """Les réseaux qui desservent ces communes, toutes années confondues.
+    `code_commune` accepte une liste : une requête par lot de communes."""
+    for i in range(0, len(communes), LOT):
+        params = {"code_commune": ",".join(communes[i:i + LOT]), "size": PAGE_SIZE}
+        for lignes in lire_pages(f"{API}/communes_udi?{urllib.parse.urlencode(params)}"):
+            # Toutes années, sans date : relu en entier. Zéro réseau ferait
+            # un step vert « 0 réseau ».
+            mesure.lu("hubeau-communes-udi", len(lignes),
+                      mesure.forme_de(lignes), complete=True)
             conn.executemany(
                 "INSERT OR IGNORE INTO eau_potable_udi"
                 " (annee, code_commune, nom_quartier, code_reseau, nom_reseau, debut_alim)"
                 " VALUES (?,?,?,?,?,?)",
-                [ligne_udi(u) for u in data.get("data", [])])
-            url = data.get("next")
+                [ligne_udi(u) for u in lignes])
         conn.commit()
     marques = ",".join("?" * len(communes))
     return [r[0] for r in conn.execute(
@@ -196,41 +244,45 @@ def depart(conn, code_reseau: str, since: str | None) -> str:
     return (row[0] if row else DEBUT)[:10]
 
 
-def noter_suivi(conn, code_reseau: str, lignes: list[dict], deja: str | None) -> str | None:
-    """Avance le suivi du réseau jusqu'au plus récent prélèvement de `lignes`."""
-    dates = [r["date_prelevement"] for r in lignes if r.get("date_prelevement")]
-    plus_recent = max([d for d in (*dates, deja) if d], default=None)
-    if plus_recent and plus_recent != deja:
+def avancer_suivi(conn, code_reseau: str, plus_recent: str | None) -> None:
+    """Avance le suivi du réseau jusqu'à `plus_recent` ; ne le recule jamais."""
+    if plus_recent:
         conn.execute(
             "INSERT INTO eau_potable_suivi (code_reseau, dernier_prelevement)"
             " VALUES (?,?) ON CONFLICT(code_reseau) DO UPDATE SET"
-            " dernier_prelevement=excluded.dernier_prelevement,"
+            " dernier_prelevement=max(dernier_prelevement, excluded.dernier_prelevement),"
             " releve_le=datetime('now')", (code_reseau, plus_recent))
-    return plus_recent
 
 
-def fetch_resultats(conn, code_reseau: str, since: str) -> int:
+def fetch_resultats(conn, lot: list[str], since: str) -> int:
+    """Le contrôle sanitaire d'un lot de réseaux, de `since` à aujourd'hui, en
+    une requête paginée. Le suivi de chaque réseau n'avance qu'une fois la
+    requête lue en entier : une page qui échoue laisse la reprise où elle était."""
+    params = {"code_reseau": ",".join(lot), "date_min_prelevement": since,
+              "size": PAGE_SIZE, "fields": CHAMPS_RESULTAT}
     nouveaux = 0
-    deja = None
-    for annee in range(int(since[:4]), dt.date.today().year + 1):
-        debut = since if annee == int(since[:4]) else f"{annee}-01-01"
-        params = {"code_reseau": code_reseau, "date_min_prelevement": debut,
-                  "date_max_prelevement": f"{annee}-12-31",
-                  "size": PAGE_SIZE, "fields": CHAMPS_RESULTAT}
-        url = f"{API}/resultats_dis?{urllib.parse.urlencode(params)}"
-        lues = []
-        while url:
-            data = _get_json(url)
-            nouveaux += enregistrer_resultats(conn, data.get("data", []), code_reseau)
-            lues += data.get("data", [])
-            conn.commit()
-            url = data.get("next")
-            time.sleep(0.5)
-        # Le suivi n'avance qu'une fois l'année lue en entier : une page qui
-        # échoue en cours d'année laisse la reprise au début de cette année.
-        deja = noter_suivi(conn, code_reseau, lues, deja)
+    plus_recent: dict[str, str] = {}
+    for lignes in lire_pages(f"{API}/resultats_dis?{urllib.parse.urlencode(params)}"):
+        # Depuis la dernière date lue : la forme sert, le volume n'alerte pas.
+        mesure.lu("hubeau-resultats", len(lignes), mesure.forme_de(lignes))
+        nouveaux += enregistrer_resultats(conn, lignes, lot)
         conn.commit()
+        for r in lignes:
+            date = r.get("date_prelevement")
+            for code in demandeurs(r, lot) if date else ():
+                plus_recent[code] = max(plus_recent.get(code, date), date)
+    for code in lot:
+        avancer_suivi(conn, code, plus_recent.get(code))
+    conn.commit()
     return nouveaux
+
+
+def lire_lot(conn, lot: list[str], since: str) -> int:
+    try:
+        return fetch_resultats(conn, lot, since)
+    except LotAmbigu as e:
+        print(f"  [eau_potable] prélèvement {e} sans réseau du lot : relu réseau par réseau")
+        return sum(fetch_resultats(conn, [code], since) for code in lot)
 
 
 def run(since: str | None = None):
@@ -239,19 +291,36 @@ def run(since: str | None = None):
     communes = communes_du_step("eau_potable")
     reseaux = fetch_udi(conn, communes)
     print(f"[eau_potable] {len(reseaux)} réseau(x) pour {len(communes)} commune(s)")
-    total = 0
+    # Un lot partage une date de reprise : celle de chacun de ses réseaux.
+    par_depart: dict[str, list[str]] = {}
     for code in reseaux:
-        nom = conn.execute("SELECT nom_reseau FROM eau_potable_udi WHERE code_reseau=?"
-                           " ORDER BY annee DESC LIMIT 1", (code,)).fetchone()[0]
-        try:
-            n = fetch_resultats(conn, code, depart(conn, code, since))
-        except Exception as e:
-            print(f"  [eau_potable] échec {code} {nom} → {e}")
-            continue
-        total += n
-        print(f"  ✓ {code} {nom} — {n} nouveau(x) résultat(s)")
-    print(f"[eau_potable] OK — {total} résultats insérés")
+        par_depart.setdefault(depart(conn, code, since), []).append(code)
+    total, echecs = 0, []
+    for debut, codes in sorted(par_depart.items()):
+        for i in range(0, len(codes), LOT):
+            lot = codes[i:i + LOT]
+            noms = ", ".join(f"{c} {nom_reseau(conn, c)}" for c in lot)
+            try:
+                n = lire_lot(conn, lot, debut)
+            except Exception as e:
+                echecs += lot
+                print(f"  [eau_potable] échec depuis {debut} : {noms} → {e}")
+                continue
+            total += n
+            print(f"  ✓ depuis {debut} : {noms} — {n} nouveau(x) résultat(s)")
     conn.close()
+    # Un réseau qui n'a pas répondu ne publie pas « aucun résultat » : le
+    # 27/10/2026, le seul réseau de Mascaras rendait 503 et le step finissait
+    # « OK — 0 résultats insérés ».
+    if echecs:
+        raise RuntimeError(f"réseau(x) en échec : {', '.join(echecs)}")
+    print(f"[eau_potable] OK — {total} résultats insérés")
+
+
+def nom_reseau(conn, code: str) -> str:
+    row = conn.execute("SELECT nom_reseau FROM eau_potable_udi WHERE code_reseau=?"
+                       " ORDER BY annee DESC LIMIT 1", (code,)).fetchone()
+    return (row[0] if row else None) or "—"
 
 
 def show_stats():

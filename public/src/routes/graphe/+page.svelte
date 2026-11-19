@@ -95,7 +95,9 @@
     node.append('circle')
       .attr('r', nodeRadius)
       .attr('fill', d => TYPE_COLORS[d.type] || '#64748b')
-      .attr('stroke', '#fff').attr('stroke-width', 1.5)
+      // `.style` et non `.attr` : un attribut SVG ne lit pas var(). Le contour
+      // prend le fond du graphe, clair ou sombre.
+      .style('stroke', 'var(--papier)').attr('stroke-width', 1.5)
 
     // Tous les nœuds sont nommés. La version précédente masquait le libellé des
     // nœuds de degré < 3 dès que le graphe dépassait 60 nœuds : sur le graphe
@@ -108,10 +110,10 @@
       .attr('dy', d => nodeRadius(d) + 10)
       .attr('text-anchor', 'middle')
       .attr('font-size', d => (d.degree || 1) >= 3 ? 9.5 : 8)
-      .attr('fill', '#475569')
+      .style('fill', 'var(--gris)')
       .attr('fill-opacity', d => (d.degree || 1) >= 3 ? 1 : .62)
-      .attr('paint-order', 'stroke')          // halo blanc : lisible sur les liens
-      .attr('stroke', '#fff').attr('stroke-width', 2.6).attr('stroke-linejoin', 'round')
+      .attr('paint-order', 'stroke')          // halo du fond : lisible sur les liens
+      .style('stroke', 'var(--papier)').attr('stroke-width', 2.6).attr('stroke-linejoin', 'round')
       .attr('pointer-events', 'none')
       .text(d => d.name.length > 22 ? d.name.slice(0, 20) + '…' : d.name)
 
@@ -198,7 +200,7 @@
   .controls { max-width: 1100px; margin: 0 auto; padding: .5rem 1.5rem; display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; align-items: center; }
   .filters { display: flex; gap: .35rem; flex-wrap: wrap; }
   .filters button { padding: .3rem .8rem; border-radius: 999px; background: var(--trait-pale); color: var(--gris); font-size: .82rem; border: 1px solid var(--trait); }
-  .filters button.on { background: var(--ardoise); color: #fff; border-color: var(--ardoise); }
+  .filters button.on { background: var(--ardoise); color: var(--papier); border-color: var(--ardoise); }
   .legend { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; font-size: .78rem; color: var(--gris); }
   .lg { display: flex; align-items: center; gap: .3rem; }
   .lg i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }

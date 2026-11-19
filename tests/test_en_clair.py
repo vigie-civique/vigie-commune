@@ -178,6 +178,27 @@ def test_la_feuille_comprendre_est_rendue_et_les_documents_deviennent_la_quatrie
     assert "Feuille 4 · les documents" in html
 
 
+def test_les_documents_a_demander_finissent_la_derniere_feuille_par_destinataire(instance):
+    from collectors.en_clair.rendu import page_erreurs
+    r = json.loads(_chemin(instance).read_text())
+    r["en_clair"]["a_demander"] = [
+        {"a": "la communauté de communes", "texte": "le rapport annuel sur l’eau"},
+        {"a": "la mairie de Fictiville", "texte": "la délibération de signature"},
+        {"a": "la communauté de communes", "texte": "le procès-verbal, une fois approuvé"}]
+    (_chemin(instance)).write_text(json.dumps(r, ensure_ascii=False))
+    assert verifier(_chemin(instance)) == []
+    html = page_erreurs(r)
+    assert "Les documents à demander" in html
+    assert html.count("À la communauté de communes :") == 1
+    assert html.index("le rapport annuel sur l’eau") < html.index("le procès-verbal, une fois approuvé")
+    assert "À la mairie de Fictiville :" in html
+
+
+def test_sans_document_a_demander_la_rubrique_n_apparait_pas(instance):
+    from collectors.en_clair.rendu import page_erreurs
+    assert "Les documents à demander" not in page_erreurs(json.loads(_chemin(instance).read_text()))
+
+
 # ── la publication ───────────────────────────────────────────────────────────
 
 def _seance(conn) -> int:
@@ -216,7 +237,7 @@ def test_seule_une_feuille_retenue_est_publiee(base, instance, tmp_path, statut,
         html = fichier.read_text()
         assert "À RELIRE" not in html, "une feuille retenue ne porte plus le tampon"
         assert "relectrice@" not in html, "l'adresse du relecteur n'est pas publiée"
-        assert "Ce que les documents publics ont de faux" in html
+        assert "Les écarts et manques relevés dans les documents publics" in html
 
 
 def test_une_feuille_retenue_devenue_fausse_sort_du_site(base, instance, tmp_path):
@@ -291,6 +312,32 @@ def test_une_source_absente_est_une_faute_de_la_seance_pas_une_panne(base, insta
     assert r["en_faute"] == ["2026-01-10-cm"]
 
 
+# ── le squelette ─────────────────────────────────────────────────────────────
+
+def test_le_squelette_passe_le_verificateur_par_construction(instance):
+    """Les numéros sont les marques, les citations sont prises entre deux marques,
+    les montants sont ceux que le vérificateur retrouve : rien à corriger avant rédaction."""
+    from collectors.en_clair.brouillon import squelette
+    r = squelette("2026-01-10-cm", PV, None, {"pv": "data/pv.txt"}, {},
+                  comme={"marque_acte_ordinale": r"apr[eè]s en avoir d[ée]lib[ée]r[ée]"})
+    chemin = _chemin(instance)
+    chemin.write_text(json.dumps(r, ensure_ascii=False))
+
+    assert verifier(chemin) == []
+    assert [a["n"] for a in r["actes"]] == [1, 2]
+    assert r["actes"][0]["citation"].startswith("DECIDE") and r["actes"][0]["montants"] == ["1 200"]
+    assert r["actes"][1]["vote"] == {"unanimite": True}
+    assert r["origine"]["statut"] == "a_relire" and r["origine"]["relu_par"] is None
+
+
+def test_sans_deliberations_publiees_le_squelette_n_a_aucun_acte(instance):
+    from collectors.en_clair.brouillon import squelette
+    r = squelette("2026-01-10-cc", None, "ORDRE DU JOUR", {"convocation": "data/pv.txt"}, {})
+
+    assert r["actes"] == [] and r["source_actes"] == "convocation"
+    assert r["en_clair"]["apres"]["statut"] == "non_publie"
+
+
 # ── l'atelier ────────────────────────────────────────────────────────────────
 
 VALIDEUR = {"id": 1, "email": "v@fictiville.invalid", "role": "validator"}
@@ -318,8 +365,9 @@ def atelier(tmp_path, monkeypatch, schema_sql, instance):
     monkeypatch.setattr(api, "DB_PATH", chemin)
     monkeypatch.setattr(db_mod, "DB_PATH", chemin)
     monkeypatch.setattr(api, "RACINE", instance)
-    monkeypatch.setenv("ADMIN_KEY", "cle-de-test")
-    client = TestClient(api.app, headers={"x-admin-key": "cle-de-test"})
+    monkeypatch.setattr(api, "ADMIN_KEY", "cle-de-test")
+    client = TestClient(api.app, headers={"x-admin-key": "cle-de-test"},
+                        client=("127.0.0.1", 50000))
 
     def en_tant_que(user):
         api.app.dependency_overrides[require_auth] = lambda: user
@@ -417,3 +465,59 @@ def test_chaque_seance_publiee_a_sa_ligne_relue_ou_non():
     cc = index["2026-05-28_conseil-communautaire"]
     assert cc["nb_actes"] == 1 and "en_clair" not in cc, \
         "les actes des deux assemblées ne s'additionnent pas"
+
+
+def test_completer_garde_l_avant_et_ajoute_les_actes(instance):
+    """Les délibérations paraissent après la convocation : la feuille « avant »
+    déjà écrite ne bouge pas, « après » est remise à rédiger, et le relevé
+    redevient « à relire »."""
+    from collectors.en_clair.brouillon import completer, squelette
+    avant = {"titre": "Samedi, à la mairie", "chapeau": "Séance publique.",
+             "ordre_du_jour": ["Subvention", "Cimetière"], "pied": "Convocation."}
+    r = squelette("2026-01-10-cm", None, "ORDRE DU JOUR", {"convocation": "data/pv.txt"}, {},
+                  comme={"marque_acte_ordinale": r"apr[eè]s en avoir d[ée]lib[ée]r[ée]"})
+    r["en_clair"]["avant"] = avant
+    r["origine"]["relu_par"] = "relu à l'atelier"
+
+    c = completer(r, PV, "data/pv.txt", "https://fictiville.invalid/pv.pdf")
+    chemin = _chemin(instance)
+    chemin.write_text(json.dumps(c, ensure_ascii=False))
+
+    assert verifier(chemin) == []
+    assert [a["n"] for a in c["actes"]] == [1, 2] and "source_actes" not in c
+    assert c["en_clair"]["avant"] == avant and c["en_clair"]["apres"] == {}
+    assert c["origine"]["relu_par"] is None and c["sources"]["convocation"] == "data/pv.txt"
+    with pytest.raises(ValueError):
+        completer(c, PV, "data/pv.txt", None)
+
+
+def test_la_marque_est_choisie_sur_la_piece_et_pas_imposee_par_le_modele():
+    """La marque d'un CM (« N° DEL2610_ ») n'ouvre que sa séance ; un PV municipal
+    marque ses actes par « après en avoir délibéré », coupé parfois par une fin de
+    ligne ; « pour 2025 » n'est pas un vote."""
+    from collectors.en_clair.brouillon import squelette
+    pv = ("SUBVENTION AU CLUB\nLe Conseil Municipal, après en avoir\ndélibéré à l’unanimité :\n"
+          "DECIDE d’attribuer au club 1 200 € pour 2025.\n"
+          "REGLEMENT DU CIMETIERE\nLe Conseil Municipal, après en avoir délibéré,\n"
+          "Pour : 12 Contre : 1 Abstention : 0\nAPPROUVE le règlement.\n")
+    r = squelette("2026-01-10-cm", pv, None, {"pv": "data/pv.txt"}, {},
+                  comme={"marque_acte_regex": r"N° DEL2610_?(\d{2})"})
+
+    assert "marque_acte_regex" not in r and r["marque_acte_ordinale"]
+    assert [a["objet"] for a in r["actes"]] == ["SUBVENTION AU CLUB", "REGLEMENT DU CIMETIERE"]
+    assert r["actes"][0]["vote"] == {"unanimite": True}
+    assert r["actes"][1]["vote"] == {"pour": 12, "contre": 1, "abstentions": 0}
+
+
+def test_le_pv_approuve_reproduit_dans_la_liasse_ne_prend_pas_la_place_de_la_seance():
+    """CC du 29/05/2024 : le premier acte approuve le PV du 3 avril et le
+    reproduit, avec ses « Délibération n°53 » à « n°106 ». La séance, ce sont les
+    n°107 et suivants, en tête de page. Le relevé décrivait l'autre séance."""
+    from collectors.en_clair.brouillon import squelette
+    approuve = "".join(f"Délibération n°{n}/2024\nAPPROUVE le point {n}.\n" for n in range(53, 60))
+    seance = "".join(f"N°{n}/2024\nDEPARTEMENT : GARD\nOBJET {n}\nVu la délibération N°67/2023,\n"
+                     f"APPROUVE la décision {n}.\n" for n in range(108, 111))
+    r = squelette("2024-05-29-cc", "N°107/2024\nDEPARTEMENT : GARD\nPV DU 3 AVRIL\n" + approuve + seance,
+                  None, {"pv": "data/pv.txt"}, {})
+
+    assert [a["n"] for a in r["actes"]] == [107, 108, 109, 110], "ni le PV approuvé, ni les renvois"

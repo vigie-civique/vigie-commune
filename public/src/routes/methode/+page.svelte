@@ -35,6 +35,8 @@
       <tr><td>DGFiP</td><td><a href="https://data.economie.gouv.fr/explore/dataset/balances-comptables-des-communes-en-2023/" rel="noopener">Balances comptables des communes</a></td><td>Comptes des communes, ligne par ligne</td><td>Licence Ouverte v2</td></tr>
       <tr><td>DGFiP</td><td><a href="https://data.economie.gouv.fr/explore/dataset/balances-comptables-des-syndicats-depuis-2010/" rel="noopener">Balances comptables des syndicats</a></td><td>Comptes des syndicats auxquels l'intercommunalité adhère</td><td>Licence Ouverte v2</td></tr>
       <tr><td>DGFiP</td><td><a href="https://data.economie.gouv.fr/explore/dataset/fiscalite-locale-des-particuliers/" rel="noopener">Fiscalité locale des particuliers</a></td><td>Taux d'imposition votés (taxe foncière, taxe d'habitation, ordures ménagères)</td><td>Licence Ouverte v2.0</td></tr>
+      <tr><td>DGFiP</td><td><a href="https://data.economie.gouv.fr/explore/dataset/comptes-individuels-des-communes-fichier-global-2019-2020/" rel="noopener">Comptes individuels des communes (fichiers globaux 2011-2015 à 2019-2020)</a></td><td>Taux de taxe foncière bâtie voté par la commune, 2015 à 2020</td><td>Licence Ouverte v2.0</td></tr>
+      <tr><td>DGFiP</td><td><a href="https://data.economie.gouv.fr/explore/dataset/comptes-individuels-des-departements-et-des-collectivites-territoriales-uniques-fichier-global-2019-2020/" rel="noopener">Comptes individuels des départements et collectivités territoriales uniques (2019-2020)</a></td><td>Taux de taxe foncière bâtie voté par le département en 2020, part passée aux communes en 2021</td><td>Licence Ouverte v2.0</td></tr>
       <tr><td>Direction du budget</td><td><a href="https://data.economie.gouv.fr/explore/dataset/plf25-donnees-de-l-annexe-jaune-effort-financier-de-l-etat-en-faveur-des-associations/" rel="noopener">Annexe « jaune » au projet de loi de finances, associations</a></td><td>Subventions de l'État aux associations</td><td>Licence Ouverte v2</td></tr>
       <tr><td>Région Occitanie</td><td><a href="https://data.laregion.fr/explore/dataset/subventions-du-conseil-regional/" rel="noopener">Subventions du conseil régional</a></td><td>Subventions de la Région aux structures du territoire</td><td>Licence Ouverte v2</td></tr>
       <tr><td>Ministère de l'Éducation nationale</td><td><a href="https://data.education.gouv.fr/explore/dataset/fr-en-annuaire-education/" rel="noopener">Annuaire de l'éducation (et indices de position sociale des écoles)</a></td><td>Écoles, collèges, lycées&nbsp;; effectifs et indices sociaux</td><td>Licence Ouverte v2 (annuaire)</td></tr>
@@ -46,7 +48,8 @@
       <tr><td>Ministère de l'Intérieur</td><td><a href="https://www.data.gouv.fr/datasets/elections-municipales-2026-resultats-du-premier-tour" rel="noopener">Municipales 2026, 1<sup>er</sup> tour</a> et <a href="https://www.data.gouv.fr/datasets/elections-municipales-2026-resultats-du-second-tour" rel="noopener">2<sup>d</sup> tour</a></td><td>Résultats par commune et par scrutin</td><td>Licence Ouverte v2.0</td></tr>
       <tr><td>Ministère de la Transition écologique</td><td><a href="https://www.data.gouv.fr/datasets/base-nationale-de-gestion-assistee-des-procedures-administratives-relatives-aux-risques-gaspar" rel="noopener">GASPAR, via l'API Géorisques</a></td><td>Risques naturels, arrêtés de catastrophe naturelle, installations classées</td><td>Licence Ouverte v1.0</td></tr>
       <tr><td>ADEME</td><td><a href="https://data.ademe.fr/datasets/k9lr0llpdxbho37mz43fmrud" rel="noopener">SINOE, déchets ménagers (catalogue ADEME)</a></td><td>Qui collecte les déchets, tonnages par habitant</td><td>Licence Ouverte v1.0 (catalogue ADEME)</td></tr>
-      <tr><td>Ministère de la Santé (eau potable), Système d'information sur l'eau (SISPEA), via Hub'Eau (OFB, BRGM)</td><td><a href="https://hubeau.eaufrance.fr/" rel="noopener">Hub'Eau&nbsp;: qualité de l'eau potable, qualité des rivières, SISPEA</a></td><td>Analyses de l'eau, prix et performance des services d'eau</td><td>Licence Ouverte (Etalab)&nbsp;; v2.0 pour les jeux d'origine</td></tr>
+      <tr><td>Ministère de la Santé (eau potable) et qualité des rivières via Hub'Eau (OFB, BRGM)&nbsp;; Observatoire des services d'eau et d'assainissement (SISPEA, OFB)</td><td><a href="https://hubeau.eaufrance.fr/" rel="noopener">Hub'Eau&nbsp;: qualité de l'eau potable, qualité des rivières</a>&nbsp;; <a href="https://www.services.eaufrance.fr/pro/telechargement" rel="noopener">SISPEA&nbsp;: composition communale des services, indicateurs</a></td><td>Analyses de l'eau, prix et performance des services d'eau</td><td>Licence Ouverte (Etalab)&nbsp;; v2.0 pour les jeux d'origine</td></tr>
+      <tr><td>Ministère de la Culture</td><td><a href="https://www.data.gouv.fr/datasets/5af120e5b595087cfabcde81" rel="noopener">Immeubles protégés au titre des monuments historiques (base Mérimée)</a></td><td>Monuments classés ou inscrits, avec le lien vers leur notice sur la plateforme ouverte du patrimoine</td><td>Licence Ouverte v2.0</td></tr>
       <tr><td>ARCEP</td><td><a href="https://data.arcep.fr/" rel="noopener">Ma connexion internet, couverture mobile</a></td><td>Éligibilité à la fibre, sites mobiles indisponibles</td><td>Licence Ouverte v2.0 (Ma connexion internet)</td></tr>
       <tr><td>DILA</td><td><a href="https://www.boamp.fr/" rel="noopener">BOAMP</a></td><td>Avis de marchés publics</td><td>Licence Ouverte v1.0</td></tr>
       <tr><td>DILA</td><td><a href="https://echanges.dila.gouv.fr/OPENDATA/JADE/" rel="noopener">JADE</a></td><td>Décisions de la justice administrative citant la commune</td><td>Licence Ouverte v1.0</td></tr>
@@ -111,10 +114,10 @@
       <dt>Pouvez-vous consulter la pièce&nbsp;?</dt>
       <dd>
         <strong>Document consultable</strong> : un PDF est accessible, la
-        pièce de l'acte ou, le plus souvent, le recueil ou le compte rendu de
+        pièce de l'acte ou, le plus souvent, le recueil ou le document de
         sa séance (le lien de chaque acte dit lequel)&nbsp;: {data.provenance.document?.acte ?? '-'}.
         <strong>Page source</strong> : le lien mène à la page qui contient
-        l'acte, le plus souvent le compte rendu entier et non la délibération
+        l'acte, le plus souvent le document de séance entier et non la délibération
         isolée&nbsp;: {data.provenance.document?.page_source ?? '-'}. C'est notre
         principale faiblesse, et elle se voit ici plutôt que d'être tue.
         <strong>Sans document</strong>&nbsp;: {data.provenance.document?.aucun ?? 0}.
@@ -235,6 +238,29 @@
 
   <h2>Limites</h2>
   <p>Les coordonnées issues de géocodage automatique peuvent être approximatives. Les entités sans localisation publique fiable ne sont pas affichées sur la carte.</p>
+  <p>Dans une commune nouvelle, les comptes d'une commune absorbée, d'avant la
+    fusion, viennent de l'OFGL, qui additionne son budget principal et ses
+    budgets annexes. Le détail budget par budget n'est pas relevé pour elle :
+    il ne l'est que pour la commune actuelle.</p>
+  <h2 id="delegations">Décisions prises par délégation</h2>
+  <p>
+    Le maire, le président ou le bureau d'une intercommunalité décident seuls de
+    ce que le conseil leur a délégué&nbsp;: marchés, emprunts, demandes de
+    subvention, conventions, mais aussi préemptions, concessions funéraires ou
+    actions en justice. Ce sont des actes publics, pas des délibérations&nbsp;:
+    ils ont leur propre libellé et ne comptent dans aucun total de délibérations.
+  </p>
+  <p>
+    Quand le portail d'actes de la collectivité les publie à part, nous en
+    publions le titre, la date de transmission au contrôle de légalité et le
+    lien vers la pièce, jamais le texte. Celles qui touchent un particulier
+    (renonciation à préempter, concession funéraire, logement loué, aide
+    individuelle, contentieux, personnel) ne sont que comptées. Une préemption
+    exercée est publiée sous un titre qui ne nomme personne et ne donne pas la
+    parcelle. Le portail retire chaque pièce après son affichage légal, environ
+    deux mois&nbsp;: le lien disparaît alors, et le site le dit.
+  </p>
+
   <h2>Périmètre</h2>
   <p>
     Le site suit la <strong>chaîne de décision</strong>, pas le voisinage

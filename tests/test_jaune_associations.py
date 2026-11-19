@@ -133,3 +133,68 @@ def test_deux_lignes_du_meme_programme_restent_deux_flux(base, entite):
 
 def test_un_flux_du_jaune_est_paye():
     assert etat_du_flux("subvention_etat_association", SOURCE, None) == "paye"
+
+
+# ── Le magasin national ──────────────────────────────────────────────────────
+
+def _deposer_au_magasin(tmp_path, monkeypatch, contenu: str):
+    from collectors import jaune_associations as jaune
+    monkeypatch.setattr(jaune, "CACHE", tmp_path / "jaune")
+    jeu = MILLESIMES[0][1]
+    (tmp_path / "jaune").mkdir()
+    (tmp_path / "jaune" / f"{jeu}.csv").write_text(contenu, encoding="utf-8")
+    return jaune, jeu
+
+
+def test_un_export_frais_du_magasin_se_lit_sans_reseau(tmp_path, monkeypatch):
+    jaune, jeu = _deposer_au_magasin(
+        tmp_path, monkeypatch, "﻿siren;nic;denomination;montant;objet_2023;programme\n"
+                               "450499447;24;CHAMP CONTRECHAMP;3000;FDVA;163\n")
+
+    def interdit(*a, **k):
+        raise AssertionError("le dossier a appelé data.economie.gouv.fr")
+    monkeypatch.setattr("urllib.request.urlopen", interdit)
+    lignes = jaune._telecharger(jeu, MILLESIMES[0][2])
+    assert lignes[0]["siren"] == "450499447" and lignes[0]["montant"] == "3000"
+
+
+def test_un_export_sans_ses_colonnes_est_refuse(tmp_path, monkeypatch):
+    jaune, jeu = _deposer_au_magasin(tmp_path, monkeypatch,
+                                     "<html><body>Erreur</body></html>\n")
+    with pytest.raises(ValueError, match="montant"):
+        jaune._telecharger(jeu, MILLESIMES[0][2])
+
+
+@pytest.mark.parametrize("mode_ecrivain", [False, True])
+def test_un_millesime_manquant_fait_echouer_l_ecrivain_seulement(
+        base, tmp_path, monkeypatch, mode_ecrivain):
+    from collectors import jaune_associations as jaune
+    base.commit()
+    monkeypatch.setattr(jaune, "DB_PATH", tmp_path / "test.db")
+
+    def muet(jeu, colonnes):
+        raise OSError("HTTP Error 503")
+    monkeypatch.setattr(jaune, "_telecharger", muet)
+    if mode_ecrivain:
+        monkeypatch.setenv("VIGIE_ECRIVAIN_MAGASIN", "1")
+        with pytest.raises(RuntimeError, match="2023"):
+            jaune.run()
+    else:
+        monkeypatch.delenv("VIGIE_ECRIVAIN_MAGASIN", raising=False)
+        jaune.run()
+
+
+def test_un_fdva_deja_lu_comme_accorde_se_signale(base, entite):
+    """Accordé (résultats DRAJES) et versé (jaune) : la même subvention, deux
+    lignes qui ne s'additionnent pas ; la rencontre se compte et se dit."""
+    asso = _association(base, entite, "CHAMP CONTRECHAMP", "450499447")
+    etat = _etat(base, entite)
+    base.execute("INSERT INTO financial_flows (type, year, amount, from_id, to_id, description,"
+                 " source, statut) VALUES ('subvention_etat_association', 2023, 7000, ?, ?,"
+                 " '[P163] FDVA 2 2023 — Fonctionnement', 'fdva-drajes', 'engage')", (etat, asso))
+    stats = importer(base, [_ligne("450499447", "00024", "CHAMP CONTRECHAMP", "7000"),
+                            _ligne("450499447", "00024", "CHAMP CONTRECHAMP", "1200",
+                                   objet="Action éducative", programme="141")],
+                     2023, COLONNES_2023, etat)
+    assert stats["fdva_deja_accorde"] == 1
+    assert stats["inserees"] == 2

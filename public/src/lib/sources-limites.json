@@ -76,17 +76,17 @@
       "limite": "Ne compte que ce que la commune a mis en ligne et que le site a retrouvé."
     },
     "accueil.seances": {
-      "source": "Procès-verbaux et comptes rendus publiés par la commune et par l'intercommunalité",
+      "source": "Procès-verbaux, comptes rendus d'avant 2022, listes de délibérations ou, à défaut, délibérations publiées une à une, par la commune et par l'intercommunalité",
       "limite": "Une séance dont aucun document n'est publié n'apparaît pas ; « en clair » veut dire relue par la vigie."
     },
     "accueil.budget": {
-      "source": "OFGL, d'après les comptes de gestion de la DGFiP",
+      "source": "Observatoire des finances et de la gestion publique locales (OFGL), d'après les comptes de gestion de la DGFiP",
       "lien": "https://data.ofgl.fr/",
       "millesime": "dernier exercice publié",
       "limite": "Budget principal seulement : les budgets annexes (eau, assainissement…) n'y sont pas."
     },
     "accueil.foncier-bati": {
-      "source": "DGFiP, fiscalité locale des particuliers",
+      "source": "Direction générale des Finances publiques (DGFiP), fiscalité locale des particuliers ; pour 2015 à 2020, comptes individuels des communes et des départements (Licence Ouverte v2.0)",
       "lien": "https://data.economie.gouv.fr/explore/dataset/fiscalite-locale-des-particuliers/",
       "limite": "Le taux voté par la commune, pas ce que paie un propriétaire : la cotisation applique ce taux et ceux de l'intercommunalité et des syndicats à la valeur locative du bien."
     },
@@ -115,7 +115,7 @@
       "limite": "Résidences secondaires et logements occasionnels réunis, au dernier recensement publié : un changement d'usage depuis n'y figure pas encore."
     },
     "accueil.eau": {
-      "source": "Office français de la biodiversité, observatoire SISPEA (déclaré par chaque service d'eau)",
+      "source": "Office français de la biodiversité, observatoire national des services d'eau et d'assainissement (base SISPEA), déclaré par chaque service d'eau",
       "lien": "https://www.services.eaufrance.fr/",
       "limite": "Eau potable seule : l'assainissement, facturé en plus, n'y est pas. Prix au 1er janvier suivant l'exercice, pour 120 m³ par an, déclaré par le service avec un à deux ans de retard."
     },
@@ -135,7 +135,7 @@
       "limite": "Fonctionnement du budget principal : l'investissement et les budgets annexes n'y sont pas."
     },
     "argent.impots": {
-      "source": "DGFiP, fiscalité locale des particuliers et des entreprises",
+      "source": "DGFiP, fiscalité locale des particuliers et des entreprises ; pour 2015 à 2020, comptes individuels des communes et des départements",
       "lien": "https://data.economie.gouv.fr/explore/dataset/fiscalite-locale-des-particuliers/",
       "limite": "Des taux, pas des montants payés : la base imposable change d'un logement à l'autre."
     },
@@ -187,6 +187,26 @@
       "source": "HATVP ; DILA, fonds JADE",
       "lien": "https://www.hatvp.fr/",
       "limite": "Le maire ne déclare qu'au-delà de 20 000 habitants, le président de l'intercommunalité au-delà de 20 000 habitants ou de 5 M€ de recettes ; JADE n'a aucun jugement de tribunal administratif."
+    },
+    "territoire.loyers": {
+      "source": "Carte des loyers, ministère du Logement. Estimations ANIL, à partir des données du Groupe SeLoger et de leboncoin",
+      "lien": "https://www.data.gouv.fr/datasets/carte-des-loyers-indicateurs-de-loyers-dannonce-par-commune-en-2025",
+      "limite": "Un loyer d'annonce n'est pas un loyer payé : il dit le prix demandé à la mise en location, pas celui des baux en cours."
+    },
+    "territoire.rpls": {
+      "source": "SDES, répertoire des logements locatifs des bailleurs sociaux (RPLS)",
+      "lien": "https://www.data.gouv.fr/datasets/donnees-detaillees-au-logement-du-repertoire-des-logements-locatifs-des-bailleurs-sociaux-rpls",
+      "limite": "Le répertoire compte les logements des bailleurs sociaux, pas les logements conventionnés d'un propriétaire privé ni ceux de la commune hors bailleur."
+    },
+    "territoire.enaf": {
+      "source": "Cerema, consommation d'espaces naturels, agricoles et forestiers (fichiers fonciers)",
+      "lien": "https://www.data.gouv.fr/datasets/consommation-despaces-naturels-agricoles-et-forestiers-du-1er-janvier-2011-au-1er-janvier-2025",
+      "limite": "La mesure vient des fichiers fonciers : un terrain aménagé sans changement au cadastre n'y apparaît pas, et la destination peut rester inconnue."
+    },
+    "territoire.cantines": {
+      "source": "Ministère de l'Agriculture, registre national des cantines et télédéclarations EGalim (ma cantine)",
+      "lien": "https://www.data.gouv.fr/datasets/resultats-de-campagnes-de-teledeclaration-des-cantines",
+      "limite": "Les taux sont ceux que chaque cantine déclare elle-même, sans contrôle publié ; une cantine absente du registre n'est pas comptée."
     }
   }
 }

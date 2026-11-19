@@ -24,7 +24,7 @@ export function load() {
   // premier bénéficiaire de l'argent public alors qu'il a payé la commune.
   // La page applique déjà cette règle ; le constat doit l'appliquer aussi.
   const versements = flows.filter((f) =>
-    f.sens === 'sortant' && f.amount && f.statut !== 'demande'
+    f.sens === 'sortant' && f.amount && f.etat !== 'demande' && f.etat !== 'annule'
     && !/cession/i.test(f.type || ''))
 
   const total = versements.reduce((s, f) => s + f.amount, 0)

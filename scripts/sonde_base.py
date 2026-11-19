@@ -20,6 +20,7 @@ nombres, et refuse de rendre autre chose :
     sonde_base.py compter     db/x.db TABLE [--par COL] [--ou "SQL"]
     sonde_base.py somme       db/x.db TABLE COL [--par COL] [--ou "SQL"]
     sonde_base.py remplissage db/x.db TABLE
+    sonde_base.py atelier-sur-collecte db/x.db
 
 Sur une base fictive (`donnees_synthetiques.py`) rien de tout cela ne protège
 quoi que ce soit : l'outil sert aussi à la lire, c'est voulu.
@@ -168,6 +169,34 @@ def cmd_remplissage(conn, a) -> None:
         print(f"  {c:30} {100 * (total - vides) / total:5.1f} % remplie")
 
 
+def cmd_atelier_sur_collecte(conn, _a) -> None:
+    """Combien de fiches d'origine `atelier` qu'un registre atteste.
+
+    Avant la PR #276 (15/11/2026), une saisie « entité » au nom d'une fiche
+    DÉJÀ en base la faisait passer en `origine = atelier` : le garde-fou des
+    fiches institutionnelles se levait par une saisie. Une fiche née d'une
+    saisie n'a, elle, aucun registre derrière elle. On compte donc les fiches
+    d'origine `atelier` qui en portent un : un SIREN (`businesses`, SIRENE) ou
+    un numéro RNA (`associations`).
+
+    Un NOMBRE, aucune ligne, masqué sous le seuil comme tout effectif. C'est un
+    minorant : une personne ou un service lus dans un procès-verbal n'ont aucun
+    registre et passent à travers ; et un numéro saisi à la main par un
+    validateur sur une fiche née à l'atelier la ferait compter à tort. Pas de
+    lien par source ici : `collectors/origine.py` n'est pas importable sans
+    instance configurée, et la sonde doit se lancer sur n'importe quelle base.
+    """
+    n = conn.execute("""
+        SELECT COUNT(*) FROM entities e
+        WHERE e.origine = 'atelier' AND (
+              EXISTS (SELECT 1 FROM businesses b
+                      WHERE b.entity_id = e.id AND COALESCE(b.siren, '') <> '')
+           OR EXISTS (SELECT 1 FROM associations a
+                      WHERE a.entity_id = e.id AND COALESCE(a.rna_id, '') <> ''))
+    """).fetchone()[0]
+    print(f"fiches d'origine atelier attestées par un registre : {masquer(n)}")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sp = p.add_subparsers(dest="cmd", required=True)
@@ -177,6 +206,7 @@ def main() -> int:
         ("compter", cmd_compter, (("table", None),)),
         ("somme", cmd_somme, (("table", None), ("col", None))),
         ("remplissage", cmd_remplissage, (("table", None),)),
+        ("atelier-sur-collecte", cmd_atelier_sur_collecte, ()),
     ):
         s = sp.add_parser(nom)
         s.add_argument("db")

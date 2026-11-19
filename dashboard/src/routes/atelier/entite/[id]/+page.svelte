@@ -10,6 +10,7 @@
   import { LIBELLES } from '#lib/champs.js'
   import { VERDICT } from '#lib/axes.js'
   import { brouillonVide, resumer, parOnglet, enumerer } from './brouillon.js'
+  import { retourValide, etiquetteRetour, RETOUR_PAR_DEFAUT } from '../../fiches/liens-retour.js'
   import BarreEnregistrement from './BarreEnregistrement.svelte'
   import Conflit from './Conflit.svelte'
   import Identite from './Identite.svelte'
@@ -22,6 +23,8 @@
   import Sites from './Sites.svelte'
   import Notes from './Notes.svelte'
   import Historique from './Historique.svelte'
+  import Signaler from './Signaler.svelte'
+  import { erreurHttp, phraseErreur, phraseStatut, libelleType, libelleSource } from '#lib/libelles.js'
 
   const ONGLETS = [
     { cle: 'essentiel',  titre: "L'essentiel" },
@@ -52,6 +55,9 @@
   let enregistrement = false
   let bilan          = []  // [{ ok, texte }] du dernier enregistrement
   let carteVersion   = 0
+  let refusVersion   = 0   // relu après une suppression : un refus a pu naître
+  let signaler       = false
+  let signale        = ''  // le message de l'API après un signalement
 
   // Champs du formulaire que le PATCH de la fiche n'envoie pas : le type ne
   // change pas ici, les coordonnées ont leur propre appel.
@@ -83,19 +89,42 @@
 
   $: entityId = $page.params.id
 
-  onMount(() => load())
+  // D'où l'on vient (liste, résultats de recherche) : `?de=` — gardé de fiche en
+  // fiche par les liens de relation, et ignoré s'il ne vise pas l'atelier.
+  $: de = retourValide($page.url.searchParams.get('de')) ? $page.url.searchParams.get('de') : ''
+  const revenir = () => goto(de || RETOUR_PAR_DEFAUT)
+
+  // Une relation mène à une autre fiche SANS quitter cette page : le composant
+  // reste, seul `id` change. On recharge — et on repart d'un brouillon vide (le
+  // départ avec des modifications a déjà été confirmé par `beforeNavigate`).
+  let monte = false
+  let nomFiche
+  let sauter = false     // vrai quand on arrive d'une autre fiche : le focus suit
+  let chargee = null
+  $: if (monte && entityId !== chargee) {
+    if (chargee !== null) { sauter = true; brouillon = brouillonVide(); bilan = []; entity = null
+                            signaler = false; signale = '' }
+    chargee = entityId
+    load().then(async () => { if (sauter) { sauter = false; await tick(); nomFiche?.focus() } })
+  }
+  onMount(() => { monte = true })
 
   async function load() {
     loading = true
     error = ''
     try {
       const res = await authFetch(`/atelier/entities/${entityId}`)
-      if (!res.ok) throw new Error(res.status === 404 ? 'Entité introuvable' : `${res.status}`)
+      if (!res.ok) throw erreurHttp(res)
       entity = await res.json()
       initForm()
+      // Un avis laissé par la page de saisie (SIREN à confirmer).
+      try {
+        const avis = sessionStorage.getItem('atelier_avis_fiche')
+        if (avis) { signale = avis; sessionStorage.removeItem('atelier_avis_fiche') }
+      } catch {}
       await loadBudgetAnnexe()
     } catch (e) {
-      error = e.message
+      error = phraseErreur(e)
     } finally {
       loading = false
     }
@@ -181,8 +210,13 @@
   async function echec(res) {
     let d = {}
     try { d = await res.json() } catch {}
-    const msg = typeof d.detail === 'object' ? d.detail?.message : d.detail
-    return new Error(msg || `${res.status}`)
+    let msg = typeof d.detail === 'object' ? d.detail?.message : d.detail
+    // Un lien refusé par un validateur : dire où le refus se lit, et qui le lève.
+    if (typeof d.detail === 'object' && d.detail?.refus_id) {
+      msg += tranche ? ' Voir « Liens refusés », plus bas dans cet onglet.'
+                     : ' Seul un validateur peut lever ce refus.'
+    }
+    return new Error(msg || phraseStatut(res.status))
   }
 
   // Un appel du brouillon : { ok, d } ; l'échec est noté au bilan.
@@ -193,7 +227,7 @@
       const d = res.status === 204 ? null : await res.json().catch(() => null)
       return { ok: true, d }
     } catch (e) {
-      noter(false, `${libelle} : ${e.message}`)
+      noter(false, `${libelle} : ${phraseErreur(e)}`)
       return { ok: false }
     }
   }
@@ -240,7 +274,7 @@
         method: 'PATCH',
         body: JSON.stringify({ verdict, statut_lu: entity.verdict || 'jamais_relu' }),
       })
-    } catch (e) { noter(false, `Verdict : ${e.message}`); return }
+    } catch (e) { noter(false, `Verdict : ${phraseErreur(e)}`); return }
     if (res.ok) {
       const r = await res.json()
       entity = { ...entity, verdict: r.verdict, verdict_par: r.reviewed_by,
@@ -255,7 +289,7 @@
         + '. Rien n\'a été écrasé.')
       if (d.actuel) entity = { ...entity, verdict: d.actuel, verdict_par: d.par, verdict_le: d.le }
     } else {
-      noter(false, `Verdict : l'enregistrement a échoué (${res.status}).`)
+      noter(false, `Verdict : l'enregistrement a échoué. ${phraseStatut(res.status)}`)
     }
   }
 
@@ -272,7 +306,7 @@
         method: 'PATCH',
         body: JSON.stringify(body),
       })
-    } catch (e) { noter(false, `${noms} : ${e.message}`); return }
+    } catch (e) { noter(false, `${noms} : ${phraseErreur(e)}`); return }
     if (res.status === 409) {
       const d = await res.json()
       conflit = typeof d.detail === 'object' && d.detail
@@ -291,7 +325,10 @@
       const proposes = (saved.proposes || []).map(c => LIBELLES[c] ?? c).join(', ')
       form = { ...form, ...valeurs(initial) }
       noter(true, `Proposition envoyée (${proposes}). Cette fiche est publiée : un `
-                + `validateur doit l'accepter avant que ce soit appliqué.`)
+                + `validateur doit l'accepter avant que ce soit appliqué.`
+                + ((saved.reprend || []).length
+                   ? ` Elle reprend aussi votre proposition précédente sur cette fiche, `
+                     + `qui attendait encore.` : ''))
       return
     }
     // Mettre à jour updated_at local pour le prochain envoi
@@ -320,11 +357,23 @@
     const b = brouillon.relations
     const reste = { ajouts: [], modifs: {}, suppr: [] }
     const nom = id => `Relation « ${relations.find(r => r.id === +id)?.relation_type ?? id} »`
+    reste.motifs = {}
     for (const id of b.suppr) {
-      const { ok } = await executer(`${nom(id)} (suppression)`, () =>
-        authFetch(`/atelier/relations/${id}`, { method:'DELETE' }))
-      if (ok) relations = relations.filter(r => r.id !== id)
-      else reste.suppr.push(id)
+      const motif = (b.motifs?.[id] ?? '').trim()
+      const { ok, d } = await executer(`${nom(id)} (suppression)`, () =>
+        authFetch(`/atelier/relations/${id}?motif=${encodeURIComponent(motif)}`, { method:'DELETE' }))
+      if (ok) {
+        relations = relations.filter(r => r.id !== id)
+        // Le même lien dit par une autre source reste en ligne : le dire.
+        const restantes = d?.sources_restantes ?? []
+        if (restantes.length) {
+          noter(false, `${nom(id)} : supprimé pour cette source, mais le même lien reste `
+            + `en ligne par ${restantes.map(x => libelleSource(x.source)).join(', ')}. `
+            + 'Supprimez aussi ' + (restantes.length > 1 ? 'ces lignes' : 'cette ligne')
+            + ' pour le retirer du site.')
+        }
+        if (d?.refus_id) refusVersion++
+      } else { reste.suppr.push(id); reste.motifs[id] = motif }
     }
     for (const [id, champs] of Object.entries(b.modifs)) {
       const body = {}
@@ -480,7 +529,7 @@
   async function reprendre() {
     error = ''
     const res = await authFetch(`/atelier/entities/${entityId}`)
-    if (!res.ok) { error = `Relecture impossible (${res.status})`; return }
+    if (!res.ok) { error = `La relecture a échoué. ${phraseStatut(res.status)}`; return }
     const frais = await res.json()
     const aGarder = champsAGarder()
     entity = frais
@@ -498,24 +547,34 @@
 </script>
 
 <svelte:head>
-  <title>{entity ? entity.name : 'Éditeur'} — Atelier {COMMUNE}</title>
+  <title>{entity ? entity.name : 'Fiche'} — Atelier {COMMUNE}</title>
 </svelte:head>
 
 <div class="editor-page">
   <!-- Top bar -->
   <div class="topbar">
-    <button class="back-btn" on:click={() => goto('/atelier')}>← File de travail</button>
+    <button class="back-btn" on:click={revenir}>{etiquetteRetour(de)}</button>
 
     {#if entity}
       <div class="topbar-center">
         <span class="entity-id">#{entity.id}</span>
-        <span class="entity-name">{entity.name}</span>
-        <span class="type-badge type-{entity.type}">{entity.type}</span>
+        <span class="entity-name" tabindex="-1" bind:this={nomFiche}>{entity.name}</span>
+        <span class="type-badge type-{entity.type}">{libelleType(entity.type)}</span>
       </div>
-    {/if}
+      <button class="btn-signaler" aria-expanded={signaler}
+              on:click={() => { signaler = !signaler; signale = '' }}>
+        Signaler
+      </button>
+    {' '}{/if}
 
     {#if error && entity}<span class="save-error">{error}</span>{/if}
   </div>
+
+  {#if signale}<p class="signale" role="status">{signale}</p>{/if}
+  {#if signaler && entity}
+    <Signaler {entity} on:fermer={() => signaler = false}
+              on:envoye={e => { signaler = false; signale = e.detail }} />
+  {/if}
 
   {#if conflit}
     <Conflit {conflit} {modifies} on:reprendre={reprendre} on:abandonner={abandonner} />
@@ -548,8 +607,9 @@
         <Carte bind:form entityName={entity.name} modifiee={coordsModifiees} version={carteVersion} />
         <Budget lignes={budgetAnnexe} chargement={budgetLoading} bind:brouillon={brouillon.budget} />
       {:else if onglet === 'liens'}
-        <Relations {relations} entityId={entity.id} bind:brouillon={brouillon.relations} />
-        <Contacts {contacts} bind:brouillon={brouillon.contacts} />
+        <Relations {relations} entityId={entity.id} {de} {tranche} {refusVersion}
+                   bind:brouillon={brouillon.relations} />
+        <Contacts {contacts} reserves={entity.contacts_reserves === true} bind:brouillon={brouillon.contacts} />
         <Sites sites={websites} {tranche} bind:brouillon={brouillon.sites} />
       {:else}
         {#if entity.notes_reservees}
@@ -606,6 +666,15 @@
     min-width: 0;
   }
 
+  .btn-signaler {
+    font-size: .8rem; padding: .3rem .8rem; min-height: 36px; border-radius: 6px;
+    border: 1px solid var(--bordure-forte); color: var(--texte); white-space: nowrap;
+  }
+  .btn-signaler[aria-expanded="true"] { background: var(--surface-2); }
+  .signale {
+    margin: .75rem 1rem 0; padding: .5rem .75rem; border-radius: 6px; font-size: .85rem;
+    background: var(--succes-bordure); color: var(--succes-texte);
+  }
   .entity-id  { font-size: .72rem; color: var(--texte-doux); }
   .entity-name { font-weight: 600; color: var(--texte); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .save-error { font-size: .78rem; color: var(--danger); }
@@ -761,6 +830,15 @@
   .editor-page :global(.rel-btn-del) { color: var(--danger); }
   .editor-page :global(.rel-btn-del:hover) { background: var(--danger-bordure); border-color: var(--danger-bordure); color: var(--danger-texte); }
 
+  /* Un bouton dit ce qu'il fait : « Supprimer » efface de la base, « Écarter »
+     retire du site et garde en base. Plus de ✕ dont on devine l'effet. */
+  .editor-page :global(.btn-texte) {
+    font-size: .74rem; padding: .25rem .6rem; min-height: 32px; border-radius: 4px;
+    border: 1px solid var(--bordure); color: var(--info); background: transparent; cursor: pointer;
+    white-space: nowrap;
+  }
+  .editor-page :global(.btn-texte.danger) { color: var(--danger); }
+  .editor-page :global(.btn-texte:disabled) { opacity: .5; }
   .editor-page :global(.rel-edit-actions) { display: flex; gap: .35rem; padding-top: .2rem; }
   .editor-page :global(.btn-rel-save) {
     padding: .3rem .65rem; background: var(--succes-bordure); color: var(--succes-texte);
@@ -791,6 +869,22 @@
     background: none; border: none; padding: 0 .2rem; white-space: nowrap;
   }
 
+  /* Un champ ne dépasse jamais la carte qui le porte (il était rogné sur téléphone). */
+  .editor-page :global(input), .editor-page :global(select), .editor-page :global(textarea) {
+    width: 100%; min-width: 0; box-sizing: border-box;
+  }
+  .editor-page :global(.grid2 > *), .editor-page :global(label) { min-width: 0; }
+  @media (max-width: 900px) {
+    .editor-page { height: auto; overflow: visible; }
+    .topbar { padding: .4rem .7rem; }
+    .back-btn, .btn-signaler { min-height: 44px; }
+    .editor-page :global(.btn-texte) { min-height: 44px; }
+    .entity-name { white-space: normal; }
+    /* Le nom prend sa ligne : coincé entre « retour » et « Signaler », il
+       s'écrivait une lettre par ligne à 375 px. */
+    .topbar-center { order: 3; flex-basis: 100%; }
+    .btn-signaler { margin-left: auto; }
+  }
   @media (max-width: 640px) {
     .editor-page :global(.grid2) { grid-template-columns: 1fr; }
     .editor-page :global(.col2)  { grid-column: 1; }

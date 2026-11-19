@@ -57,7 +57,7 @@
 
       <div class="communes">
         {#each parScrutin(s) as r}
-          <article class:phare={r.commune === '{COMMUNE}'}>
+          <article class:phare={r.commune === COMMUNE}>
             <header class="tete">
               <h3>{r.commune}</h3>
               <span class="tour">tour {r.tour}</span>
@@ -132,7 +132,7 @@
   .etat { color: var(--gris); }
 
   .communes { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); }
-  article { background: #fff; border: 1px solid var(--trait); border-radius: 12px; padding: 1rem 1.1rem; }
+  article { background: var(--carte); border: 1px solid var(--trait); border-radius: 12px; padding: 1rem 1.1rem; }
   article.phare { border-color: var(--ardoise); box-shadow: 0 3px 14px rgba(37,99,235,.1); }
   .tete { display: flex; align-items: baseline; gap: .5rem; margin-bottom: .7rem; }
   .tete h3 { margin: 0; font-size: 1.05rem; color: var(--encre); }

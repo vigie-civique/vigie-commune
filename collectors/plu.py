@@ -71,8 +71,9 @@ import json
 import time
 import urllib.request
 
+from . import mesure
 from .archive import HEADERS, archive_fetch
-from .config import (COMMUNES, COMMUNES_DELEGUEES, EPCI_SIREN, REQUEST_DELAY,
+from .config import (COMMUNES, ANCIENNES_COMMUNES, EPCI_SIREN, REQUEST_DELAY,
                      communes_du_step)
 from .db import get_conn, transaction
 from .geometrie import (aire_m2, bbox, contour_commune, dedans, grille,
@@ -299,10 +300,10 @@ def import_commune(insee: str, commune_nom: str) -> dict:
     releve["aire_gpu_km2"] = round(aire_gpu / 1e6, 3)
     releve["aire_km2"] = round(aire_commune / 1e6, 3)
     if aire_commune and abs(aire_gpu - aire_commune) / aire_commune > 0.05:
-        # Quand l'instance déclare une commune déléguée, l'explication n'est plus
+        # Quand l'instance déclare une ancienne commune, l'explication n'est plus
         # une hypothèse : la fusion est connue, et c'est elle que le GPU ignore.
         fusionnees = [d.get("nom") or code
-                      for code, d in COMMUNES_DELEGUEES.items()
+                      for code, d in ANCIENNES_COMMUNES.items()
                       if d.get("commune") == insee]
         cause = (f" — fusion avec {', '.join(n for n in fusionnees if n) or 'une ancienne commune'}"
                  " que le GPU n'a pas reprise" if fusionnees else
@@ -315,6 +316,12 @@ def import_commune(insee: str, commune_nom: str) -> dict:
     documents = (_fetch("document", {"geom": geom}).get("features") or [])
     time.sleep(REQUEST_DELAY)
     zonage = (_fetch("zone-urba", {"geom": geom}).get("features") or [])
+    # Avant l'attribution, qui écarte les voisins. Le zonage se relit en entier
+    # à chaque passe ; les documents (un à cinq) sont trop peu pour un volume.
+    mesure.lu("gpu-zone-urba", len(zonage),
+              mesure.forme_de(zonage, "properties"), complete=True)
+    mesure.lu("gpu-documents", len(documents),
+              mesure.forme_de(documents, "properties"))
 
     notres, ecartes = attribuer(documents, insee, EPCI_SIREN)
     releve["ecartes"] = len(ecartes)

@@ -144,6 +144,36 @@ def test_date_de_naissance_refusee(vs, tmp_path):
     assert any("clé interdite" in r for r in rep.errors)
 
 
+def test_nuance_politique_refusee(vs, tmp_path):
+    rep = vs.Report()
+    fichier = tmp_path / "elections.json"
+    fichier.write_text(json.dumps(
+        {"listes": [{"libelle": "Liste A", "nuance": "LDVG"}]}),
+        encoding="utf-8")
+    vs.check_file(fichier, rep, tmp_path)
+    assert any("nuance politique" in r for r in rep.errors)
+
+
+def test_nuance_dans_le_data_json_de_la_page_refusee(vs, tmp_path):
+    rep = vs.Report()
+    (tmp_path / "elections").mkdir()
+    fichier = tmp_path / "elections" / "__data.json"
+    fichier.write_text('{"type":"data","nodes":[{"data":[{"nuance":1},"LDVG"]}]}',
+                       encoding="utf-8")
+    vs.check_file(fichier, rep, tmp_path)
+    assert any("nuance politique" in r for r in rep.errors)
+
+
+def test_mot_nuance_dans_l_index_de_recherche_accepte(vs, tmp_path):
+    # Les clés de recherche_texte.json sont des mots des actes : « nuance » y
+    # est légitime et ne doit pas faire refuser la publication.
+    rep = vs.Report()
+    fichier = tmp_path / "recherche_texte.json"
+    fichier.write_text(json.dumps({"mots": {"nuance": [12]}}), encoding="utf-8")
+    vs.check_file(fichier, rep, tmp_path)
+    assert not rep.errors
+
+
 def test_chemin_local_refuse(vs, tmp_path):
     rep = vs.Report()
     fichier = tmp_path / "actes.json"
@@ -445,3 +475,183 @@ def test_domain_of_ne_mange_pas_les_lettres(vs):
 ])
 def test_domain_of_ne_retire_que_le_prefixe_www(vs, url, domaine):
     assert vs.domain_of(url) == domaine
+
+
+# ── popolo.json : la vue des mandats ─────────────────────────────────────────
+
+def _popolo(dossier: Path, persons: list[dict], memberships: list[dict]) -> Path:
+    dossier.mkdir(parents=True, exist_ok=True)
+    (dossier / "popolo.json").write_text(json.dumps(
+        {"persons": persons, "memberships": memberships}), encoding="utf-8")
+    return dossier
+
+
+def test_popolo_personne_sans_mandat_refusee(vs, tmp_path):
+    """Un gérant publié au titre de SIRENE n'est pas un élu (avis DPO, 26/10/2026)."""
+    rep = vs.Report()
+    vs.check_popolo(_popolo(tmp_path / "p", [
+        {"id": "person/1", "name": "Élue Fictive"},
+        {"id": "person/2", "name": "Gérant Fictif"},
+    ], [{"id": "membership/9", "person_id": "person/1"}]), rep)
+    assert "personne sans mandat dans popolo.json" in rep.errors
+    assert "person/2" in str(rep.errors) and "person/1 " not in str(rep.errors)
+
+
+def test_popolo_conforme_passe(vs, tmp_path):
+    rep = vs.Report()
+    vs.check_popolo(_popolo(tmp_path / "p", [{"id": "person/1", "name": "Élue Fictive"}],
+                            [{"id": "membership/9", "person_id": "person/1"}]), rep)
+    assert rep.errors == {}
+
+
+def test_domicile_sans_voie_avec_code_postal_refuse(vs, tmp_path):
+    """« demeurant au moment de la transaction à Testonville (99001} » est sorti
+    en clair le 26/10/2026 : ni voie, ni « demeurant à » contigu."""
+    d = tmp_path / "d"
+    d.mkdir()
+    fp = d / "extrait.json"
+    fp.write_text(json.dumps({"texte": (
+        "et Madame Lou SALOMBE, infirmière, son épouse, demeurant\nau moment de la "
+        "transaction à Testonville (99001} aux termes d'un acte")}, ensure_ascii=False),
+        encoding="utf-8")
+    rep = vs.Report()
+    vs.check_file(fp, rep, d)
+    assert "domicile publié" in rep.errors
+
+
+def test_siege_de_personne_morale_avec_code_postal_passe(vs, tmp_path):
+    d = tmp_path / "d"
+    d.mkdir()
+    fp = d / "extrait.json"
+    fp.write_text(json.dumps({"texte": (
+        "L'association des Amis du Moulin, domiciliée à Testonville (99001), sollicite")},
+        ensure_ascii=False), encoding="utf-8")
+    rep = vs.Report()
+    vs.check_file(fp, rep, d)
+    assert "domicile publié" not in rep.errors
+
+
+
+def test_titre_dacte_nommant_un_particulier_refuse(vs, tmp_path):
+    """Règle du 27/10/2026 : le titre d'un acte ne nomme qu'une personne publiée.
+    Un élu y reste ; par son seul patronyme, seulement dans un titre qui parle
+    d'un mandat, et jamais pour un couple (14/11/2026)."""
+    d = tmp_path / "t"
+    d.mkdir()
+    (d / "entities.json").write_text(json.dumps({"entities": [
+        {"id": 1, "type": "person", "name": "Jordan ZANIMET"}]}), encoding="utf-8")
+    (d / "events.json").write_text(json.dumps({"events": [
+        {"id": 10, "title": "Délégation à M. Jordan ZANIMET"},
+        {"id": 11, "title": "Indemnités de fonction de M. ZANIMET"},
+        {"id": 12, "title": "Indemnités de Monsieur le Maire"},
+        {"id": 13, "title": "Aide façade d'un particulier, 300 €"},
+        {"id": 14, "title": "Aide façade à Mme Noa CALORLY, 300 €"},
+        {"id": 15, "title": "Remerciements à M. VORLANDIN"},
+        {"id": 16, "title": "Vente à M. ET Mme ZANIMET"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    rep = vs.Report()
+    vs.check_titres_nominatifs(d, rep)
+    assert sorted(rep.errors) == ["titre d'acte nommant un homonyme possible d'une personne publiée",
+                                  "titre d'acte nommant une personne non publiée"]
+    assert "id=14" in str(rep.errors) and "id=1" + "0" not in str(rep.errors)
+    assert "id=11" not in str(rep.errors)
+    # Un patronyme seul que rien de publié ne porte : peut-être un élu d'un
+    # mandat clos, que le filtre nomme et que le contrôle ne connaît pas.
+    assert "id=15" in str(rep.warnings) and "id=15" not in str(rep.errors)
+
+    # 🔴 « M. ET Mme NOM » : un couple n'est pas l'élu qui porte ce nom. Servi
+    # dans un titre le 14/11/2026 (bénéficiaires d'une aide aux façades).
+    assert "id=16" in str(rep.errors)
+
+
+def test_le_texte_dun_acte_ne_sert_ni_adresse_dun_bien_aide_ni_vie_privee(vs, tmp_path):
+    """🔴 Audit du 14/11/2026 : sept extraits servaient le numéro et la rue du
+    bien aidé. Le contrôle lit les extraits écrits, avec ses propres motifs."""
+    d = tmp_path / "t"
+    (d / "extrait").mkdir(parents=True)
+    textes = {
+        1: "sollicitent une aide à la rénovation de façades pour le 220 route vieille",
+        2: "sollicitent une aide à la rénovation de façades pour le [adresse masquée] dont le montant",
+        3: "Monsieur le Maire propose d'acquérir la parcelle située 12 rue Haute",
+        4: "DECIDE l'admission en non-valeur des titres suivants : SALOMBE Lou 45,00 €",
+        # Ce que le filtre publie à bon droit ne doit pas arrêter la publication.
+        5: "Ravalement des façades de l'école. Sécurisation : 2 route départementale à aménager.",
+    }
+    for i, texte in textes.items():
+        (d / "extrait" / f"{i}.json").write_text(
+            json.dumps({"id": i, "texte": texte}, ensure_ascii=False), encoding="utf-8")
+    rep = vs.Report()
+    vs.check_textes_des_actes(d, rep)
+    assert sorted(rep.errors) == ["adresse d'un bien aidé publiée dans le texte d'un acte",
+                                  "texte publié d'un acte qui porte sur la situation d'une personne"]
+    assert "extrait/1.json" in str(rep.errors) and "extrait/4.json" in str(rep.errors)
+    assert "extrait/2.json" not in str(rep.errors) and "extrait/3.json" not in str(rep.errors)
+    assert "extrait/5.json" not in str(rep.errors)
+
+
+def test_le_controle_et_le_filtre_lisent_un_mandat_de_la_meme_facon(vs):
+    """Les motifs du contrôle sont recopiés, pas importés. Plus étroits que ceux
+    du filtre, ils refuseraient une publication saine : ils restent identiques."""
+    from scripts.snapshot import textes
+    assert vs._TITRE_DE_MANDAT.pattern == textes._ACTE_DE_MANDAT.pattern
+    assert vs._TITRE_ENVERS_UN_PARTICULIER.pattern == textes._ACTE_ENVERS_UN_PARTICULIER.pattern
+    # Et ce que le contrôle refuse dans un texte, le filtre le retient toujours.
+    for texte in ("admission en non-valeur", "créances éteintes", "placée sous curatelle",
+                  "sanction disciplinaire", "conseil de discipline", "bail d'habitation",
+                  "placé en congé de longue maladie"):
+        assert vs._TEXTE_DE_VIE_PRIVEE.search(texte)
+        assert textes.motif_sans_extrait("", texte, set())
+
+
+# ── Le renvoi d'un flux à sa pièce (revue du 07/11/2026, C1) ─────────────────
+
+def _flux_et_actes(dossier: Path, flows: list[dict], actes: list[int]) -> Path:
+    dossier.mkdir(parents=True, exist_ok=True)
+    (dossier / "flows.json").write_text(json.dumps({"flows": flows}), encoding="utf-8")
+    (dossier / "events.json").write_text(
+        json.dumps({"events": [{"id": i} for i in actes]}), encoding="utf-8")
+    return dossier
+
+
+def test_flux_verbatim_avec_acte_ou_document_passe(vs, tmp_path):
+    rep = vs.Report()
+    vs.check_renvoi_des_flux(_flux_et_actes(tmp_path, [
+        {"id": 1, "origine": "verbatim", "acte_id": 7, "document": None},
+        {"id": 2, "origine": "verbatim", "acte_id": None,
+         "document": "https://mairie.example/pv.pdf"},
+        {"id": 3, "origine": "institutionnel", "acte_id": None, "document": None},
+    ], actes=[7]), rep)
+    assert rep.errors == {} and rep.warnings == {}
+
+
+def test_flux_verbatim_sans_renvoi_avertit_sans_bloquer(vs, tmp_path):
+    rep = vs.Report()
+    vs.check_renvoi_des_flux(_flux_et_actes(tmp_path, [
+        {"id": 1, "origine": "verbatim", "acte_id": None, "document": None},
+        {"id": 2, "origine": "verbatim", "acte_id": None, "document": "pv-depose.pdf"},
+    ], actes=[]), rep)
+    assert rep.errors == {}
+    assert "2 flux verbatim" in rep.warnings[
+        "flux lu dans un compte rendu sans renvoi à sa pièce"][0]
+
+
+def test_flux_qui_renvoie_a_un_acte_non_publie_bloque(vs, tmp_path):
+    rep = vs.Report()
+    vs.check_renvoi_des_flux(_flux_et_actes(tmp_path, [
+        {"id": 1, "origine": "institutionnel", "acte_id": 99, "document": None},
+    ], actes=[7]), rep)
+    assert list(rep.errors) == ["flux qui renvoie à un acte non publié"]
+
+
+def test_un_titre_d_agenda_qui_nomme_quelqu_un_ne_refuse_rien(vs, tmp_path):
+    """L'agenda sort du filtre des titres : le contrôle ne doit pas refuser la
+    publication pour une conférence annoncée."""
+    d = tmp_path / "t"
+    d.mkdir()
+    (d / "events.json").write_text(json.dumps({"events": [
+        {"id": 20, "type": "local_event", "title": "Conférence de Madame Noa CALORLY"},
+        {"id": 21, "type": "local_event", "title": "Sur les traces de Monsieur Castor"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    rep = vs.Report()
+    vs.check_titres_nominatifs(d, rep)
+    assert not rep.errors and not rep.warnings

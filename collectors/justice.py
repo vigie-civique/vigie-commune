@@ -55,6 +55,7 @@ import unicodedata
 import urllib.request
 import xml.etree.ElementTree as ET
 
+from . import mesure
 from .archive import HEADERS
 from .config import COMMUNE_INSEE, COMMUNE_NAME, EPCI_NOM
 from .db import get_conn, transaction
@@ -238,6 +239,8 @@ def run(jours: int = JOURS_DEFAUT, amorcer: bool = False) -> int:
                 # corpus vide.
                 print(f"    ↳ {nom} : {e}")
 
+    # Les incréments des derniers jours : zéro est l'ordinaire.
+    mesure.lu("jade", releve["lues"])
     with transaction() as conn:
         ensure_table(conn)
         for t in trouves:

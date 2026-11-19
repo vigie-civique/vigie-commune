@@ -40,12 +40,28 @@ from collectors.config import DB_PATH   # nommée dans la config
 from collectors.config import RULES_PATH
 
 
+#: Rôles qui ne rendent pas, à eux seuls, une personne publique. Siéger en
+#: commission n'est un titre public que pour un élu, qui l'est déjà par son
+#: mandat : une commission extramunicipale ou un comité consultatif compte des
+#: habitants, et le nom d'un habitant ne sort pas parce qu'un procès-verbal ou
+#: la page d'une commune le cite (avis DPO du 14/11/2026). Le lien
+#: `membre_commission` reste publiable entre deux extrémités publiques
+#: (`is_public_relation`) ; il n'ouvre plus de fiche. Retiré au chargement (`load_rules`)
+#: et non seulement dans les règles d'exemple : les `publication_rules.json`
+#: des instances ne suivent pas le dépôt, et aucun lecteur de `RULES` ne doit
+#: pouvoir le retrouver dans la liste.
+ROLES_SANS_TITRE_PROPRE = frozenset({"membre_commission"})
+
+
 def load_rules(path: Path = RULES_PATH) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
     required = ["confidence", "locations", "people", "relations", "events", "urls", "outputs"]
     missing = [key for key in required if key not in data]
     if missing:
         raise ValueError(f"publication_rules.json incomplet: {', '.join(missing)}")
+    roles = data["people"].get("publish_only_with_relation_types", [])
+    data["people"]["publish_only_with_relation_types"] = [
+        r for r in roles if r not in ROLES_SANS_TITRE_PROPRE]
     # Le site de la commune n'est le site d'aucune entité tierce : générique
     # pour l'instance, écrit ou non dans les règles (cf. verify_snapshot).
     commune = _domaine(URL_COMMUNE)
@@ -61,6 +77,7 @@ def _domaine(url: str) -> str:
 
 
 RULES = load_rules()
+
 DEFAULT_OUT = ROOT / RULES["outputs"]["public_snapshot_dir"]
 
 

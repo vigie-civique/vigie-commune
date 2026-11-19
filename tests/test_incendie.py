@@ -12,10 +12,21 @@ Ce que ces essais protègent :
 """
 from __future__ import annotations
 
+import json
+import ssl
+import subprocess
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
-from collectors.incendie import (adresses_dans_le_zonage, ensure_tables, forets_de_la_commune,
-                                 lire_page_bdiff, points_de_la_commune)
+# Le collecteur importe certifi au chargement : sans lui (job `tests`, pytest seul),
+# le module est sauté ici, et joué par `tests-deps`.
+pytest.importorskip("certifi", reason="job « tests-deps » : pip install -r requirements.txt")
+
+from collectors import incendie  # noqa: E402
+from collectors.incendie import (adresses_dans_le_zonage, ensure_tables,  # noqa: E402
+                                 forets_de_la_commune, lire_page_bdiff,
+                                 points_de_la_commune)
 
 
 def _page(*lignes):
@@ -71,8 +82,75 @@ def test_une_adresse_dans_un_trou_n_est_pas_dans_le_zonage():
 
 
 def test_les_adresses_sont_celles_de_la_commune():
-    csv = "code_insee;lon;lat\n99001;3.85;44.04\n99002;3.9;44.1\n99001;;\n"
-    assert points_de_la_commune(csv, "99001") == [(3.85, 44.04)]
+    import gzip
+    csv = b"code_insee;lon;lat\n99001;3.85;44.04\n99002;3.9;44.1\n99001;;\n"
+    assert points_de_la_commune(gzip.compress(csv), "99001") == [(3.85, 44.04)]
+
+
+def test_la_ban_se_lit_en_flux(monkeypatch):
+    """Jamais le département entier en mémoire : 1,5 Gio pour le Nord (27/10/2026)."""
+    import gzip
+
+    def interdit(*_, **__):
+        raise AssertionError("gzip.decompress charge tout le département d'un bloc")
+    brut = gzip.compress(b"code_insee;lon;lat\n99001;3.85;44.04\n")
+    monkeypatch.setattr(incendie.gzip, "decompress", interdit)
+    assert points_de_la_commune(brut, "99001") == [(3.85, 44.04)]
+
+
+def _ban_en_panne(monkeypatch, tmp_path):
+    """Une BAN qui rend 503, comme du 21 au 27/10/2026, et un magasin vide."""
+    import urllib.error
+
+    def faux_lire(url, **_):
+        raise urllib.error.HTTPError(url, 503, "Service Unavailable", {}, None)
+    monkeypatch.setattr(incendie, "_lire", faux_lire)
+    monkeypatch.setattr(incendie, "CACHE", tmp_path)
+    return tmp_path / "adresses-99.csv.gz"
+
+
+def test_ban_injoignable_reprend_la_copie_perimee(monkeypatch, tmp_path, capsys):
+    import gzip
+    import os
+    copie = _ban_en_panne(monkeypatch, tmp_path)
+    copie.write_bytes(gzip.compress(b"code_insee;lon;lat\n99001;3.85;44.04\n"))
+    vieux = (datetime.now() - timedelta(days=incendie.BAN_JOURS + 30)).timestamp()
+    os.utime(copie, (vieux, vieux))
+
+    assert incendie.adresses_ban("99001") == [(3.85, 44.04)]
+    sortie = capsys.readouterr().out
+    assert "PÉRIMÉ" in sortie and "503" in sortie, "la reprise se dit dans le journal"
+
+
+def test_une_copie_de_plus_de_deux_trimestres_ne_se_publie_pas(monkeypatch, tmp_path):
+    import gzip
+    import os
+    copie = _ban_en_panne(monkeypatch, tmp_path)
+    copie.write_bytes(gzip.compress(b"code_insee;lon;lat\n99001;3.85;44.04\n"))
+    vieux = (datetime.now() - timedelta(days=2 * incendie.BAN_JOURS + 1)).timestamp()
+    os.utime(copie, (vieux, vieux))
+    with pytest.raises(OSError, match="503"):
+        incendie.adresses_ban("99001")
+
+
+def test_un_lecteur_qui_ne_peut_ecrire_lit_la_copie_bornee_sans_appeler_la_ban(monkeypatch, tmp_path):
+    import gzip
+    import os
+    copie = _ban_en_panne(monkeypatch, tmp_path)
+    copie.write_bytes(gzip.compress(b"code_insee;lon;lat\n99001;3.85;44.04\n"))
+    vieux = (datetime.now() - timedelta(days=incendie.BAN_JOURS + 1)).timestamp()
+    os.utime(copie, (vieux, vieux))
+    monkeypatch.setattr(incendie, "magasin_ecrivable", lambda *a: False)
+    monkeypatch.setattr(incendie, "_lire", lambda *a, **k: (_ for _ in ()).throw(AssertionError("BAN appelée")))
+    assert incendie.adresses_ban("99001") == [(3.85, 44.04)]
+
+
+def test_ban_injoignable_sans_copie_echoue(monkeypatch, tmp_path):
+    """Propriété, pas régression : passait déjà avant la reprise. Sans copie,
+    l'échec reste bruyant, jamais « 0 adresse »."""
+    _ban_en_panne(monkeypatch, tmp_path)
+    with pytest.raises(OSError, match="503"):
+        incendie.adresses_ban("99001")
 
 
 def test_la_foret_du_voisin_n_est_pas_nommee():
@@ -125,3 +203,161 @@ def test_les_feux_publies_sont_ceux_de_la_commune(base):
     assert (i["feux"]["nombre"], i["feux"]["surface_ha"]) == (2, 0.5)
     assert i["feux"]["plus_grand"]["alerte"] == "2016-08-10 15:35"
     assert i["forets_publiques"] == [], "relevé abouti, aucune forêt publique : un zéro mesuré"
+
+
+def test_curl_recoit_l_intermediaire_que_la_bdiff_ne_presente_pas(tmp_path):
+    """Sans lui, le curl d'un Debian sort en code 60 : le relevé « feux » échouait
+    sur le VPS et passait sur le Mac (26/10/2026)."""
+    # certifi est une dépendance du collecteur, pas de la suite : le job
+    # `tests` de la CI n'installe que pytest, `tests-deps` joue ces essais.
+    pytest.importorskip("certifi")
+    options = incendie._racines_bdiff(str(tmp_path))
+    assert options[0] == "--cacert"
+    paquet = (tmp_path / "racines-bdiff.pem").read_bytes()
+    assert incendie.INTERMEDIAIRE_BDIFF.read_bytes().strip() in paquet
+    # Le paquet se charge, et garde les racines de certifi à côté de l'intermédiaire.
+    contexte = ssl.create_default_context(cafile=options[1])
+    assert len(contexte.get_ca_certs()) > 100
+
+
+def test_l_intermediaire_de_la_bdiff_ne_perime_pas_sous_peu():
+    x509 = pytest.importorskip("cryptography.x509")
+    cert = x509.load_pem_x509_certificate(incendie.INTERMEDIAIRE_BDIFF.read_bytes())
+    assert "GEANT TLS RSA 1" in cert.subject.rfc4514_string()
+    fin = cert.not_valid_after_utc
+    assert fin > datetime.now(timezone.utc) + timedelta(days=365)
+
+
+def test_feux_bdiff_passe_les_racines_a_curl(monkeypatch):
+    pytest.importorskip("certifi")
+    appels = []
+
+    def faux_curl(cmd, **_):
+        appels.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=_page().encode())
+    monkeypatch.setattr(incendie.subprocess, "run", faux_curl)
+    incendie.feux_bdiff("12082", 2006, 2025)
+    assert appels and "--cacert" in appels[0]
+
+
+def test_le_fichier_d_outre_mer_porte_trois_chiffres():
+    assert [incendie.departement(c) for c in ("30140", "2A004", "97411")] == ["30", "2A", "974"]
+
+
+def _ban_france(tmp_path, lignes):
+    import gzip
+    (tmp_path / "source").mkdir(exist_ok=True)
+    france = tmp_path / "source" / "adresses-france.csv.gz"
+    france.write_bytes(gzip.compress(("id;nom_voie;code_insee;lon;lat\n" + "".join(lignes)).encode()))
+    return france
+
+
+def test_la_ban_france_se_decoupe_par_departement(tmp_path):
+    import gzip
+    france = _ban_france(tmp_path, ['a;"rue ;du Pont";30140;3.85;44.04\n', "b;r;97411;55.4;-21.1\n",
+                                    "c;r;2A004;8.7;41.9\n", "d;r;30141;3.9;44.0\n", "e;r;;0;0\n"])
+    sortie = tmp_path / "sortie"
+    sortie.mkdir()
+    decoupes = incendie.decouper_france(france, sortie)
+    assert {dep: n for dep, (_, n) in decoupes.items()} == {"30": 2, "974": 1, "2A": 1}
+    gard = gzip.decompress(decoupes["30"][0].read_bytes())
+    assert points_de_la_commune(gzip.compress(gard), "30140") == [(3.85, 44.04)]
+    assert b'"rue ;du Pont"' in gard, "un champ qui porte le séparateur reste entier"
+
+
+def test_une_ban_france_tronquee_ne_remplace_rien(monkeypatch, tmp_path):
+    monkeypatch.setattr(incendie, "CACHE", tmp_path)
+    monkeypatch.setattr(incendie, "TEMOIN_FRANCE", tmp_path / "france.json")
+    ancien = tmp_path / "adresses-30.csv.gz"
+    ancien.write_bytes(b"ancien")
+
+    def telecharger(cible):
+        cible.write_bytes(_ban_france(tmp_path, ["a;r;30140;3.85;44.04\n"]).read_bytes())
+    monkeypatch.setattr(incendie, "_telecharger_france", telecharger)
+    monkeypatch.setattr(incendie, "_exiger_disque", lambda *a: None)
+    with pytest.raises(RuntimeError, match="1 départements"):
+        incendie.remplir_magasin()
+    assert ancien.read_bytes() == b"ancien"
+    assert not (tmp_path / "france.json").exists()
+    assert not (tmp_path / ".adresses-france.part").exists()
+
+
+def test_une_ban_france_fraiche_ne_se_retelecharge_pas(monkeypatch, tmp_path):
+    monkeypatch.setattr(incendie, "TEMOIN_FRANCE", tmp_path / "france.json")
+    (tmp_path / "france.json").write_text("{}")
+    monkeypatch.setattr(incendie, "_telecharger_france",
+                        lambda c: (_ for _ in ()).throw(AssertionError("téléchargée")))
+    assert incendie.remplir_magasin() == []
+
+
+def test_la_ban_france_remplace_chaque_departement(monkeypatch, tmp_path):
+    monkeypatch.setattr(incendie, "CACHE", tmp_path)
+    monkeypatch.setattr(incendie, "TEMOIN_FRANCE", tmp_path / "france.json")
+    monkeypatch.setattr(incendie, "DEPARTEMENTS_MIN", 2)
+
+    def telecharger(cible):
+        cible.write_bytes(_ban_france(tmp_path, ["a;r;30140;3.85;44.04\n", "b;r;26289;5.0;44.7\n"]).read_bytes())
+    monkeypatch.setattr(incendie, "_telecharger_france", telecharger)
+    monkeypatch.setattr(incendie, "_exiger_disque", lambda *a: None)
+    assert incendie.remplir_magasin() == []
+    assert incendie.adresses_ban("30140") == [(3.85, 44.04)]
+    assert incendie.adresses_ban("26289") == [(5.0, 44.7)]
+    assert json.loads((tmp_path / "france.json").read_text())["adresses"] == {"26": 1, "30": 1}
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "adresses-26.csv.gz", "adresses-30.csv.gz", "france.json", "source"]
+
+
+def test_un_code_insee_hostile_ne_nomme_aucun_fichier(tmp_path):
+    france = _ban_france(tmp_path, ["a;r;30140;3.85;44.04\n", "b;r;../x1;0;0\n", "c;r;9/001;0;0\n",
+                                    "d;r;zz001;0;0\n", "e;r;30140\n;0;0\n", "f;r;2C004;0;0\n"])
+    sortie = tmp_path / "sortie"
+    sortie.mkdir()
+    decoupes = incendie.decouper_france(france, sortie)
+    assert list(decoupes) == ["30"]
+    assert sorted(p.name for p in sortie.iterdir()) == ["adresses-30.csv.gz"]
+
+
+def test_trop_de_codes_invalides_arretent_la_decoupe(monkeypatch, tmp_path):
+    monkeypatch.setattr(incendie, "REJETS_MAX", 2)
+    france = _ban_france(tmp_path, ["a;r;xx;0;0\n"] * 3)
+    sortie = tmp_path / "sortie"
+    sortie.mkdir()
+    with pytest.raises(RuntimeError, match="sans code INSEE valide"):
+        incendie.decouper_france(france, sortie)
+
+
+def test_sans_place_sur_le_disque_rien_ne_se_telecharge(monkeypatch, tmp_path):
+    import collections
+    monkeypatch.setattr(incendie, "CACHE", tmp_path)
+    Usage = collections.namedtuple("Usage", "total used free")
+    monkeypatch.setattr(incendie.shutil, "disk_usage", lambda _: Usage(0, 0, 4 << 30))
+    with pytest.raises(OSError, match="nécessaires"):
+        incendie._exiger_disque(2 << 30, "avant le téléchargement")
+    incendie._exiger_disque(100 << 20, "avant la découpe")
+
+
+def test_un_departement_refuse_garde_l_ancien_et_reste_signale(monkeypatch, tmp_path):
+    monkeypatch.setattr(incendie, "CACHE", tmp_path)
+    monkeypatch.setattr(incendie, "TEMOIN_FRANCE", tmp_path / "france.json")
+    monkeypatch.setattr(incendie, "DEPARTEMENTS_MIN", 2)
+    monkeypatch.setattr(incendie, "_exiger_disque", lambda *a: None)
+    ancien = tmp_path / "adresses-30.csv.gz"
+    ancien.write_bytes(b"ancien illisible")
+
+    def telecharger(cible):
+        cible.write_bytes(_ban_france(tmp_path, ["a;r;30140;3.85;44.04\n", "b;r;26289;5.0;44.7\n"]).read_bytes())
+    monkeypatch.setattr(incendie, "_telecharger_france", telecharger)
+    vrai = incendie.copier_atomiquement
+
+    def copier(chemin, flux):
+        if chemin.name == "adresses-30.csv.gz":
+            from collectors.national_store import ContenuInvalide
+            raise ContenuInvalide("fondu")
+        return vrai(chemin, flux)
+    monkeypatch.setattr(incendie, "copier_atomiquement", copier)
+    assert incendie.remplir_magasin() == ["30"]
+    assert ancien.read_bytes() == b"ancien illisible"
+    assert incendie.adresses_ban("26289") == [(5.0, 44.7)]
+    monkeypatch.setattr(incendie, "_telecharger_france",
+                        lambda c: (_ for _ in ()).throw(AssertionError("retéléchargée")))
+    assert incendie.remplir_magasin() == ["30"], "signalé à chaque passe, sans 2 Go de plus"

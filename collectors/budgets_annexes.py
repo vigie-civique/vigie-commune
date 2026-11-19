@@ -45,7 +45,7 @@ from datetime import date
 from pathlib import Path
 
 from .archive import fetch_json
-from .config import COMMUNE_NAME, COMMUNE_SIREN as SIREN, HEADERS
+from .config import COMMUNE_NAME, HEADERS, releve_et_siren
 from .db import get_conn
 
 API_BASE = "https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets"
@@ -70,31 +70,44 @@ def ensure_table(conn):
             solde_fonctionnement    REAL,
             source                  TEXT NOT NULL DEFAULT 'dgfip-balances',
             created_at              TEXT DEFAULT (datetime('now')),
+            siren                   TEXT,
             UNIQUE(year, budget)
         )
     """)
-    # Base d'avant la colonne `cautions` (21/10/2026).
+    # Base d'avant la colonne `cautions` (21/10/2026) ou `siren` (02/11/2026).
     colonnes = {r[1] for r in conn.execute("PRAGMA table_info(budget_annexe_balance)")}
     if "cautions" not in colonnes:
         conn.execute("ALTER TABLE budget_annexe_balance ADD COLUMN cautions REAL")
+    if "siren" not in colonnes:
+        conn.execute("ALTER TABLE budget_annexe_balance ADD COLUMN siren TEXT")
     conn.commit()
 
 
 def fetch_year(year: int) -> list[dict] | None:
     """Toutes les lignes des balances de la commune. None = non publié, ou lecture incomplète."""
+    return fetch_year_siren(year)[1]
+
+
+def fetch_year_siren(year: int) -> tuple[str | None, list[dict] | None]:
+    """`(SIREN qui a répondu, lignes)` : l'exercice se marque de son SIREN."""
+    return releve_et_siren(lambda siren: _fetch_year(year, siren))
+
+
+def _fetch_year(year: int, siren: str) -> list[dict] | None:
     dataset = f"balances-comptables-des-communes-en-{year}"
     out: list[dict] = []
     offset = 0
     while True:
         params = urllib.parse.urlencode({
-            "where": f'siren="{SIREN}"',
+            "where": f'siren="{siren}"',
             "order_by": "lbudg, compte",
             "limit": PAGE,
             "offset": offset,
         })
         url = f"{API_BASE}/{dataset}/records?{params}"
         try:
-            data = fetch_json(url, source="budgets-annexes-dgfip", timeout=30, headers=HEADERS)
+            data = fetch_json(url, source="budgets-annexes-dgfip", timeout=30, headers=HEADERS,
+                              complete=True)
         except urllib.error.HTTPError as e:
             if offset == 0 and e.code == 404:
                 return None
@@ -196,7 +209,7 @@ def resoudre_entites(conn, decl: dict[str, str], budgets=()) -> dict[str, int]:
 
 
 def import_year(conn, year: int, decl: dict[str, str], dry_run: bool = False) -> int:
-    records = fetch_year(year)
+    siren, records = fetch_year_siren(year)
     if not records:
         print(f"  {year} : aucune donnée")
         return 0
@@ -215,10 +228,10 @@ def import_year(conn, year: int, decl: dict[str, str], dry_run: bool = False) ->
         conn.execute(
             "INSERT INTO budget_annexe_balance (year, budget, nomenclature, entity_id,"
             " encours_dette, cautions, produits_fonctionnement, charges_fonctionnement,"
-            " solde_fonctionnement, source) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " solde_fonctionnement, source, siren) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (year, nom, b["nomenclature"], ids.get(nom), None if b["encours_dette"] is None else round(b["encours_dette"], 2),
              None if b["cautions"] is None else round(b["cautions"], 2),
-             round(b["produits"], 2), round(b["charges"], 2), round(b["solde"], 2), SOURCE))
+             round(b["produits"], 2), round(b["charges"], 2), round(b["solde"], 2), SOURCE, siren))
     conn.commit()
     return len(budgets)
 

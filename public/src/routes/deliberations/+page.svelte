@@ -1,30 +1,44 @@
 <script>
   import { COMMUNE_DE, SITE_NOM } from '#lib/instance.js'
   import { libelleAnnee } from '#lib/actes.js'
+  import { chargerJSON } from '#lib/charger.js'
+  import { contientLesMots } from '#lib/recherche.js'
   import Niveau from '#lib/components/Niveau.svelte'
   import SourceAbsente from '#lib/components/SourceAbsente.svelte'
 
   // Rendu au build par +page.server.js : sommaire des millésimes + index
   // compact des titres. Les actes eux-mêmes vivent sur /deliberations/<année>.
   export let data
-  $: ({ annees, index, total, delibCM, delibCC, seances, anneeCourante, nCourante, votes } = data)
+  $: ({ annees, total, delibCM, delibCC, decisions, seances, anneeCourante, nCourante, votes } = data)
   // Aucune délibération collectée : ne pas afficher « 0 acte », qui se lit
   // « le conseil n'a rien décidé » au lieu de « nous n'avons pas collecté les
-  // comptes rendus ». C'est le cas de tout dossier national.
+  // procès-verbaux ». C'est le cas de tout dossier national.
   $: source = data.source || { etat: 'servie', sources: [] }
 
   const nb = (n) => (n ?? 0).toLocaleString('fr-FR')
   let q = '', instance = 'all'
 
-  const fold = (s) => (s || '').toLowerCase()
-  $: needle = fold(q.trim())
-  $: resultats = needle.length < 2 ? [] : index
+  // L'index des titres n'est pas dans la page : il est demandé à la première
+  // frappe, une seule fois. Sans lui (échec réseau), la page reste un sommaire
+  // par année, que le lecteur parcourt sans recherche.
+  let index = null, indexEtat = 'attente'   // attente | charge | erreur
+  async function chargerIndex() {
+    indexEtat = 'charge'
+    try {
+      index = await chargerJSON('deliberations-index.json')
+      indexEtat = 'pret'
+    } catch { indexEtat = 'erreur' }
+  }
+
+  // Mêmes mots que /recherche : « ecole » trouve « école », « eau » ne trouve
+  // plus « bureau ».
+  $: needle = q.trim()
+  $: if (needle.length >= 2 && indexEtat === 'attente') chargerIndex()
+  $: trouves = needle.length < 2 || !index ? [] : index
     .filter((e) => instance === 'all' || e.instance === instance)
-    .filter((e) => fold(e.titre).includes(needle))
-    .slice(0, 80)
-  $: nTrouves = needle.length < 2 ? 0 : index
-    .filter((e) => instance === 'all' || e.instance === instance)
-    .filter((e) => fold(e.titre).includes(needle)).length
+    .filter((e) => contientLesMots(e.titre, needle))
+  $: resultats = trouves.slice(0, 80)
+  $: nTrouves = trouves.length
 
   const fmtDate = (d) => {
     if (!d) return '-'
@@ -33,18 +47,18 @@
   }
 </script>
 
-<svelte:head><title>Délibérations &amp; actes officiels - {SITE_NOM}</title>
-  <meta name="description" content="Les {total} actes officiels {COMMUNE_DE} et de son intercommunalité, année par année : délibérations du conseil municipal, procès-verbaux communautaires, votes, montants et documents source." /></svelte:head>
+<svelte:head><title>Délibérations des conseils - {SITE_NOM}</title>
+  <meta name="description" content="Les {total} délibérations et séances des conseils {COMMUNE_DE} et de son intercommunalité, année par année, avec les documents source." /></svelte:head>
 
 <section>
-  <h1>Délibérations &amp; actes officiels</h1>
-  <p class="sub">Conseil municipal, communauté de communes et actes issus des sources officielles. (Agenda culturel → <a href="/vie-locale">Vie locale</a>.)</p>
+  <h1>Délibérations des conseils</h1>
+  <p class="sub">Conseil municipal et conseil communautaire : délibérations, séances{#if decisions}{' '}et décisions par délégation{/if}, relevées sur les sites officiels. (Agenda culturel → <a href="/vie-locale">Vie locale</a>.)</p>
 
   {#if source.etat === 'absente'}
     <SourceAbsente etat={source.etat} sources={source.sources} dernier={source.dernier} travailManuel
-                   quoi="Les actes des assemblées" />
+                   quoi="Les délibérations et séances" />
   {:else if !total}
-    <p class="err">Aucun acte dans ce jeu de données.</p>
+    <p class="err">Aucune délibération ni séance dans ce jeu de données.</p>
   {:else}
     <!-- « 592 actes » ne figure dans aucun document : c'est le compte de ce que
          la collecte a trouvé. Un acte non collecté n'y est pas. -->
@@ -52,16 +66,20 @@
     <div class="tiles">
       <div class="tile"><span class="tval">{nb(delibCM)}</span><span class="tlabel">délibérations municipales</span></div>
       <div class="tile"><span class="tval">{nb(delibCC)}</span><span class="tlabel">délibérations intercommunales</span></div>
-      <div class="tile"><span class="tval">{nb(seances)}</span><span class="tlabel">séances (comptes rendus)</span></div>
-      <div class="tile"><span class="tval">{nb(nCourante)}</span><span class="tlabel">actes des assemblées en {anneeCourante}</span></div>
+      <div class="tile"><span class="tval">{nb(seances)}</span><span class="tlabel">séances</span></div>
+      {#if decisions}<div class="tile"><span class="tval">{nb(decisions)}</span><span class="tlabel">décisions par délégation</span></div>{/if}
+      <div class="tile"><span class="tval">{nb(nCourante)}</span><span class="tlabel">délibérations et séances en {anneeCourante}</span></div>
     </div>
 
     <!-- Un total sans sa règle se compare à tort : l'accueil, cette page et
          /couverture annonçaient trois nombres sans dire ce qu'ils comptent. -->
     <p class="definition">
-      Soit <b>{nb(total)}</b> actes des assemblées&nbsp;: une <b>délibération</b> est une
-      décision votée, une <b>séance</b> est le conseil qui l'a votée (compte rendu ou
-      procès-verbal). L'accueil compte les {nb(delibCM)} délibérations municipales.
+      Soit <b>{nb(total)}</b> entrées&nbsp;: {nb(delibCM + delibCC)} <b>délibérations</b>, des
+      décisions votées par le conseil, et {nb(seances)} <b>séances</b>, les réunions où elles ont
+      été votées, avec les pièces publiées pour chacune (procès-verbal, compte rendu ou liste des
+      délibérations, selon la commune).{#if decisions}{' '}Une <b>décision par délégation</b> est prise par le
+      maire, le président ou le bureau, sur délégation du conseil : elle n'est comptée parmi aucune
+      délibération, et seul son titre est publié.{/if} L'accueil compte les {nb(delibCM)} délibérations municipales.
       <a href="/couverture#totaux">Comment se composent les totaux du site</a>
     </p>
 
@@ -74,7 +92,13 @@
       </div>
     </div>
 
-    {#if needle.length >= 2}
+    {#if needle.length >= 2 && indexEtat !== 'pret'}
+      {#if indexEtat === 'erreur'}
+        <p class="err">La liste des actes n'a pas pu être chargée. Parcourez-les année par année.</p>
+      {:else}
+        <p class="muted" role="status">Chargement de la liste des actes…</p>
+      {/if}
+    {:else if needle.length >= 2}
       <p class="count">
         {nTrouves} acte{nTrouves > 1 ? 's' : ''} trouvé{nTrouves > 1 ? 's' : ''}
         {#if nTrouves > resultats.length}· {resultats.length} premiers affichés{/if}
@@ -96,7 +120,7 @@
       {/if}
     {:else}
       {#if votes}
-        <Niveau type="calcul" base="les actes dont le compte rendu détaille le vote">
+        <Niveau type="calcul" base="les actes dont le document de séance détaille le vote">
           Sur <b>{votes.connus}</b> actes dont le vote est connu,
           <b>{votes.sansOpposition}</b> ont été adoptés sans une voix contre ni une
           abstention, soit <b>{Math.round(100 * votes.sansOpposition / votes.connus)} %</b>.
@@ -104,11 +128,11 @@
         </Niveau>
         <p class="lecture">
           <b>Ce que ce chiffre ne dit pas.</b> Un vote unanime ne signifie pas
-          qu'il n'y a pas eu de débat&nbsp;: le compte rendu enregistre le
+          qu'il n'y a pas eu de débat&nbsp;: le document de séance enregistre le
           résultat, rarement la discussion. Il ne signifie pas non plus que la
           décision allait de soi : dans un conseil de quinze personnes, un
           désaccord se règle souvent avant le vote. Le vote n'est d'ailleurs
-          détaillé que pour {votes.connus} des {total} actes des assemblées.
+          détaillé que pour {votes.connus} des {delibCM + delibCC} délibérations.
         </p>
 
         {#if votes.exemples.length}
@@ -170,21 +194,21 @@
 
   .definition { font-size: .88rem; color: var(--gris); margin: -.5rem 0 1rem; line-height: 1.5; }
   .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: .75rem; margin-bottom: 1.25rem; }
-  .tile { background: #fff; border: 1px solid var(--trait); border-radius: 8px; padding: .7rem .9rem; display: flex; flex-direction: column; }
+  .tile { background: var(--carte); border: 1px solid var(--trait); border-radius: 8px; padding: .7rem .9rem; display: flex; flex-direction: column; }
   .tval { font-size: 1.5rem; font-weight: 700; }
   .tlabel { font-size: .72rem; color: var(--gris); text-transform: uppercase; letter-spacing: .02em; }
 
   .filters { display: flex; gap: .75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
   input { flex: 1; min-width: 200px; padding: .5rem .7rem; border: 1px solid var(--trait); border-radius: 6px; }
   .seg { display: inline-flex; border: 1px solid var(--trait); border-radius: 6px; overflow: hidden; }
-  .seg button { padding: .45rem .8rem; font-size: .85rem; background: #fff; color: var(--gris); border: none; border-left: 1px solid var(--trait); }
+  .seg button { padding: .45rem .8rem; font-size: .85rem; background: var(--carte); color: var(--gris); border: none; border-left: 1px solid var(--trait); }
   .seg button:first-child { border-left: none; }
-  .seg button.on { background: var(--ardoise); color: #fff; }
+  .seg button.on { background: var(--ardoise); color: var(--papier); }
   .count { color: var(--gris); font-size: .85rem; margin: 0 0 .6rem; }
 
   .annees { list-style: none; padding: 0; margin: 0; display: grid; gap: .5rem;
             grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); }
-  .annees a { display: grid; gap: .1rem; padding: .7rem .9rem; background: #fff;
+  .annees a { display: grid; gap: .1rem; padding: .7rem .9rem; background: var(--carte);
               border: 1px solid var(--trait); border-radius: 8px; text-decoration: none; }
   .annees a:hover { border-color: var(--ardoise); }
   .an { font-size: 1.15rem; font-weight: 700; color: var(--encre); }
@@ -203,7 +227,7 @@
            line-height: 1.3; padding: .12rem .5rem; border-radius: .5rem;
            align-self: start; justify-self: start; }
   .badge.CM { background: var(--ardoise-pale); color: var(--ardoise-fonce); }
-  .badge.CC { background: #e7f0ea; color: var(--recette); }
+  .badge.CC { background: var(--recette-pale); color: var(--recette); }
   .titre { color: var(--encre); font-size: .9rem; }
 
   .muted { color: var(--gris-clair); } .err { color: var(--depense); }

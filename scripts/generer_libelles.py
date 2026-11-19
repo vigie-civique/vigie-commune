@@ -71,6 +71,9 @@ VOYELLES = "aeiouyàâäéèêëîïôöûüÿ"
 # depuis un autre répertoire que la racine.
 sys.path.insert(0, str(ROOT))
 from collectors.statut import normaliser as normaliser_statut  # noqa: E402
+# La liste des teintes et sa validation vivent dans le chargeur de l'instance :
+# une valeur refusée là l'est aussi ici, avec le même message.
+from collectors.config import teinte_valide  # noqa: E402
 
 
 def _sans_accent(s: str) -> str:
@@ -150,6 +153,10 @@ def construire() -> dict:
     # métropolitaine — visiblement faux plutôt que discrètement faux.
     _c = inst.get("centroid") or []
     centroide = (list(_c) + [46.6, 2.5])[:2] if len(_c) < 2 else list(_c)
+    try:
+        teinte = teinte_valide(inst.get("teinte"))
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
 
     return {
         "COMMUNE": nom,
@@ -179,6 +186,9 @@ def construire() -> dict:
         "STATUT_TEXTE": statut["texte"],
         "STATUT_TENUE_PAR": statut["tenue_par"] or "",
         "STATUT_MENTION": statut["mention"],
+        # La couleur propre de la commune, dans la liste fermée de
+        # collectors/config.py. Le gabarit la pose en `data-teinte` sur <html>.
+        "TEINTE": teinte,
         "ANNONCE_TEXTE": str(annonce.get("texte") or "").strip(),
         "ANNONCE_JUSQU_AU": str(annonce.get("jusqu_au") or "").strip(),
         "ANNONCE_LIEN": str(annonce.get("lien") or "").strip(),
@@ -192,6 +202,11 @@ def construire() -> dict:
         "EDITEUR_TELEPHONE": editeur.get("telephone", ""),
         "DIRECTEUR_PUBLICATION": editeur.get("directeur_publication", ""),
         "HEBERGEUR": editeur.get("hebergeur", ""),
+        # Destinataires et transferts hors de l'UE (RGPD, art. 13) : une liste de
+        # paragraphes, propre à chaque éditeur. Le moteur ne peut pas savoir à qui
+        # un repreneur confie ses données ; il ne l'écrit donc pas à sa place.
+        "DESTINATAIRES": [str(p).strip() for p in editeur.get("destinataires") or []
+                          if str(p).strip()],
         # Compte de virement de l'association porteuse (page « Soutenir »). Dans
         # instance.json, ignoré par git, et non dans le code : un IBAN versionné
         # est publié avec le dépôt. Vide, la page replie sur le courriel.
@@ -249,7 +264,7 @@ def ecrire(valeurs: dict, cibles: list[Path] | None = None) -> None:
     for cle, valeur in valeurs.items():
         if isinstance(valeur, (int, float)) and not isinstance(valeur, bool):
             lignes.append(f"export const {cle} = {valeur}")
-        elif isinstance(valeur, dict):
+        elif isinstance(valeur, (dict, list)):
             lignes.append(f"export const {cle} = {json.dumps(valeur, ensure_ascii=False)}")
         else:
             echappe = str(valeur).replace("\\", "\\\\").replace("'", "\\'")
@@ -296,6 +311,8 @@ def main(argv: list[str] | None = None) -> int:
     # un particulier publie sous l'anonymat de l'art. 1-1, II.
     if valeurs["EDITEUR_NOM"] and not valeurs["EDITEUR_TELEPHONE"]:
         manquants.append("EDITEUR_TELEPHONE")
+    if valeurs["EDITEUR_NOM"] and not valeurs["DESTINATAIRES"]:
+        manquants.append("DESTINATAIRES")
     if manquants:
         print("\n  À renseigner dans config/instance.json, clé « editeur » "
               "(les mentions légales les affichent) :")

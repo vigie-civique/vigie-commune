@@ -88,6 +88,14 @@ class Connecteur:
         """Avis de publicité publiés par la collectivité."""
         return []
 
+    def catalogue_decisions(self, portee: Portee = "commune") -> list[DocumentPublie]:
+        """Décisions prises par délégation du conseil, publiées une à une.
+
+        Optionnel : seul un portail d'actes les publie séparément. Sur un site
+        communal, elles ne sont qu'une rubrique du procès-verbal.
+        """
+        return []
+
     def pages_annuaire(self, portee: Portee = "commune") -> list[str]:
         """Contenus texte des pages d'annuaire (associations, commerces).
 

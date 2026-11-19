@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-19T22:05:14",
+  "generated_at": "2026-11-14T22:27:08",
   "statut": {
     "type": "demonstration",
     "libelle": "Portage de démonstration",
@@ -183,6 +183,10 @@
   },
   "seances": {
     "seances": 2,
+    "par_portee": {
+      "intercommunalite": 1,
+      "commune": 1
+    },
     "relues": 1
   },
   "sujets": {

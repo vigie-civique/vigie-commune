@@ -47,10 +47,10 @@ from pathlib import Path
 
 from . import propositions as _propositions
 from .citations import compact, montants_cites
-from .extraction import CITATION_MIN, _aplatir, citation_presente, trace_ia
+from .extraction import CITATION_MIN, _aplatir, citation_presente, nom_present, trace_ia
 from .cle_acte import PREFIXE_PAR_TYPE, TYPES_ACTES, TYPES_SEANCES
 from .chemins import sous
-from .config import COMMUNE_NAME, COMMUNE_SIREN, COMMUNES_ADRESSE, EPCI_SIREN
+from .config import COMMUNE_NAME, COMMUNE_SIRENS, COMMUNES_ADRESSE, EPCI_SIREN
 from .marches_publics import attribution_acheteur, siren_de
 
 #: L'identifiant du format, que le rapport déclare. Un autre format est refusé
@@ -220,7 +220,7 @@ def portee_de(acheteur_siren: str | None, acheteur_nom: str) -> str:
     """
     s = siren_de(acheteur_siren)
     if s:
-        if COMMUNE_SIREN and s == siren_de(COMMUNE_SIREN):
+        if s in {siren_de(c) for c in COMMUNE_SIRENS}:
             return "commune"
         if EPCI_SIREN and s == siren_de(EPCI_SIREN):
             return "intercommunalite"
@@ -402,6 +402,9 @@ def examiner(conn, ligne: dict) -> dict:
         # compte d'un marché communautaire. Mais il doit le voir.
         "montant_dans_citation": (ligne.get("montant") is None or any(
             abs(m - ligne["montant"]) < 0.01 for m in montants_cites(ligne["citation"]))),
+        # Même signal pour le titulaire : un nom lu ailleurs, ou inventé, ne
+        # doit pas passer pour attesté par le passage (audit du 06/11/2026).
+        "titulaire_dans_citation": nom_present(ligne.get("titulaire"), ligne["citation"]),
         "assemblee_de_l_acte": assemblee,
     })
     return charge

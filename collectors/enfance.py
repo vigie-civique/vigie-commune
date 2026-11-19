@@ -75,7 +75,7 @@ def ensure_tables(conn):
 
 def ods(base: str, jeu: str, source: str, **params) -> list[dict]:
     url = f"{base}/{jeu}/records?" + urllib.parse.urlencode({"limit": 100, **params})
-    return fetch_json(url, source=source, timeout=60).get("results", [])
+    return fetch_json(url, source=source, timeout=60, complete=True).get("results", [])
 
 
 def nombre(valeur) -> float | None:

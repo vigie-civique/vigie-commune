@@ -256,8 +256,9 @@ def atelier(tmp_path, monkeypatch, schema_sql):
     monkeypatch.setattr(db_mod, "DB_PATH", chemin)
     monkeypatch.setattr(api, "RACINE", racine)
     monkeypatch.setattr(config, "RULES_PATH", regles)
-    monkeypatch.setenv("ADMIN_KEY", "cle-de-test")
-    client = TestClient(api.app, headers={"x-admin-key": "cle-de-test"})
+    monkeypatch.setattr(api, "ADMIN_KEY", "cle-de-test")
+    client = TestClient(api.app, headers={"x-admin-key": "cle-de-test"},
+                        client=("127.0.0.1", 50000))
 
     def en_tant_que(user):
         api.app.dependency_overrides[require_auth] = lambda: user

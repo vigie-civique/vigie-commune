@@ -11,7 +11,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 # Charge .env si présent (dev local)
 try:
@@ -22,9 +22,9 @@ except ImportError:
 
 from fastapi import (Body, Depends, FastAPI, File, Form, Header, HTTPException,
                      Path as FPath, Query, Request, UploadFile)
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ─── Config ────────────────────────────────────────────────────────────────────
 
@@ -47,7 +47,7 @@ _EXTRAITS = {_marches_extraits.NATURE: _marches_extraits,
              _flux_extraits.NATURE: _flux_extraits}
 from collectors import extraction as _extraction
 from collectors.origine import (ATELIER, INSTITUTIONNEL, ORIGINES, VERBATIM,
-                                modifiable)
+                                modifiable, origine_de)
 from collectors.verdict import (GESTES, JAMAIS_RELU, OBJETS, OBJETS_A_RETENIR, RETENU,
                                 TYPES_REVUS, VERDICTS,
                                 empreinte, geste_de, modifie_depuis_relecture, note_du_geste,
@@ -71,6 +71,12 @@ COMMUNE_BBOX = {"lat_min": BBOX[0], "lng_min": BBOX[1],
 #
 # RAG_ENABLED=1 dans .env sur la machine qui a Ollama.
 RAG_ENABLED = os.environ.get("RAG_ENABLED", "0").strip().lower() not in ("0", "false", "no")
+# La génération (`/api/rag/ask`) a son propre réglage, fermé par défaut, et ne
+# s'ouvre qu'avec la recherche. Un serveur peut porter le modèle d'embeddings
+# sans modèle de conversation (l'atelier de Lasalle, sur un VPS de 3,7 Go) :
+# ouvrir la recherche ne doit pas y faire apparaître un bouton qui échoue.
+RAG_ASK_ENABLED = os.environ.get("RAG_ASK_ENABLED", "0").strip().lower() \
+    not in ("0", "false", "no", "")
 
 # `/docs`, `/redoc` et `/openapi.json` ne commencent pas par `/api/` : le verrou
 # global ne les voit pas, et FastAPI les sert à qui les demande. Éteints sauf
@@ -99,6 +105,18 @@ app = FastAPI(title=f"Vigie Civique — atelier {COMMUNE_NAME}",
 import secrets as _secrets
 from starlette.responses import JSONResponse as _JSONResponse
 
+def _boucle_locale(request) -> bool:
+    """La requête vient-elle de la machine elle-même, sans proxy devant ?
+
+    Deux conditions, parce que l'adresse seule ne suffit pas : derrière nginx et
+    sans `--proxy-headers`, uvicorn voit 127.0.0.1 pour tout le monde. Un proxy
+    signe son passage par un en-tête de transfert, qu'un script local n'envoie pas.
+    """
+    if any(request.headers.get(h) for h in ("x-forwarded-for", "x-real-ip", "forwarded")):
+        return False
+    return bool(request.client) and request.client.host in ("127.0.0.1", "::1")
+
+
 @app.middleware("http")
 async def _api_auth_guard(request, call_next):
     path = request.url.path
@@ -112,8 +130,19 @@ async def _api_auth_guard(request, call_next):
         return await call_next(request)
 
     # 1) Clé admin — fallback scripts CLI (sync_ia, generate_syntheses --push, deploy)
-    admin_key = os.environ.get("ADMIN_KEY", "")
+    # `ADMIN_KEY` du module, lue au démarrage : la même valeur que les gardes de
+    # route. Le verrou relisait l'environnement, une seconde source.
+    admin_key = ADMIN_KEY
     provided  = request.headers.get("x-admin-key")
+    # La clé passe ce verrou ET vaut le rôle admin dans les routes de
+    # publication, sans compte ni nom. Rien dans l'application ne l'empêchait
+    # d'arriver d'internet : seule une ligne de nginx, recopiée à la main, la
+    # retirait. Une requête qui la porte sans venir de la machine elle-même est
+    # refusée ici, que la clé soit juste ou fausse — la réponse n'en dit rien.
+    if provided and not _boucle_locale(request):
+        return _JSONResponse(
+            {"detail": "La clé d'administration ne sert que depuis la machine de l'atelier."},
+            status_code=403)
     # En octets : sur des chaînes, `compare_digest` lève une TypeError au premier
     # caractère non ASCII, et un en-tête forgé rendait un 500 au lieu d'un 401.
     if admin_key and provided and _secrets.compare_digest(provided.encode(),
@@ -182,12 +211,33 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Auth JWT — atelier
 from api_auth import (router as auth_router, comptes as comptes_router, au_moins,  # noqa: E402
-                      exiger, jeton_de, require_au_moins, require_auth, require_role)
+                      exiger, jeton_de, require_au_moins, require_auth, require_role,
+                      utilisateur_du_jeton)
 app.include_router(auth_router)
 app.include_router(comptes_router)
 
-# Clé admin pour les endpoints d'écriture (env ADMIN_KEY — si absente, accès localhost uniquement)
+# Clé admin des scripts (env ADMIN_KEY), admise depuis la machine seule ; absente, elle n'ouvre rien
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
+
+
+def require_compte_ou_cle(role_min: str = "contributor", geste: str = "Cette action"):
+    """Garde de route : un jeton d'au moins `role_min`, ou la clé admin locale.
+
+    `require_auth` n'admet que le jeton. Cette garde ne sert plus qu'aux routes
+    de publication et de décision, où la clé VAUT admin (`_role_effectif`) ;
+    les lectures, ouvertes à la clé sans identité ni journal, lui sont fermées
+    depuis le 14/11/2026. La boucle locale est revérifiée ici, pour ne pas
+    tenir du seul verrou ce que la clé vaut."""
+    def _dep(request: Request, x_admin_key: Optional[str] = Header(default=None),
+             jeton: Optional[str] = Depends(jeton_de)):
+        if _cle_admin_valide(x_admin_key) and _boucle_locale(request):
+            return None
+        if not jeton:
+            raise HTTPException(401, "Token manquant")
+        user = utilisateur_du_jeton(jeton, "access")
+        exiger(user, role_min, geste)
+        return user
+    return _dep
 
 # ─── DB helpers ────────────────────────────────────────────────────────────────
 
@@ -221,6 +271,24 @@ def parse_json_field(value, default=None):
     except Exception:
         return default
 
+# Revue d'architecture du 07/11/2026, C12 (avis vigie-dpo et vigie-securite) :
+# `web_scraper` range dans `events.metadata` les courriels et téléphones relevés
+# sur une page, et `/api/events` les rendait à tout compte, contributeur compris.
+# L'atelier n'en lit que le nombre ; les valeurs ne sortent plus de l'API.
+CLES_DE_CONTACT = ("emails", "phones")
+
+
+def metadata_sans_contacts(value) -> dict:
+    meta = parse_json_field(value, {})
+    if not isinstance(meta, dict):
+        return {}
+    for cle in CLES_DE_CONTACT:
+        if cle in meta:
+            valeurs = meta.pop(cle)
+            meta[f"n_{cle}"] = len(valeurs) if isinstance(valeurs, list) else 1
+    return meta
+
+
 def fts_query(value: str) -> str:
     tokens = re.findall(r"[\wÀ-ÿ]{2,}", value or "", flags=re.UNICODE)
     if not tokens:
@@ -229,7 +297,7 @@ def fts_query(value: str) -> str:
 
 # ─── /api/stats ────────────────────────────────────────────────────────────────
 
-@app.get("/api/stats")
+@app.get("/api/stats", dependencies=[Depends(require_auth)])
 def stats():
     conn = get_db()
     try:
@@ -241,7 +309,7 @@ def stats():
     finally:
         conn.close()
 
-@app.get("/api/pivots")
+@app.get("/api/pivots", dependencies=[Depends(require_auth)])
 def pivots():
     """Identifiants des entités structurantes : commune, EPCI, État, préfecture.
 
@@ -250,13 +318,14 @@ def pivots():
     l'intercommunalité affichait une entité prise au hasard. `pivot_ids` les
     résout par le NOM, à l'exécution ; cette route ne fait que l'exposer.
 
-    Lecture seule côté client : la résolution peut créer l'entité manquante, on
-    ouvre donc la base en écriture, comme les collecteurs.
+    Lecture seule : la base est ouverte en `mode=ro` et un pivot absent rend
+    None. La route ouvrait la base en écriture et CRÉAIT l'entité manquante,
+    comme le font les collecteurs (14/11/2026).
     """
-    from collectors.db import get_conn, pivot_ids
-    conn = get_conn()
+    from collectors.db import pivot_ids
+    conn = get_db()
     try:
-        return pivot_ids(conn)
+        return pivot_ids(conn, creer=False)
     finally:
         conn.close()
 
@@ -269,7 +338,7 @@ def pivots():
 PERIMETRES = ("C1", "C2", "C3", "lien")
 
 
-@app.get("/api/entities")
+@app.get("/api/entities", dependencies=[Depends(require_auth)])
 def entities(
     type: Optional[str] = None,
     confidence: Optional[str] = None,
@@ -328,7 +397,7 @@ def entities(
 
 # ─── /api/entities/{id} ────────────────────────────────────────────────────────
 
-@app.get("/api/entities/{entity_id}")
+@app.get("/api/entities/{entity_id}", dependencies=[Depends(require_auth)])
 def entity_detail(entity_id: int = FPath(..., ge=1)):
     conn = get_db()
     try:
@@ -395,19 +464,27 @@ def entity_detail(entity_id: int = FPath(..., ge=1)):
 
 # ─── /api/search ───────────────────────────────────────────────────────────────
 
-@app.get("/api/search")
+@app.get("/api/search", dependencies=[Depends(require_auth)])
 def search(q: str = Query(..., min_length=1), limit: int = Query(20, le=100)):
     conn = get_db()
     try:
-        return rows(conn, """
+        # Une fiche écartée reste en base, donc dans la recherche : elle sort
+        # marquée, sans quoi on la choisit (doublon, lien) sans savoir qu'elle
+        # a quitté le site.
+        lignes = rows(conn, """
             SELECT e.id, e.type, e.name, e.short_name, e.address,
-                   e.lat, e.lng, e.confidence
+                   e.lat, e.lng, e.confidence, a.review_status
             FROM entities_fts
             JOIN entities e ON e.id = entities_fts.rowid
+            LEFT JOIN annotations a ON a.object_type = 'entity' AND a.object_id = e.id
             WHERE entities_fts MATCH ?
             ORDER BY rank
             LIMIT ?
         """, (fts_query(q), limit))
+        for ligne in lignes:
+            ligne["verdict"] = verdict_de(ligne.pop("review_status")) or JAMAIS_RELU
+            ligne["ecartee"] = ligne["verdict"] == "ecarte"
+        return lignes
     finally:
         conn.close()
 
@@ -415,7 +492,7 @@ def search(q: str = Query(..., min_length=1), limit: int = Query(20, le=100)):
 
 LAYER_TYPES = {"businesses", "associations", "persons", "services", "places", "dvf", "flows"}
 
-@app.get("/api/layers/{layer_type}")
+@app.get("/api/layers/{layer_type}", dependencies=[Depends(require_auth)])
 def layer(
     layer_type: str,
     status: Optional[str] = None,
@@ -494,7 +571,7 @@ def layer(
 
 # ─── /api/graph ────────────────────────────────────────────────────────────────
 
-@app.get("/api/graph")
+@app.get("/api/graph", dependencies=[Depends(require_auth)])
 @limiter.limit("30/minute;200/hour")
 def graph(
     request: StarletteRequest,
@@ -623,7 +700,7 @@ def graph(
 
 # ─── /api/events ───────────────────────────────────────────────────────────────
 
-@app.get("/api/events")
+@app.get("/api/events", dependencies=[Depends(require_auth)])
 def events(
     type: Optional[str] = None,
     limit: int = Query(50, le=500),
@@ -649,19 +726,21 @@ def events(
             LIMIT ?
         """, params)
         for event in event_rows:
-            event["metadata"] = parse_json_field(event.get("metadata"), {})
+            event["metadata"] = metadata_sans_contacts(event.get("metadata"))
         return event_rows
     finally:
         conn.close()
 
-@app.get("/api/events/search")
+@app.get("/api/events/search", dependencies=[Depends(require_auth)])
 def event_search(
     q: str = Query(..., min_length=2),
     limit: int = Query(50, ge=1, le=200),
     civic: bool = False,
 ):
+    # La recherche ne porte pas sur `metadata` (C12) : sans quoi chercher une
+    # adresse dirait si elle est en base, même filtrée de la réponse.
     filters = ["events_fts MATCH ?"]
-    params: list = [fts_query(q)]
+    params: list = ["{title content source} : (" + fts_query(q) + ")"]
     if civic:
         civic_types = (
             "conseil_municipal",
@@ -689,7 +768,7 @@ def event_search(
             LIMIT ?
         """, params)
         for event in event_rows:
-            event["metadata"] = parse_json_field(event.get("metadata"), {})
+            event["metadata"] = metadata_sans_contacts(event.get("metadata"))
             # L'extrait est affiché comme du HTML (le surlignage), et son texte
             # vient d'un document COLLECTÉ : une balise écrite dans un PV ou une
             # page de mairie s'exécutait dans l'atelier. Le surlignage voyage
@@ -703,7 +782,7 @@ def event_search(
 
 # ─── /api/dvf ──────────────────────────────────────────────────────────────────
 
-@app.get("/api/dvf")
+@app.get("/api/dvf", dependencies=[Depends(require_auth)])
 def dvf(
     year: Optional[int] = None,
     limit: int = Query(500, le=5000),
@@ -729,7 +808,7 @@ def dvf(
 
 # ─── /api/flows ────────────────────────────────────────────────────────────────
 
-@app.get("/api/flows")
+@app.get("/api/flows", dependencies=[Depends(require_auth)])
 def flows(
     year: Optional[int] = None,
     type: Optional[str] = None,
@@ -761,12 +840,15 @@ def flows(
 
 # ─── /api/marches ─────────────────────────────────────────────────────────────
 
-@app.get("/api/marches")
+@app.get("/api/marches", dependencies=[Depends(require_auth)])
 def marches(
     acheteur: Optional[str] = None,
     titulaire: Optional[str] = None,
+    #: Un mot de l'objet du marché (« voirie », « cantine »), sans casse.
+    objet: Optional[str] = Query(None, max_length=200),
     year: Optional[int] = None,
-    limit: int = 200,
+    # Les pages en demandent 200 (com-com, urbanisme) : plafond à 500.
+    limit: int = Query(200, ge=1, le=500),
 ):
     filters = []
     params: list = []
@@ -776,6 +858,11 @@ def marches(
     if titulaire:
         filters.append("(mp.titulaire_siren=? OR mp.titulaire_nom LIKE ?)")
         params += [titulaire, f"%{titulaire}%"]
+    if objet and objet.strip():
+        # `%` et `_` saisis sont des caractères, pas des jokers.
+        mot = objet.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        filters.append("mp.objet LIKE ? ESCAPE '\\'")
+        params.append(f"%{mot}%")
     if year:
         filters.append("substr(mp.date_notif,1,4)=?")
         params.append(str(year))
@@ -804,7 +891,7 @@ def marches(
 
 # ─── /api/budget ───────────────────────────────────────────────────────────────
 
-@app.get("/api/budget")
+@app.get("/api/budget", dependencies=[Depends(require_auth)])
 def budget(year: Optional[int] = None):
     conn = get_db()
     try:
@@ -818,7 +905,7 @@ def budget(year: Optional[int] = None):
 
 # ─── /api/ofgl ─────────────────────────────────────────────────────────────────
 
-@app.get("/api/ofgl")
+@app.get("/api/ofgl", dependencies=[Depends(require_auth)])
 def ofgl(year: Optional[int] = None, agregat: Optional[str] = None):
     conn = get_db()
     try:
@@ -836,7 +923,7 @@ def ofgl(year: Optional[int] = None, agregat: Optional[str] = None):
 
 # ─── /api/syntheses ────────────────────────────────────────────────────────────
 
-@app.get("/api/syntheses")
+@app.get("/api/syntheses", dependencies=[Depends(require_auth)])
 def syntheses_list():
     if not SYNTHESES_DIR.exists():
         return []
@@ -855,7 +942,7 @@ def syntheses_list():
             pass
     return result
 
-@app.get("/api/syntheses/{entity_id}")
+@app.get("/api/syntheses/{entity_id}", dependencies=[Depends(require_auth)])
 def synthesis(entity_id: int = FPath(..., ge=1)):
     from collectors.chemins import sous
     path = sous(SYNTHESES_DIR, f"{entity_id}.json")
@@ -1133,7 +1220,8 @@ def ia_config(user=Depends(require_auth)):
 
 @app.post("/api/synthesize")
 @limiter.limit("10/minute;50/hour")
-def synthesize(request: StarletteRequest, req: SynthesizeRequest):
+def synthesize(request: StarletteRequest, req: SynthesizeRequest,
+               user=Depends(require_auth)):
     """Interroge le modèle réglé dans l'environnement. Aucun fournisseur par
     défaut : sans réglage, la route dit qu'elle n'est pas configurée."""
     conn = get_db()
@@ -1284,13 +1372,13 @@ def _check_admin(x_admin_key: Optional[str], user: Optional[dict] = None,
     """Autorise : JWT d'au moins `role_min`, ou clé ADMIN_KEY (scripts/CLI).
 
     `allow_validator=True` laissait passer `validator` ET `contributor` : le nom
-    promettait un validateur, le code admettait tout compte."""
-    if user and au_moins(user, role_min):
+    promettait un validateur, le code admettait tout compte.
+
+    Le refus dit ce que le rôle ne permet pas (`exiger`). Il disait « configurer
+    ADMIN_KEY en production » à un contributeur qui n'y pouvait rien."""
+    if _cle_admin_valide(x_admin_key):
         return
-    if not ADMIN_KEY:
-        raise HTTPException(403, "Endpoint d'écriture désactivé — configurer ADMIN_KEY en production")
-    if not _secrets.compare_digest((x_admin_key or "").encode(), ADMIN_KEY.encode()):
-        raise HTTPException(403, "Réservé à l'admin (JWT rôle admin ou clé admin)")
+    exiger(user, role_min, "Cette action")
 
 def _read_json_file(path: Path, default=None):
     if not path.exists():
@@ -1301,11 +1389,10 @@ def _read_json_file(path: Path, default=None):
         return default
 
 def _public_snapshot_status():
+    """Le contexte que la page de publication affiche : projet, règles, chemins."""
     from scripts.build_public_snapshot import DEFAULT_OUT, RULES_PATH
 
-    stats_path = DEFAULT_OUT / "stats.json"
     rules = _read_json_file(RULES_PATH, {})
-    stats = _read_json_file(stats_path)
     # Le rapport QA est écrit HORS du snapshot depuis que `verify_snapshot.py`
     # interdit `review_report*.json` dans un répertoire publié — à raison, il
     # contient les exclusions nominatives. Le chercher dans le snapshot rendait
@@ -1314,83 +1401,30 @@ def _public_snapshot_status():
     report = _read_json_file(BASE_DIR / "audits" / "public_snapshot_review.json", {})
     report = {"rules": report.get("rules", {})}
     return {
-        "exists": stats is not None,
         "output_dir": str(DEFAULT_OUT),
         "rules_path": str(RULES_PATH),
         "project": rules.get("project", {}),
-        "stats": stats,
-        "exclusions": (stats or {}).get("exclusions", {}),
         "rules": report.get("rules", {}),
     }
 
-# Le raccord snapshot → site public vit avec le builder : il doit être
-# appelable par le script de déploiement sans démarrer l'API.
+# Les règles de publication et le sort d'un lien accepté viennent du builder.
+# `POST /api/admin/public-snapshot/generate`, seconde voie de publication sans
+# verrou ni bascule et sans appelant, est retirée (Julien, 14/11/2026), comme
+# `GET /api/admin/public-snapshot`, lecture admise à la clé et sans appelant.
 from scripts.build_public_snapshot import (  # noqa: E402
     RULES as _REGLES_PUBLICATION,
-    sort_du_type as _sort_du_type,
-    synchroniser_site_public as _sync_public_static)
+    sort_du_type as _sort_du_type)
 
 #: Confiances qui partent sur le site, lues dans les règles de l'instance. Poser
 #: l'une d'elles, c'est trancher (réservé au validateur) : un contributeur propose
 #: en `probable` ou `hypothesis`.
 PUBLIABLES = frozenset(_REGLES_PUBLICATION["confidence"]["public"])
 
-@app.get("/api/admin/public-snapshot")
-def public_snapshot_status(x_admin_key: Optional[str] = Header(default=None),
-                           user=Depends(optional_user)):
-    _check_admin(x_admin_key, user)
-    return _public_snapshot_status()
-
 # Le flux de publication (aperçu → contrôle → publication) vit dans
 # `scripts/publication.py` : il n'a besoin ni de FastAPI ni d'une base, et les
 # tests le rejouent sur des répertoires jetables. api.py y ajoute ce qu'il est
 # seul à savoir — qui a cliqué.
 from scripts import publication as pub   # noqa: E402
-
-
-def _controler_snapshot(cible: Path) -> dict:
-    return pub.controler(cible)
-
-
-@app.post("/api/admin/public-snapshot/generate")
-def generate_public_snapshot(x_admin_key: Optional[str] = Header(default=None),
-                             user=Depends(optional_user)):
-    _check_admin(x_admin_key, user)
-    from scripts.build_public_snapshot import DEFAULT_OUT, ROOT, build_snapshot
-
-    stats = build_snapshot(DEFAULT_OUT)
-
-    # LE CONTRÔLE PRÉCÈDE LA SYNCHRO. Ce qui fuit ne doit pas atteindre le
-    # répertoire que le site lit : un snapshot refusé reste dans l'atelier, où
-    # il ne blesse personne. Publier d'abord et vérifier ensuite, c'est
-    # exactement la séquence qui a mis 1 229 fiches écartées en ligne.
-    controle = _controler_snapshot(DEFAULT_OUT)
-    if not controle["ok"]:
-        raise HTTPException(500,
-            "Snapshot refusé par le contrôle d'étanchéité — le site public n'a "
-            "PAS été mis à jour, l'ancien reste en place.\n\n"
-            + controle.get("rapport", ""))
-
-    synced = _sync_public_static(DEFAULT_OUT, ROOT)   # snapshot → site public, 1 clic
-
-    # Et une seconde fois sur ce qui est SERVI. La synchro met `entite/` en
-    # miroir et recopie le reste : un fichier oublié ou une purge incomplète ne
-    # se voit pas dans le répertoire d'origine, seulement à l'arrivée.
-    controle_site = _controler_snapshot(ROOT / "public" / "static" / "data")
-    if not controle_site["ok"]:
-        raise HTTPException(500,
-            "Le snapshot est propre mais sa copie vers le site ne l'est pas — "
-            "ne pas déployer.\n\n" + controle_site.get("rapport", ""))
-
-    return {
-        "ok": True,
-        "output_dir": str(DEFAULT_OUT),
-        "stats": stats,
-        "exclusions": stats.get("exclusions", {}),
-        "synced": synced,
-        "controle": controle,
-        "controle_site": controle_site,
-    }
 
 # ─── Décisions : exporter / importer ──────────────────────────────────────────
 #
@@ -1493,7 +1527,7 @@ APERCU_DELAI_S = 120
 
 
 class ApercuServeurRequest(BaseModel):
-    action: str = "demarrer"      # demarrer | arreter
+    action: Literal["demarrer", "arreter"] = "demarrer"
 
 
 def _cle_admin_valide(x_admin_key: Optional[str]) -> bool:
@@ -1571,7 +1605,8 @@ def _etat_complet(x_admin_key: Optional[str], user: Optional[dict]) -> dict:
     }
 
 
-@app.get("/api/admin/publication")
+@app.get("/api/admin/publication",
+         dependencies=[Depends(require_compte_ou_cle("validator", "Voir l'état de la publication"))])
 def publication_etat(x_admin_key: Optional[str] = Header(default=None),
                      user=Depends(optional_user)):
     """L'état du flux, en LECTURE SEULE — validateur et au-dessus.
@@ -1585,7 +1620,8 @@ def publication_etat(x_admin_key: Optional[str] = Header(default=None),
     return _etat_complet(x_admin_key, user)
 
 
-@app.post("/api/admin/publication/apercu")
+@app.post("/api/admin/publication/apercu",
+         dependencies=[Depends(require_compte_ou_cle("validator", "Générer un aperçu"))])
 def publication_apercu(x_admin_key: Optional[str] = Header(default=None),
                        user=Depends(optional_user)):
     """Construit l'aperçu et le contrôle. Rien de servi ne bouge.
@@ -1633,7 +1669,8 @@ def publication_apercu(x_admin_key: Optional[str] = Header(default=None),
     return _etat_complet(x_admin_key, user)
 
 
-@app.post("/api/admin/publication/publier")
+@app.post("/api/admin/publication/publier",
+         dependencies=[Depends(require_compte_ou_cle("admin", "Publier"))])
 def publication_publier(x_admin_key: Optional[str] = Header(default=None),
                         user=Depends(optional_user)):
     """Porte l'aperçu contrôlé vers les deux emplacements servis. Admin seul, et
@@ -1654,11 +1691,15 @@ def publication_publier(x_admin_key: Optional[str] = Header(default=None),
         "fichiers_site": (publie.get("synchro") or {}).get("count"),
         "differences": publie.get("differences"),
         "entites_publiques": (publie.get("stats") or {}).get("entities_public"),
+        # La garde de volume ne bloque que la passe de nuit : une publication
+        # faite ici la lève, et la baisse qu'elle publie reste consignée.
+        "chutes_de_volume": publie.get("chutes_de_volume"),
     })
     return _etat_complet(x_admin_key, user)
 
 
-@app.post("/api/admin/publication/verifier-en-ligne")
+@app.post("/api/admin/publication/verifier-en-ligne",
+         dependencies=[Depends(require_compte_ou_cle("validator", "Vérifier ce qui est en ligne"))])
 def publication_verifier_en_ligne(x_admin_key: Optional[str] = Header(default=None),
                                   user=Depends(optional_user)):
     """Constate ce que le site public sert vraiment.
@@ -1681,7 +1722,8 @@ def publication_verifier_en_ligne(x_admin_key: Optional[str] = Header(default=No
     return _etat_complet(x_admin_key, user)
 
 
-@app.post("/api/admin/publication/mettre-en-ligne")
+@app.post("/api/admin/publication/mettre-en-ligne",
+         dependencies=[Depends(require_compte_ou_cle("admin", "Mettre le site en ligne"))])
 def publication_mettre_en_ligne(x_admin_key: Optional[str] = Header(default=None),
                                 user=Depends(optional_user)):
     """Construit le site depuis la version promue et le téléverse. Admin seul.
@@ -1706,7 +1748,8 @@ def publication_mettre_en_ligne(x_admin_key: Optional[str] = Header(default=None
     return _etat_complet(x_admin_key, user)
 
 
-@app.post("/api/admin/publication/revenir")
+@app.post("/api/admin/publication/revenir",
+         dependencies=[Depends(require_compte_ou_cle("admin", "Revenir à la version précédente"))])
 def publication_revenir(x_admin_key: Optional[str] = Header(default=None),
                         user=Depends(optional_user)):
     """Remet en service la version d'avant, sur les deux emplacements servis.
@@ -1728,7 +1771,8 @@ def publication_revenir(x_admin_key: Optional[str] = Header(default=None),
     return _etat_complet(x_admin_key, user)
 
 
-@app.get("/api/admin/publication/modifications")
+@app.get("/api/admin/publication/modifications",
+         dependencies=[Depends(require_compte_ou_cle("validator", "Voir ce qui partira à la publication"))])
 def publication_modifications(x_admin_key: Optional[str] = Header(default=None),
                               user=Depends(optional_user)):
     """Ce qui partira avec la prochaine publication, et ce qui attend encore.
@@ -1810,7 +1854,8 @@ def publication_modifications(x_admin_key: Optional[str] = Header(default=None),
             "peut_trancher": au_moins(user, "validator")}
 
 
-@app.post("/api/admin/publication/apercu/serveur")
+@app.post("/api/admin/publication/apercu/serveur",
+         dependencies=[Depends(require_compte_ou_cle("validator", "Démarrer le serveur d'aperçu"))])
 def publication_apercu_serveur(req: ApercuServeurRequest = ApercuServeurRequest(),
                                x_admin_key: Optional[str] = Header(default=None),
                                user=Depends(optional_user)):
@@ -1836,7 +1881,8 @@ def publication_apercu_serveur(req: ApercuServeurRequest = ApercuServeurRequest(
     except pub.PublicationRefusee as e:
         raise HTTPException(400, e.message)
 
-@app.post("/api/candidates/{candidate_id}/review")
+@app.post("/api/candidates/{candidate_id}/review",
+         dependencies=[Depends(require_compte_ou_cle("validator", "Trancher une relation candidate"))])
 def review_candidate(
     candidate_id: int = FPath(..., ge=1),
     req: ReviewRequest = ...,
@@ -1857,6 +1903,24 @@ def review_candidate(
         candidate = row(conn, "SELECT * FROM relation_candidates WHERE id = ?", (candidate_id,))
         if not candidate:
             raise HTTPException(404, "Candidat introuvable")
+        # Même garde que pour les sites : la réservation n'était tenue que par
+        # l'interface (audit du 15/11/2026).
+        active = _reservation_active(candidate)
+        if user and active and active["par"] != user["email"]:
+            raise _conflit(f"Pris par {active['par']}, qui l'examine.", active["par"],
+                           active["le"], expire_dans_min=active["expire_dans_min"])
+
+        # Un lien qu'un validateur a refusé ne revient pas par un candidat : le
+        # déclencheur avalerait l'INSERT et le candidat passerait « accepté »
+        # sans lien (second avis de vigie-securite).
+        if req.action == "accept":
+            refus = refus_de_relation(conn, candidate["from_id"], candidate["to_id"],
+                                      candidate["relation_type"])
+            if refus:
+                raise HTTPException(409, {
+                    "message": "Ce lien entre ces deux fiches a été refusé par un "
+                               "validateur : le refus doit être levé d'abord.",
+                    "refus_id": refus["id"]})
 
         conn.execute("""
             UPDATE relation_candidates
@@ -2127,12 +2191,16 @@ def atelier_files(user=Depends(require_auth)):
         # avec les dossiers AVANT d'être comptées, sinon la carte annoncerait
         # une question qu'un éditeur vient de retirer.
         _synchroniser_taches(conn)
+        _dossiers.assurer_schema(conn)
         conn.commit()
     finally:
         conn.close()
     conn = get_db()
     try:
-        return {"files": relever(conn, COMMUNE_NAME, CODE_POSTAL),
+        files = relever(conn, COMMUNE_NAME, CODE_POSTAL)
+        files.insert(1, _file_dossiers_modifies(conn))
+        files.insert(2, _file_refus_contredits(conn))
+        return {"files": files,
                 "reservation_minutes": RESERVATION_MINUTES,
                 # Lot D : ce qu'un bénévole peut faire EN ARRIVANT, selon son
                 # rôle. Avant le 23/09/2026, un contributeur qui se connectait
@@ -2141,6 +2209,69 @@ def atelier_files(user=Depends(require_auth)):
                 "premier_jour": premier_jour(user.get("role", ""))}
     finally:
         conn.close()
+
+
+def _file_dossiers_modifies(conn) -> dict:
+    """La file des dossiers retenus puis modifiés (audit du 15/11/2026, A4).
+
+    Hors du registre `collectors/files.py`, dont chaque file est une requête :
+    « modifié » se lit en comparant le fichier sur le disque à l'empreinte
+    retenue, ce que SQL ne sait pas faire. Même forme que les autres lignes,
+    pour que l'écran la montre sans rien savoir de sa nature."""
+    try:
+        slugs = _dossiers_modifies(conn)
+        mesure = {"reste": len(slugs), "indisponible": None}
+    except Exception as e:                       # base ancienne, disque illisible
+        print(f"[files] dossiers modifiés : {e!r}", file=sys.stderr)
+        slugs, mesure = [], {"reste": None, "indisponible": "relevé des dossiers impossible"}
+    ligne = {
+        "cle": "dossiers-modifies",
+        "titre": "Dossiers modifiés depuis leur verdict",
+        "question": "Ce dossier retenu a changé depuis sa relecture : le nouveau "
+                    "texte peut-il sortir ?",
+        "geste": "Relire le texte et le retenir de nouveau, ou le laisser hors publication",
+        "effet": "Un dossier retenu qui change sort du site au prochain passage, et "
+                 "n'y revient que retenu de nouveau.",
+        "route": "/atelier/dossiers", "role_min": "validator", "experte": False,
+        "vide": "Aucun dossier retenu n'a changé depuis son verdict.",
+        "fait": None, "en_cours": [], "premier": None, "derniere_passe": None,
+        "sans_collecte": True, "dossiers": slugs, **mesure,
+    }
+    if ligne["indisponible"] is None:
+        del ligne["indisponible"]
+    return ligne
+
+
+def _file_refus_contredits(conn) -> dict:
+    """Les liens refusés qu'une source NOUVELLE redit depuis leur dernière revue
+    (avis de vigie-securite) : un refus bloque toutes les sources sans bruit,
+    un second validateur doit pouvoir le revoir. « Garder le refus » tient pour
+    revues les sources déjà vues ; la fusion et les modifications à l'atelier
+    ne comptent pas (cf. `relations_refus_respecte_maj`)."""
+    existe = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
+                          " AND name='relations_refus_sources'").fetchone()
+    reste = fait = sans_motif = 0
+    if existe:
+        reste = conn.execute("""
+            SELECT COUNT(*) FROM relations_refusees x
+             WHERE EXISTS (SELECT 1 FROM relations_refus_sources s
+                            WHERE s.refus_id = x.id AND s.premiere > COALESCE(x.revu_le, ''))
+        """).fetchone()[0]
+        fait, sans_motif = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(motif IS NULL OR trim(motif) = ''), 0)"
+            " FROM relations_refusees").fetchone()
+    return {
+        "cle": "refus-contredits",
+        "titre": "Liens refusés qu'une source redit",
+        "question": "Ce lien supprimé à l'atelier, une source le redit : le refus "
+                    "tient-il toujours ?",
+        "geste": "Garder le refus, ou le lever pour que la collecte rétablisse le lien",
+        "effet": "Levé, le lien revient à la collecte suivante ; gardé, il reste hors du site.",
+        "route": "/atelier/relations", "role_min": "validator", "experte": False,
+        "vide": "Aucune source nouvelle n'a redit un lien refusé.",
+        "reste": reste, "fait": fait, "sans_motif": sans_motif, "en_cours": [],
+        "premier": None, "derniere_passe": None, "sans_collecte": True,
+    }
 
 
 # ─── /api/atelier/workqueue ────────────────────────────────────────────────────
@@ -2162,6 +2293,22 @@ def _verdict_requis(valeur: Optional[str]) -> str:
         raise HTTPException(400, f"verdict inconnu : « {valeur} » — valeurs : "
                                  f"{', '.join(VERDICTS)}")
     return v
+
+# Ce qu'un contributeur a écrit sur une fiche depuis le dernier VERDICT posé
+# par un validateur (arbitrage du 15/11/2026 : le validateur le voit avant de
+# retenir). La borne est l'identifiant de journal de la dernière décision qui a
+# CHANGÉ le verdict : une simple note ne la déplace pas. « Contributeur » =
+# rôle actuel du compte, pas celui qu'il avait en écrivant.
+_ECRITS_DE_CONTRIBUTEUR = (
+    "u.role = 'contributor' AND al.action IN ('create', 'update', 'delete')"
+    " AND al.table_name IN ('entities', 'contacts', 'relations', 'entity_notes',"
+    " 'entity_websites')")
+_DERNIER_VERDICT = """(SELECT MAX(v.id) FROM audit_log v JOIN users vu ON vu.id = v.user_id
+    WHERE v.table_name = 'annotations' AND v.field = 'entity/' || {eid}
+      AND vu.role IN ('validator', 'admin')
+      AND COALESCE(json_extract(v.new_value, '$.statut'), 'jamais_relu')
+          != COALESCE(json_extract(v.old_value, '$.statut'), 'jamais_relu'))"""
+
 
 @app.get("/api/atelier/workqueue")
 def atelier_workqueue(
@@ -2207,8 +2354,13 @@ def atelier_workqueue(
                 p.firstname, p.lastname,
                 b.siren, b.naf_label, b.status AS biz_status,
                 a.rna_id, a.object AS asso_object,
-                (SELECT COUNT(*) FROM relations WHERE from_id=e.id OR to_id=e.id) AS rel_count,
+                (SELECT COUNT(*) FROM relations r WHERE (r.from_id=e.id OR r.to_id=e.id)
+                  {"" if au_moins(user, "validator") else _SANS_PRESUMES}) AS rel_count,
                 (SELECT COUNT(*) FROM audit_log WHERE entity_id=e.id) AS edit_count,
+                (SELECT COUNT(*) FROM audit_log al JOIN users u ON u.id = al.user_id
+                  WHERE al.entity_id = e.id AND {_ECRITS_DE_CONTRIBUTEUR}
+                    AND al.id > COALESCE({_DERNIER_VERDICT.format(eid="e.id")}, 0)
+                ) AS ecrit_par_contributeurs,
                 (SELECT COUNT(*) FROM contacts WHERE entity_id=e.id) AS contacts_count,
                 (SELECT value FROM contacts WHERE entity_id=e.id AND type='website' LIMIT 1) AS website
             FROM entities e
@@ -2220,6 +2372,12 @@ def atelier_workqueue(
             ORDER BY e.type, e.name
             LIMIT ? OFFSET ?
         """, params + [limit, offset])
+        # Contacts d'une personne physique réservés aux validateurs : la liste
+        # ne porte ni le site ni le nombre de contacts d'une personne.
+        for it in items:
+            if _notes_reservees(it, user):
+                it["website"] = None
+                it["contacts_count"] = None
         return {"total": total, "items": items, "offset": offset, "limit": limit}
     finally:
         conn.close()
@@ -2463,7 +2621,7 @@ def _normaliser(genre: str, champ: str, valeur):
             raise HTTPException(400, f"{champ} : entité attendue (id, ou nom + type)")
         if valeur.get("id"):
             return {"id": int(valeur["id"])}
-        if not valeur.get("nom") or not valeur.get("type"):
+        if not str(valeur.get("nom") or "").strip() or not valeur.get("type"):
             raise HTTPException(400, f"{champ} : choisir une entité existante, "
                                      "ou donner un nom ET un type")
         return {"nom": " ".join(str(valeur["nom"]).split())[:255],
@@ -2523,7 +2681,8 @@ def _filtre_origine(alias: str, origine: Optional[str], params: list) -> str:
     return f" AND {alias}.origine = ?"
 
 
-def _donnees_query(object_type: str, limit: int, origine: Optional[str] = None):
+def _donnees_query(object_type: str, limit: int, origine: Optional[str] = None,
+                   offset: int = 0):
     params: list = []
     if object_type == "deliberation":
         return ("""
@@ -2548,10 +2707,10 @@ def _donnees_query(object_type: str, limit: int, origine: Optional[str] = None):
             WHERE e.type IN ({types})
             {filtre}
             ORDER BY e.date DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
         """.replace("{types}", ",".join("?" * len(TYPES_REVUS["deliberation"])))
            .replace("{filtre}", _filtre_origine("e", origine, params)),
-                [*TYPES_REVUS["deliberation"], *params, limit])
+                [*TYPES_REVUS["deliberation"], *params, limit, offset])
     if object_type == "flow":
         return ("""
             SELECT ff.id, ff.type, ff.year, ff.amount, ff.description,
@@ -2563,8 +2722,8 @@ def _donnees_query(object_type: str, limit: int, origine: Optional[str] = None):
             LEFT JOIN entities et ON et.id = ff.to_id
             WHERE 1=1 {filtre}
             ORDER BY ff.year DESC, ff.amount DESC
-            LIMIT ?
-        """.replace("{filtre}", _filtre_origine("ff", origine, params)), params + [limit])
+            LIMIT ? OFFSET ?
+        """.replace("{filtre}", _filtre_origine("ff", origine, params)), params + [limit, offset])
     # marche
     return ("""
         SELECT mp.id, mp.acheteur_nom, mp.titulaire_nom, mp.objet,
@@ -2573,8 +2732,8 @@ def _donnees_query(object_type: str, limit: int, origine: Optional[str] = None):
         FROM marches_publics mp
         WHERE 1=1 {filtre}
         ORDER BY mp.date_notif DESC
-        LIMIT ?
-    """.replace("{filtre}", _filtre_origine("mp", origine, params)), params + [limit])
+        LIMIT ? OFFSET ?
+    """.replace("{filtre}", _filtre_origine("mp", origine, params)), params + [limit, offset])
 
 
 @app.get("/api/atelier/donnees")
@@ -2583,9 +2742,13 @@ def atelier_donnees(
     status: Optional[str] = None,
     origine: Optional[str] = Query(None, description="institutionnel | verbatim | "
                                                      "atelier | non-classe"),
-    limit: int = Query(200, le=1000),
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    response: Response = None,
     user=Depends(require_auth),
 ):
+    """Une page de lignes ; le total du filtre est dans l'en-tête `X-Total-Count`
+    (le corps reste une liste, d'autres lecteurs s'y fient)."""
     if type not in DONNEES_TYPES:
         raise HTTPException(400, f"type invalide — valeurs: {', '.join(DONNEES_TYPES)}")
     filtre_verdict = _verdict_requis(status) if status else None
@@ -2593,10 +2756,17 @@ def atelier_donnees(
         raise HTTPException(400, f"origine invalide — valeurs: "
                                  f"{', '.join(ORIGINES + ('non-classe',))}")
 
-    sql, params = _donnees_query(type, limit, origine)
+    # Sans filtre de verdict, la page se découpe en SQL. Avec, le verdict vit
+    # dans une autre table : on lit tout, on filtre, puis on découpe.
+    sql, params = _donnees_query(type, -1 if filtre_verdict else limit, origine,
+                                 0 if filtre_verdict else offset)
     conn = get_db()
     try:
         items = rows(conn, sql, params)
+        if not filtre_verdict:
+            sans_page, p_total = _donnees_query(type, -1, origine, 0)
+            response.headers["X-Total-Count"] = str(conn.execute(
+                f"SELECT COUNT(*) FROM ({sans_page})", p_total).fetchone()[0])
         ann = {
             a["object_id"]: a for a in rows(conn,
                 "SELECT object_id, review_status, confidence, note, corrections, "
@@ -2617,6 +2787,9 @@ def atelier_donnees(
             if filtre_verdict and it["annotation"]["review_status"] != filtre_verdict:
                 continue
             out.append(it)
+        if filtre_verdict:
+            response.headers["X-Total-Count"] = str(len(out))
+            out = out[offset:offset + limit]
         return out
     finally:
         conn.close()
@@ -2692,6 +2865,15 @@ def _empreinte_objet(object_type: str, object_id: int) -> Optional[str]:
     return None
 
 
+def _note_de_decision_reservee(conn, object_type: str, object_id: int, user: dict) -> bool:
+    """Vraie si la note d'une décision porte sur une personne et que le compte
+    n'est pas validateur : même règle que les notes (`_notes_reservees`)."""
+    if object_type != "entity":
+        return False
+    return _notes_reservees(row(conn, "SELECT type FROM entities WHERE id=?",
+                                (object_id,)), user)
+
+
 def _decider(object_type: str, object_id: int, req: AnnotationUpdate, user,
              statut_lu: Optional[str] = None) -> dict:
     """Le SEUL écrivain des décisions de l'atelier — cf. `collectors/verdict.py`.
@@ -2758,8 +2940,13 @@ def _decider(object_type: str, object_id: int, req: AnnotationUpdate, user,
                     existing["reviewed_by"] if existing else None, actuel_le,
                     actuel={"review_status": statut_avant,
                             "confidence": existing["confidence"],
-                            "note": existing["note"],
-                            "corrections": parse_json_field(existing["corrections"], {}),
+                            # Sur une personne, la note de décision est un texte
+                            # libre réservé aux validateurs (avis vigie-dpo).
+                            "note": None if _note_de_decision_reservee(
+                                conn, object_type, object_id, user) else existing["note"],
+                            "corrections": ({} if _note_de_decision_reservee(
+                                conn, object_type, object_id, user)
+                                else parse_json_field(existing["corrections"], {})),
                             "reviewed_at": actuel_le} if existing else None)
         new_status = demande or statut_avant
 
@@ -2770,6 +2957,16 @@ def _decider(object_type: str, object_id: int, req: AnnotationUpdate, user,
                       else (existing["confidence"] if existing else None))
         note = (req.note if "note" in fournis
                 else (existing["note"] if existing else None))
+        # Sur une personne, la note d'une décision est un texte libre réservé
+        # aux validateurs, ici et non dans les routes : tout appelant en hérite.
+        # La note existante ne lui est pas rendue (None) : un corps renvoyé sans
+        # note, ou avec une note vide, ne la change pas et ne l'efface pas.
+        if _note_de_decision_reservee(conn, object_type, object_id, user):
+            ancienne = (existing["note"] if existing else None) or None
+            if (note or None) is None or note == ancienne:
+                note = ancienne
+            else:
+                exiger(user, "validator", "Écrire la note d'une décision sur une personne physique")
 
         # Retenir, écarter (ce qui retire l'objet du site) ou poser une fiabilité
         # tranche ; noter et corriger proposent. Comparé à l'EXISTANT : un
@@ -2777,6 +2974,18 @@ def _decider(object_type: str, object_id: int, req: AnnotationUpdate, user,
         conf_avant = existing["confidence"] if existing else None
         if new_status != statut_avant:
             exiger(user, "validator", "Retenir ou écarter")
+        # La note d'une décision est le MOTIF d'une rectification, et part sur
+        # le site avec elle (`scripts/snapshot/revue.py`, `note_revue`). Un
+        # contributeur ne la réécrit pas sous la décision d'un autre compte : il
+        # remplaçait le motif et devenait l'auteur du verdict (audit du 15/11).
+        decision_d_autrui = bool(
+            existing and existing["reviewed_by"] and not au_moins(user, "validator")
+            and existing["reviewed_by"] != user["email"])
+        if decision_d_autrui and (note or None) != (existing["note"] or None):
+            raise HTTPException(403, "Cette ligne porte la décision d'un autre compte, "
+                                     "et sa note en est le motif publié : un contributeur "
+                                     "ne la réécrit pas. Proposez une correction de la "
+                                     "valeur, ou demandez à un validateur.")
         if (confidence or None) != (conf_avant or None):
             exiger(user, "validator", "Poser la fiabilité d'une ligne")
 
@@ -2823,6 +3032,17 @@ def _decider(object_type: str, object_id: int, req: AnnotationUpdate, user,
                 else:
                     corrections[champ] = propre
 
+        # Décision d'un autre compte, contributeur : rien d'autre à écrire que
+        # des propositions (déjà déposées). Réécrire la ligne ferait du
+        # contributeur l'auteur du verdict (audit du 15/11/2026).
+        if decision_d_autrui:
+            conn.commit()
+            return {"ok": True, "object_type": object_type, "object_id": object_id,
+                    "review_status": statut_avant, "corrections": corrections,
+                    "propose": bool(proposees),
+                    "proposition": proposition if proposees else None,
+                    "reviewed_by": existing["reviewed_by"],
+                    "reviewed_at": existing["reviewed_at"]}
         conn.execute("""
             INSERT INTO annotations(object_type, object_id, review_status, confidence,
                                     note, corrections, reviewed_by, reviewed_at, updated_at)
@@ -2997,6 +3217,23 @@ class DossierCreation(BaseModel):
     titre: str
 
 
+#: État d'un dossier retenu dont le texte a changé depuis : hors publication
+#: tant qu'un validateur ne l'a pas retenu de nouveau. Distinct de tout verdict.
+DOSSIER_MODIFIE = "modifie_hors_publication"
+
+
+def _dossiers_modifies(conn) -> list[str]:
+    """Les dossiers retenus dont le texte a changé depuis : la publication les
+    a retirés en silence. Même prédicat que `_dossier_ligne`."""
+    sortie = []
+    for slug, p in _dossiers.lister(RACINE):
+        v = _dossiers.verdict(conn, _dossiers.identifiant(conn, slug))
+        if v and modifie_depuis_relecture(v["review_status"], v["empreinte"],
+                                          _dossiers.empreinte_de(p)):
+            sortie.append(slug)
+    return sortie
+
+
 def _dossier_ligne(conn, slug: str, p: Path, index=None) -> dict:
     meta, corps = _dossiers.entete(p.read_text(encoding="utf-8"))
     # Un dossier posé sur le disque (à la main, par un script) reçoit ici son
@@ -3010,14 +3247,21 @@ def _dossier_ligne(conn, slug: str, p: Path, index=None) -> dict:
     # du site (cf. collectors/dossiers.py, « Ce que la relecture a vu »).
     perime = (_dossiers.peremption(conn, did, actuelle, index)
               if index is not None and verdict_de(statut) == RETENU else None)
+    verdict = (verdict_de(statut) if v else None) or JAMAIS_RELU
+    modifie = modifie_depuis_relecture(statut, v and v["empreinte"], actuelle)
     return {
         "perime": perime if perime and perime["elements"] else None,
         "slug": slug, "dossier_id": did,
         "titre": meta.get("titre") or slug, "chapeau": meta.get("chapeau", ""),
         "maj": meta.get("maj", ""), "a_developper": meta.get("statut") == "a_developper",
         "mots": len(corps.split()), "empreinte": actuelle,
-        "verdict": (verdict_de(statut) if v else None) or JAMAIS_RELU,
-        "modifie": modifie_depuis_relecture(statut, v and v["empreinte"], actuelle),
+        # Le verdict POSÉ, tel qu'en base : « retenu » reste vrai d'un texte
+        # qui n'est plus celui-ci.
+        "verdict": verdict,
+        "modifie": modifie,
+        # L'état à AFFICHER (audit du 15/11/2026, A4) : un dossier retenu puis
+        # modifié ne sort plus, et son verdict seul disait encore « retenu ».
+        "etat": DOSSIER_MODIFIE if modifie else verdict,
         "note": (v or {}).get("note") or "",
         "reviewed_by": (v or {}).get("reviewed_by"),
         "reviewed_at": (v or {}).get("reviewed_at"),
@@ -3080,13 +3324,24 @@ def atelier_dossier_ecrire(req: DossierEcriture, slug: str = FPath(..., pattern=
     exiger(user, "contributor", "Modifier un dossier")
     if not _dossiers.chemin(RACINE, slug).exists():
         raise HTTPException(404, f"Aucun dossier « {slug} ».")
+    did = _identifier_dossier(slug)
+    conn = get_db()
+    try:
+        v = _dossiers.verdict(conn, did)
+    finally:
+        conn.close()
+    statut, retenue = (v["review_status"], v["empreinte"]) if v else (None, None)
     try:
         nouvelle = _dossiers.ecrire(RACINE, slug, req.texte, req.empreinte_lue)
     except _dossiers.Conflit as e:
         raise HTTPException(409, str(e))
-    did = _identifier_dossier(slug)
     _journaliser_dossier(user, did, "edit")
-    return {"ok": True, "slug": slug, "empreinte": nouvelle}
+    modifie = modifie_depuis_relecture(statut, retenue, nouvelle)
+    return {"ok": True, "slug": slug, "empreinte": nouvelle,
+            "etat": DOSSIER_MODIFIE if modifie else (verdict_de(statut) or JAMAIS_RELU),
+            # Ce geste vient de retirer du site un dossier qui y était : le dire
+            # à qui l'a fait, au lieu de répondre « enregistré » et rien d'autre.
+            "retire_de_la_publication": modifie and retenue == req.empreinte_lue}
 
 
 @app.post("/api/atelier/dossiers")
@@ -3275,6 +3530,7 @@ def _journaliser_dossier(user, dossier_id: int, action: str) -> None:
 # institutionnel » tient donc par construction.
 
 from collectors import saisies as _saisies  # noqa: E402
+from collectors.db import assurer_refus, refus_de_relation  # noqa: E402
 
 RACINE = Path(__file__).resolve().parent
 
@@ -3290,6 +3546,36 @@ def atelier_saisies_liste(user=Depends(require_auth)):
     data = _saisies.charger()
     return {"version": data.get("version"),
             "saisies": [s for s in data.get("saisies", []) if not s.get("retire")]}
+
+
+@app.get("/api/atelier/saisies/entite/existante")
+def atelier_saisie_entite_existante(
+    type: str = Query(...), name: str = Query(..., min_length=1, max_length=300),
+    commune: Optional[str] = Query(None, max_length=200),
+    siren: Optional[str] = Query(None, max_length=40),
+    user=Depends(require_auth),
+):
+    """La fiche qu'une saisie d'entité rejoindrait, AVANT de l'enregistrer.
+
+    Même recherche que le rejeu (`entite_connue` : SIREN, puis nom exact, puis
+    variante d'écriture dans la même commune). Une variante rejoignait la
+    fiche existante sans que rien le dise : on croyait en créer une."""
+    if type not in _saisies.TABLE_DU_SIREN and type not in ("person", "service", "place"):
+        raise HTTPException(400, "type invalide")
+    nom = " ".join(name.split())
+    siren_ok = _saisies.siren_valide(siren) if type in _saisies.TABLE_DU_SIREN else ""
+    conn = get_db()
+    try:
+        eid = _saisies.entite_connue(conn, type=type, name=nom,
+                                     commune=(commune or "").strip() or None,
+                                     siren=siren_ok or None)
+        if eid is None:
+            return {"fiche": None}
+        fiche = row(conn, "SELECT id, name, type, commune FROM entities WHERE id=?", (eid,))
+        fiche["verdict"] = _verdict_de_fiche(conn, eid)
+        return {"fiche": fiche, "meme_nom": fiche["name"] == nom}
+    finally:
+        conn.close()
 
 
 class SaisieCreate(BaseModel):
@@ -3319,7 +3605,10 @@ def _valide_saisie(objet: str, valeurs: dict) -> dict:
         genre = spec[0]
         valeur = valeurs.get(champ)
         normalisee = _normaliser(genre, champ, valeur)
-        if normalisee is None:
+        # Une chaîne d'espaces normalisée vaut "" : elle passait le contrôle
+        # d'obligation (fiche sans nom, audit du 15/11/2026). Ici seulement :
+        # pour une correction, None veut dire « annuler », pas « vide ».
+        if normalisee is None or normalisee == "":
             if cle.endswith("*"):
                 raise HTTPException(400, f"{champ} : champ obligatoire ({spec[1]})")
             continue
@@ -3329,7 +3618,24 @@ def _valide_saisie(objet: str, valeurs: dict) -> dict:
     if inconnus:
         raise HTTPException(400, f"champs non reconnus pour {objet} : "
                                  f"{', '.join(sorted(inconnus))}")
+    if objet == "entite" and propres.get("siren"):
+        propres["siren"] = _siren_de_saisie(propres["siren"], propres.get("type"))
     return propres
+
+
+def _siren_de_saisie(valeur: str, type_: Optional[str]) -> str:
+    """Le SIREN d'une fiche saisie, gardé s'il est valide, refusé sinon : il
+    était accepté puis jeté sans un mot (audit du 15/11/2026)."""
+    if type_ not in _saisies.TABLE_DU_SIREN:
+        raise HTTPException(400, "siren : seule une entreprise ou une association porte "
+                                 "un SIREN. Laissez ce champ vide pour cette nature de fiche.")
+    siren = _saisies.siren_valide(valeur)
+    if not siren:
+        raise HTTPException(400, f"siren : « {valeur} » n'est pas un SIREN valide. Il "
+                                 "compte neuf chiffres (ou les quatorze d'un SIRET) et "
+                                 "se vérifie sur annuaire-entreprises.data.gouv.fr. "
+                                 "Laissez le champ vide si vous ne l'avez pas.")
+    return siren
 
 
 def _valide_source(source: dict, conn) -> dict:
@@ -3399,6 +3705,10 @@ def atelier_saisie_creer(req: SaisieCreate, user=Depends(require_auth)):
         "saisi_par": user["email"],
         "saisi_le": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    # Le SIREN d'une fiche n'est écrit en base que saisi par un validateur :
+    # c'est par lui que la collecte range les données d'un registre.
+    if req.objet == "entite" and valeurs.get("siren") and au_moins(user, "validator"):
+        saisie["siren_confirme_par"] = user["email"]
     with _saisies.modifier() as data:
         data.setdefault("saisies", []).append(saisie)
 
@@ -3418,15 +3728,97 @@ def atelier_saisie_creer(req: SaisieCreate, user=Depends(require_auth)):
 
     conn = get_db_rw()
     try:
+        entite = refus = None
+        if req.objet == "entite":
+            entite = _completer_fiche_rejointe(conn, saisie["id"], valeurs, user)
+        elif req.objet == "flux":
+            refus = _saisies.refus_du_lien_de_flux(conn, saisie)
+        # Avec la fiche créée ou rejointe : sans elle, la création n'entrait pas
+        # dans l'historique de la fiche (audit du 15/11/2026).
         conn.execute(
             "INSERT INTO audit_log(user_id, entity_id, table_name, action, field,"
             " old_value, new_value) VALUES(?,?,?,?,?,?,?)",
-            (user["id"], None, "saisies", "create",
+            (user["id"], entite["id"] if entite else None, "saisies", "create",
              req.objet, None, json.dumps(saisie, ensure_ascii=False)))
         conn.commit()
     finally:
         conn.close()
-    return {"ok": True, "saisie": saisie, "import": resultat}
+    reponse = {"ok": True, "saisie": saisie, "import": resultat}
+    if entite is not None:
+        reponse["entite"] = entite
+        reponse["entity_id"] = entite["id"]
+    if refus is not None:
+        reponse["lien"] = {
+            "ecrit": False, "refus_id": refus["id"],
+            "message": "Flux enregistré, mais son lien sur la fiche n'a pas été écrit : "
+                       "un validateur a refusé ce lien. Le lever le rétablira."}
+    return reponse
+
+
+#: Ce qu'une saisie d'entité apporte et qu'une édition directe sait écrire.
+#: `commune` et `siren` ne s'éditent pas sur une fiche (absents de
+#: `_CHAMPS_FICHE`) : sur une fiche rejointe, ils sont rendus « non repris ».
+_SAISIE_COMPLETE = ("address",)
+
+
+def _completer_fiche_rejointe(conn, saisie_id: str, valeurs: dict, user: dict) -> Optional[dict]:
+    """La fiche que la saisie a créée ou rejointe, et ce qu'elle y a apporté.
+
+    Rejointe, ses champs VIDES que la saisie remplirait passent par le même
+    chemin qu'une édition directe (`_changements_fiche`) : un contributeur sur
+    une fiche publiée propose, sinon on écrit et on journalise. Le rejeu des
+    saisies, lui, ne touche jamais une fiche existante (cf.
+    `collectors/saisies.py::_inserer_entite`) : sans ceci, l'adresse saisie
+    disparaissait sans que rien le dise. Un champ déjà rempli n'est pas
+    remplacé : corriger une valeur, c'est éditer la fiche."""
+    _saisies.assurer_rattachement(conn)
+    trouvee = _saisies.fiche_de_la_saisie(conn, saisie_id)
+    if trouvee is None:
+        return None
+    eid, cree = trouvee
+    sortie = {"id": eid, "cree": cree, "modifies": [], "proposes": [],
+              "proposition": None, "non_repris": [], "siren_a_confirmer": False}
+    siren = valeurs.get("siren")
+    if cree:
+        # Contributeur : le SIREN reste dans la saisie, non repris, jusqu'à ce
+        # qu'un validateur le confirme (avis de vigie-securite, cf. saisies.py).
+        if siren and not au_moins(user, "validator"):
+            sortie["non_repris"] = ["siren"]
+            sortie["siren_a_confirmer"] = True
+        return sortie
+    current = row(conn, _FICHE_COURANTE, (eid,))
+    vides = {c: valeurs[c] for c in _SAISIE_COMPLETE
+             if valeurs.get(c) and not str(current.get(c) or "").strip()}
+    # Un validateur qui saisit de nouveau la fiche avec son SIREN le confirme :
+    # écrit si la fiche n'en porte aucun et qu'aucune autre ne le porte. C'est
+    # ainsi qu'un validateur reprend le SIREN laissé à confirmer par un
+    # contributeur. Jamais remplacé : corriger un SIREN reste hors de l'atelier.
+    table_siren = _saisies.TABLE_DU_SIREN.get(current.get("type"))
+    if (siren and table_siren and au_moins(user, "validator")
+            and not row(conn, f"SELECT 1 AS ok FROM {table_siren} WHERE entity_id=? "
+                              "AND COALESCE(siren, '') <> ''", (eid,))
+            and _saisies.entite_par_siren(conn, siren) is None):
+        if row(conn, f"SELECT 1 AS ok FROM {table_siren} WHERE entity_id=?", (eid,)):
+            conn.execute(f"UPDATE {table_siren} SET siren=? WHERE entity_id=?", (siren, eid))
+        else:
+            conn.execute(f"INSERT INTO {table_siren}(entity_id, siren) VALUES(?,?)", (eid, siren))
+        _journal(conn, user, eid, table_siren, "update", "siren", apres=siren)
+        sortie["modifies"].append("siren")
+    sortie["non_repris"] = sorted(c for c in ("address", "commune", "siren")
+                                  if valeurs.get(c) and c not in vides
+                                  and c not in sortie["modifies"])
+    changements = _changements_fiche(current, vides, user)
+    if not changements:
+        return sortie
+    if _doit_proposer(user, current.get("confidence")):
+        _propositions.assurer_schema(conn)
+        sortie["proposition"] = _propositions.proposer(
+            conn, "fiche", "entity", eid, eid, {c: n for c, _, n in changements},
+            {c: a for c, a, _ in changements}, user)
+        sortie["proposes"] = sorted(c for c, _, _ in changements)
+    else:
+        sortie["modifies"] += _ecrire_fiche(conn, eid, changements, user)
+    return sortie
 
 
 def _saisie_validee(saisie: dict) -> bool:
@@ -3629,24 +4021,33 @@ def atelier_document_lien(doc_id: int = FPath(..., ge=1), user=Depends(require_a
 
 # Hors de `/api/`, donc hors du verrou global — et c'est voulu : l'hôte des
 # documents ne voit passer aucune session. La signature tient lieu de verrou.
+# Les en-têtes de TOUTE réponse de cet hôte, refus compris : un 403 ou un 404 qui
+# part sans `nosniff` ni `no-referrer` laisse le lien signé dans le Referer.
+_ENTETES_DOCS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",          # le lien signé ne fuit pas
+    "X-Frame-Options": "DENY",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cache-Control": "private, no-store",
+    "X-Robots-Tag": "noindex, nofollow",
+}
+
+
 @app.get("/d/{doc_id}", include_in_schema=False)
 def document_signe(request: Request, doc_id: int = FPath(..., ge=1),
-                   exp: int = Query(...), u: int = Query(...), sig: str = Query(..., max_length=64)):
+                   exp: int | None = Query(None), u: int | None = Query(None),
+                   sig: str | None = Query(None, max_length=64)):
     from api_auth import lien_document_valide
     if not HOTE_DOCS or request.url.hostname != HOTE_DOCS:
         raise HTTPException(404, "introuvable")
-    if not lien_document_valide(doc_id, exp, u, sig):
-        raise HTTPException(403, "Lien invalide ou expiré : rouvrir le document depuis l'atelier.")
+    # Paramètres facultatifs pour la validation, obligatoires pour la signature :
+    # un 422 nommait les paramètres attendus à qui n'avait pas de lien.
+    if exp is None or u is None or sig is None or not lien_document_valide(doc_id, exp, u, sig):
+        raise HTTPException(403, "Lien invalide ou expiré : rouvrir le document depuis l'atelier.",
+                            headers=_ENTETES_DOCS)
     chemin, doc_type = _document_archive(doc_id)
-    entetes = {
-        "X-Content-Type-Options": "nosniff",
-        "Referrer-Policy": "no-referrer",          # le lien signé ne fuit pas
-        "X-Frame-Options": "DENY",
-        "Cross-Origin-Resource-Policy": "same-origin",
-        "Cross-Origin-Opener-Policy": "same-origin",
-        "Cache-Control": "private, no-store",
-        "X-Robots-Tag": "noindex, nofollow",
-    }
+    entetes = _ENTETES_DOCS
     # Le PDF s'affiche SANS `sandbox` : la CSP `sandbox` empêche le lecteur PDF
     # de Chrome de s'ouvrir, et l'isolement tient ici à l'origine elle-même.
     if doc_type == "pdf":
@@ -3702,7 +4103,10 @@ def atelier_entity_detail(entity_id: int = FPath(..., ge=1), user=Depends(requir
                             (entity_id,))["origine"]
                         if _colonne_existe(conn, "entities", "origine") else None)
 
-        e["contacts"] = rows(conn,
+        # Contacts d'une personne physique : réservés aux validateurs, tous types
+        # (filtre ici, côté serveur ; même règle que les notes).
+        e["contacts_reserves"] = _notes_reservees(e, user)
+        e["contacts"] = [] if e["contacts_reserves"] else rows(conn,
             "SELECT id, type, value, label FROM contacts WHERE entity_id=? ORDER BY type, id",
             (entity_id,))
 
@@ -3713,24 +4117,41 @@ def atelier_entity_detail(entity_id: int = FPath(..., ge=1), user=Depends(requir
             FROM relations r
             JOIN entities f ON f.id = r.from_id
             JOIN entities t ON t.id = r.to_id
-            WHERE r.from_id = ? OR r.to_id = ?
+            WHERE (r.from_id = ? OR r.to_id = ?){reserve}
             ORDER BY r.relation_type, r.since DESC
-        """, (entity_id, entity_id))
+        """.format(reserve="" if au_moins(user, "validator") else _SANS_PRESUMES),
+            (entity_id, entity_id))
 
         e["audit"] = rows(conn, """
             SELECT al.at, al.action, al.field, al.old_value, al.new_value,
                    u.email AS user_email
             FROM audit_log al
             LEFT JOIN users u ON u.id = al.user_id
-            WHERE al.entity_id = ?
+            WHERE al.entity_id = ?{reserve}
             ORDER BY al.at DESC
             LIMIT 30
-        """, (entity_id,))
+        """.format(reserve="" if au_moins(user, "validator") else
+                   # Un lien présumé changé ou retiré y laissait son type.
+                   " AND NOT (al.table_name = 'relations' AND (al.old_value IN ({p})"
+                   " OR al.new_value IN ({p})))".format(
+                       p=", ".join("'" + t + "'" for t in PRESUMES))),
+            (entity_id,))
+        # Fiche réservée (personne, compte non validateur) : refus par défaut.
+        # Toute ligne perd son contenu, quelle que soit la table (note, décision
+        # annotée, contact…) ; « qui, quand, quel champ » reste. Une liste noire
+        # par table a déjà laissé passer ce cas (c1b4fb6).
+        if _notes_reservees(e, user):
+            for ligne in e["audit"]:
+                ligne.pop("old_value", None)
+                ligne.pop("new_value", None)
+                ligne["contenu_reserve"] = True
 
         # Les notes libres sur une PERSONNE PHYSIQUE sont réservées aux
         # validateurs : c'est du texte sans forme, sur quelqu'un, que rien ne
         # filtre (registre des traitements, point 2 — 08/10/2026).
         e["notes_reservees"] = _notes_reservees(e, user)
+        if e["notes_reservees"]:
+            e["verdict_note"] = None  # la note de décision est du texte libre aussi
         e["notes"] = [] if e["notes_reservees"] else rows(conn,
             "SELECT id, date, note, source, confidence FROM entity_notes"
             " WHERE entity_id=? ORDER BY date DESC, id DESC",
@@ -3741,50 +4162,29 @@ def atelier_entity_detail(entity_id: int = FPath(..., ge=1), user=Depends(requir
             " FROM entity_websites WHERE entity_id=? ORDER BY status, score DESC",
             (entity_id,))
 
+        # Avant de RETENIR, le validateur voit ce que des contributeurs ont
+        # écrit directement sur la fiche depuis le dernier verdict (arbitrage
+        # de Julien, 15/11/2026 : l'écriture directe reste, elle se montre).
+        if au_moins(user, "validator"):
+            e["ecrit_par_contributeurs"] = rows(conn, f"""
+                SELECT al.table_name AS objet, al.action, al.field AS champ,
+                       al.old_value AS avant, al.new_value AS apres,
+                       u.email AS par, al.at AS le
+                FROM audit_log al JOIN users u ON u.id = al.user_id
+                WHERE al.entity_id = ? AND {_ECRITS_DE_CONTRIBUTEUR}
+                  AND al.id > COALESCE({_DERNIER_VERDICT.format(eid="?")}, 0)
+                ORDER BY al.id
+            """, (entity_id, entity_id))
+
         return e
     finally:
         conn.close()
 
-# ─── PUT /api/atelier/entities/{id} — mise à jour complète ────────────────────
-
-class EntityUpdate(BaseModel):
-    name:              Optional[str] = None
-    short_name:        Optional[str] = None
-    type:              Optional[str] = None
-    address:           Optional[str] = None
-    lat:               Optional[float] = None
-    lng:               Optional[float] = None
-    confidence:        Optional[str] = None
-    validation_status: Optional[str] = None
-    responsible:       Optional[str] = None
-    # person
-    firstname:   Optional[str] = None
-    lastname:    Optional[str] = None
-    birth_year:  Optional[int] = None
-    birth_month: Optional[int] = None
-    gender:      Optional[str] = None
-    # business
-    naf_code:       Optional[str] = None
-    naf_label:      Optional[str] = None
-    legal_form:     Optional[str] = None
-    biz_status:     Optional[str] = None
-    capital:        Optional[int] = None
-    employees_range: Optional[str] = None
-    biz_creation:   Optional[str] = None
-    closing_date:   Optional[str] = None
-    # association
-    rna_id:          Optional[str] = None
-    asso_object:     Optional[str] = None
-    asso_status:     Optional[str] = None
-    asso_creation:   Optional[str] = None
-    dissolution_date: Optional[str] = None
-    # place
-    osm_category: Optional[str] = None
-    osm_value:    Optional[str] = None
-    # service
-    svc_category:  Optional[str] = None
-    operator:      Optional[str] = None
-    opening_hours: Optional[str] = None
+# ─── PUT /api/atelier/entities/{id} — retirée le 15/11/2026 ──────────────────
+# Elle réécrivait une fiche sans verrou optimiste, sans valider `confidence` ni
+# `type` (500 sur une valeur hors liste), acceptait un nom vide, et ne passait
+# ni par les propositions ni par l'origine. Ni l'atelier ni les essais ne
+# l'appelaient : l'écran enregistre par PATCH, ci-dessous (audit du 15/11).
 
 
 def _audit(conn, user_id: int, entity_id: int, field: str, old, new):
@@ -3797,131 +4197,6 @@ def _audit(conn, user_id: int, entity_id: int, field: str, old, new):
               str(new) if new is not None else None))
 
 
-@app.put("/api/atelier/entities/{entity_id}")
-def atelier_update_entity(
-    entity_id: int = FPath(..., ge=1),
-    req: EntityUpdate = ...,
-    user=Depends(require_au_moins("validator", "Réécrire une fiche entière")),
-):
-    conn = get_db_rw()
-    try:
-        current = row(conn, """
-            SELECT e.*, p.firstname, p.lastname, p.birth_year, p.birth_month, p.gender,
-                   b.naf_code, b.naf_label, b.legal_form, b.status AS biz_status,
-                   b.capital, b.employees_range, b.creation_date AS biz_creation, b.closing_date,
-                   a.rna_id, a.object AS asso_object, a.status AS asso_status,
-                   a.creation_date AS asso_creation, a.dissolution_date,
-                   pl.osm_category, pl.osm_value,
-                   s.category AS svc_category, s.operator, s.opening_hours
-            FROM entities e
-            LEFT JOIN persons      p  ON p.entity_id  = e.id
-            LEFT JOIN businesses   b  ON b.entity_id  = e.id
-            LEFT JOIN associations a  ON a.entity_id  = e.id
-            LEFT JOIN places       pl ON pl.entity_id = e.id
-            LEFT JOIN services     s  ON s.entity_id  = e.id
-            WHERE e.id = ?
-        """, (entity_id,))
-        if not current:
-            raise HTTPException(404, "Entité introuvable")
-
-        entity_type = current["type"]
-
-        # — Champs entities —
-        # `validation_status` en est sorti le 21/09/2026 : colonne gelée, le
-        # verdict est une décision (`_decider`). Refusé plutôt qu'ignoré — un
-        # geste qui ne fait rien derrière « Sauvegardé ✓ », c'est le lot 1.
-        if req.validation_status is not None:
-            raise HTTPException(400, "Le verdict d'une fiche ne s'écrit plus dans le formulaire : c'est "
-                                 "une décision, posée par les boutons Retenir / Écarter.")
-        base_fields = ["name", "short_name", "type", "address", "lat", "lng",
-                       "confidence", "responsible"]
-        base_updates, base_params = [], []
-        for f in base_fields:
-            val = getattr(req, f)
-            if val is not None:
-                _audit(conn, user["id"], entity_id, f, current.get(f), val)
-                base_updates.append(f"{f}=?")
-                base_params.append(val)
-
-        if base_updates:
-            base_updates.append("updated_at=datetime('now')")
-            conn.execute(
-                f"UPDATE entities SET {', '.join(base_updates)} WHERE id=?",
-                base_params + [entity_id]
-            )
-
-        # — Champs type-spécifiques —
-        if entity_type == "person":
-            pf = {k: getattr(req, k) for k in
-                  ["firstname", "lastname", "birth_year", "birth_month", "gender"]
-                  if getattr(req, k) is not None}
-            if pf:
-                for k, v in pf.items():
-                    _audit(conn, user["id"], entity_id, k, current.get(k), v)
-                sets = ", ".join(f"{k}=?" for k in pf)
-                conn.execute(f"UPDATE persons SET {sets} WHERE entity_id=?",
-                             list(pf.values()) + [entity_id])
-
-        elif entity_type == "business":
-            bf = {}
-            for src, dst in [("naf_code","naf_code"), ("naf_label","naf_label"),
-                              ("legal_form","legal_form"), ("biz_status","status"),
-                              ("capital","capital"), ("employees_range","employees_range"),
-                              ("biz_creation","creation_date"), ("closing_date","closing_date")]:
-                val = getattr(req, src)
-                if val is not None:
-                    _audit(conn, user["id"], entity_id, src, current.get(src), val)
-                    bf[dst] = val
-            if bf:
-                sets = ", ".join(f"{k}=?" for k in bf)
-                conn.execute(f"UPDATE businesses SET {sets} WHERE entity_id=?",
-                             list(bf.values()) + [entity_id])
-
-        elif entity_type == "association":
-            af = {}
-            for src, dst in [("rna_id","rna_id"), ("asso_object","object"),
-                              ("asso_status","status"), ("asso_creation","creation_date"),
-                              ("dissolution_date","dissolution_date")]:
-                val = getattr(req, src)
-                if val is not None:
-                    _audit(conn, user["id"], entity_id, src, current.get(src), val)
-                    af[dst] = val
-            if af:
-                sets = ", ".join(f"{k}=?" for k in af)
-                conn.execute(f"UPDATE associations SET {sets} WHERE entity_id=?",
-                             list(af.values()) + [entity_id])
-
-        elif entity_type == "place":
-            plf = {}
-            for f in ["osm_category", "osm_value"]:
-                val = getattr(req, f)
-                if val is not None:
-                    _audit(conn, user["id"], entity_id, f, current.get(f), val)
-                    plf[f] = val
-            if plf:
-                sets = ", ".join(f"{k}=?" for k in plf)
-                conn.execute(f"UPDATE places SET {sets} WHERE entity_id=?",
-                             list(plf.values()) + [entity_id])
-
-        elif entity_type == "service":
-            sf = {}
-            for src, dst in [("svc_category","category"), ("operator","operator"),
-                              ("opening_hours","opening_hours")]:
-                val = getattr(req, src)
-                if val is not None:
-                    _audit(conn, user["id"], entity_id, src, current.get(src), val)
-                    sf[dst] = val
-            if sf:
-                sets = ", ".join(f"{k}=?" for k in sf)
-                conn.execute(f"UPDATE services SET {sets} WHERE entity_id=?",
-                             list(sf.values()) + [entity_id])
-
-        conn.commit()
-        return {"ok": True, "id": entity_id}
-    finally:
-        conn.close()
-
-
 # ─── PATCH /api/atelier/entities/{id} — verrou optimiste ──────────────────────
 # Édition partielle d'une entité avec protection contre les conflits concurrents.
 # Le client envoie updated_at (valeur lue à l'ouverture de la fiche).
@@ -3929,7 +4204,10 @@ def atelier_update_entity(
 
 class EntityPatch(BaseModel):
     updated_at:        str             # verrou optimiste obligatoire
-    # Champs éditables (même liste que EntityUpdate, sous-ensemble)
+    #: Pourquoi on change l'identité d'une fiche institutionnelle (nom, SIREN,
+    #: année de naissance) : exigé dans ce seul cas, journalisé avec le changement.
+    motif:             Optional[str] = Field(None, max_length=1000)
+    # Champs éditables
     name:              Optional[str] = None
     short_name:        Optional[str] = None
     address:           Optional[str] = None
@@ -4033,17 +4311,39 @@ def _propose(conn, nature: str, object_type: str, object_id: int,
              **reponse) -> _JSONResponse:
     """Enregistre la proposition et répond 202 : reçue, pas appliquée."""
     _propositions.assurer_schema(conn)
-    pid = _propositions.proposer(conn, nature, object_type, object_id, entity_id,
-                                 charge, avant, user)
+    pid, reprises = _propositions.proposer(conn, nature, object_type, object_id, entity_id,
+                                           charge, avant, user, rendre_reprises=True)
     conn.commit()
+    message = ("Proposition enregistrée : elle sera appliquée quand un "
+               "validateur l'aura acceptée.")
+    if reprises:
+        message += (" Elle reprend aussi ce que vous aviez déjà proposé sur cette "
+                    "fiche et qui attendait encore.")
     return _JSONResponse(status_code=202, content={
-        "ok": True, "propose": True, "proposition": pid,
-        "message": "Proposition enregistrée : elle sera appliquée quand un "
-                   "validateur l'aura acceptée.", **reponse})
+        "ok": True, "propose": True, "proposition": pid, "reprend": reprises,
+        "message": message, **reponse})
 
 
-def _changements_fiche(current: dict, valeurs: dict, user: dict) -> list[tuple]:
-    """[(champ, ancien, nouveau)] : ce que `valeurs` change VRAIMENT à la fiche."""
+#: Ce qui IDENTIFIE une fiche (avis de vigie-securite : prénom, nom et mois de
+#: naissance se réécrivent aussi bien que `name`, et `rna_id` est le numéro du
+#: registre lui-même). Sur une fiche d'origine explicitement
+#: institutionnelle, le changer revient à dire que le registre se trompe : le
+#: rôle validateur et un motif journalisé (décision de Julien, 15/11/2026).
+#: `siren` n'est pas éditable aujourd'hui (absent de `_CHAMPS_FICHE`) : il est
+#: nommé ici pour que l'ouvrir un jour n'ouvre pas aussi cette porte.
+_CHAMPS_IDENTITAIRES = ("name", "siren", "firstname", "lastname", "birth_year",
+                        "birth_month", "rna_id")
+
+
+def _changements_fiche(current: dict, valeurs: dict, user: dict,
+                       motif: Optional[str] = None) -> list[tuple]:
+    """[(champ, ancien, nouveau)] : ce que `valeurs` change VRAIMENT à la fiche.
+
+    Une origine NULL n'est PAS protégée : 3 025 fiches non classées à Lasalle,
+    une garde pleine en bloquerait la moitié. Seule `institutionnel`, posé
+    explicitement (`collectors/origine.py`), ferme le nom, le SIREN et l'année
+    de naissance.
+    """
     changements = []
     for champ, nouveau in valeurs.items():
         if champ not in _CHAMPS_FICHE:
@@ -4063,18 +4363,37 @@ def _changements_fiche(current: dict, valeurs: dict, user: dict) -> list[tuple]:
             continue
         if champ == "confidence":
             exiger(user, "validator", "Trancher la fiabilité d'une fiche")
+        if champ in _CHAMPS_IDENTITAIRES and current.get("origine") == INSTITUTIONNEL:
+            # Le rôle d'abord : un contributeur reçoit le 403 qui le lui dit,
+            # même s'il a oublié le motif (et même sur un objet publié, où il
+            # proposerait d'ordinaire : une proposition n'efface pas le registre).
+            exiger(user, "validator", "Modifier le nom, le SIREN ou l'année de naissance "
+                                      "d'une fiche institutionnelle")
+            if not (motif or "").strip():
+                raise HTTPException(400, "Modifier le nom, le SIREN ou l'année de naissance "
+                                         "d'une fiche institutionnelle demande un motif "
+                                         "(champ « motif ») : il sera journalisé.")
         changements.append((champ, ancien, nouveau))
     return changements
 
 
-def _ecrire_fiche(conn, entity_id: int, changements: list[tuple], user: dict) -> list[str]:
+def _ecrire_fiche(conn, entity_id: int, changements: list[tuple], user: dict,
+                  motif: Optional[str] = None) -> list[str]:
     """Écrit et journalise. Le SEUL écrivain des champs d'une fiche : l'édition
-    d'un validateur et l'acceptation d'une proposition passent toutes deux ici."""
+    d'un validateur et l'acceptation d'une proposition passent toutes deux ici.
+
+    Un motif donné pour un changement d'identité (`_CHAMPS_IDENTITAIRES`) se
+    journalise en une ligne `action='motif'`, à la suite des changements qu'il
+    explique (le champ nomme ceux-ci)."""
     par_table: dict[str, dict] = {}
     for champ, ancien, nouveau in changements:
         table, colonne, _ = _CHAMPS_FICHE[champ]
         _audit(conn, user["id"], entity_id, champ, ancien, nouveau)
         par_table.setdefault(table, {})[colonne] = nouveau
+    identitaires = [c for c, _, _ in changements if c in _CHAMPS_IDENTITAIRES]
+    if identitaires and (motif or "").strip():
+        _journal(conn, user, entity_id, "entities", "motif",
+                 ",".join(identitaires), apres=motif.strip())
     for table, valeurs in par_table.items():
         sets = ", ".join(f"{c}=?" for c in valeurs)
         cle = "id" if table == "entities" else "entity_id"
@@ -4109,7 +4428,7 @@ def atelier_patch_entity(
     - 409 si `updated_at` reçu ≠ valeur en base, avec qui, quand, et quels champs.
     """
     fournis = (req.model_fields_set if hasattr(req, "model_fields_set")
-               else req.__fields_set__) - {"updated_at"}
+               else req.__fields_set__) - {"updated_at", "motif"}
     conn = get_db_rw()
     try:
         # Réserver l'écriture avant de lire : la condition et l'écriture forment
@@ -4127,9 +4446,15 @@ def atelier_patch_entity(
                        a.old_value AS avant, a.new_value AS apres
                 FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
                 WHERE a.entity_id = ? AND a.table_name = 'entities'
-                  AND a.at >= ?
+                  AND a.action = 'update' AND a.at > ?
                 ORDER BY a.id
             """, (entity_id, req.updated_at or ""))
+            # Le journal est au millième comme `updated_at` (déclencheur
+            # `audit_log_at_milliemes`) : `>` strict écarte les lignes de
+            # l'écriture qui a produit la valeur lue, écrites au plus tard à
+            # son horodatage. Avec l'ancienne coupe à la seconde (`>=`), ces
+            # lignes revenaient et l'ancienne valeur de l'encadré était fausse.
+            # `action = 'update'` : une ligne de motif n'est pas un champ.
             # Un champ, une ligne : de sa valeur lue à sa valeur actuelle. Deux
             # écritures du même champ ne font pas deux lignes à comparer.
             par_champ: dict[str, dict] = {}
@@ -4144,7 +4469,10 @@ def atelier_patch_entity(
             # Sans champ journalisé depuis la lecture, l'auteur n'est donc pas
             # le dernier humain connu — ce serait accuser quelqu'un à tort.
             if champs:
-                dernier = max(champs, key=lambda c: c["le"] or "")
+                # Le journal est à la seconde : à seconde égale, `max` rendait la
+                # première ligne lue, parfois l'écriture du demandeur lui-même.
+                # Les lignes sont dans l'ordre d'écriture (ORDER BY a.id).
+                dernier = champs[-1]
                 raise _conflit("Cette fiche a été modifiée pendant que vous l'éditiez.",
                                dernier["par"], dernier["le"], champs=champs,
                                updated_at=db_updated_at)
@@ -4155,7 +4483,8 @@ def atelier_patch_entity(
         if "validation_status" in fournis:
             raise HTTPException(400, "Le verdict d'une fiche ne s'écrit plus dans le formulaire : c'est "
                                  "une décision, posée par les boutons Retenir / Écarter.")
-        changements = _changements_fiche(current, {c: getattr(req, c) for c in fournis}, user)
+        changements = _changements_fiche(current, {c: getattr(req, c) for c in fournis}, user,
+                                         motif=req.motif)
         if changements and _doit_proposer(user, current.get("confidence")):
             return _propose(conn, "fiche", "entity", entity_id, entity_id,
                             {c: n for c, _, n in changements},
@@ -4163,7 +4492,7 @@ def atelier_patch_entity(
                             id=entity_id, modifies=[],
                             proposes=sorted(c for c, _, _ in changements),
                             updated_at=db_updated_at)
-        modifies = _ecrire_fiche(conn, entity_id, changements, user)
+        modifies = _ecrire_fiche(conn, entity_id, changements, user, motif=req.motif)
         conn.commit()
         updated = row(conn, "SELECT updated_at FROM entities WHERE id=?", (entity_id,))
         return {"ok": True, "id": entity_id, "modifies": modifies,
@@ -4193,12 +4522,19 @@ def add_contact(
         req.value = _url_http(req.value, "site")
     conn = get_db_rw()
     try:
-        if not row(conn, "SELECT 1 FROM entities WHERE id=?", (entity_id,)):
+        fiche = row(conn, "SELECT type FROM entities WHERE id=?", (entity_id,))
+        if not fiche:
             raise HTTPException(404, "Entité introuvable")
+        # Un téléphone ou un courriel d'une PERSONNE physique : même règle que les
+        # notes (registre des traitements, point 2), et une trace de qui l'a écrit.
+        if _notes_reservees(fiche, user):
+            exiger(user, "validator", "Ajouter un contact à une personne physique")
         r = conn.execute(
             "INSERT INTO contacts(entity_id, type, value, label) VALUES(?,?,?,?)",
             (entity_id, req.type, req.value.strip(), req.label),
         )
+        _journal(conn, user, entity_id, "contacts", "create", f"contact/{r.lastrowid}",
+                 apres=f"{req.type}")
         conn.commit()
         return {"ok": True, "id": r.lastrowid, "entity_id": entity_id,
                 "type": req.type, "value": req.value.strip(), "label": req.label}
@@ -4227,6 +4563,25 @@ RELATION_TYPES = [
     "même_adresse", "même_lieu_dit",
 ]
 
+# Un lien PRÉSUMÉ entre deux noms se lit et s'écrit par qui peut le trancher
+# (`/api/candidates`, registre des traitements point 2). La fiche les rendait
+# pourtant à tout compte (audit du 15/11/2026).
+PRESUMES = tuple(t for t in RELATION_TYPES if t.endswith("_présumé"))
+_SANS_PRESUMES = (" AND r.relation_type NOT IN ("
+                  + ", ".join("'" + t + "'" for t in PRESUMES) + ")")
+
+
+def _relation_d_autrui(conn, rel_id: int, user: dict) -> bool:
+    """Vrai si la relation n'a PAS été créée à l'atelier par ce compte : posée
+    par un autre, ou venue d'un collecteur (aucune création au journal). Un
+    contributeur ne modifie que les siennes, comme ses notes."""
+    auteur = conn.execute(
+        "SELECT user_id FROM audit_log WHERE table_name='relations' AND action='create' "
+        "AND field='relation_id' AND new_value=? ORDER BY id LIMIT 1",
+        (str(rel_id),)).fetchone()
+    return not auteur or auteur[0] != user["id"]
+
+
 class RelationCreate(BaseModel):
     direction:       str            # "from" = entity → cible, "to" = cible → entity
     other_entity_id: int
@@ -4254,6 +4609,40 @@ def _relation_enriched(conn, rel_id: int):
         WHERE r.id = ?
     """, (rel_id,))
 
+_FORME_DATE_LIEN = re.compile(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$")
+
+
+def _date_de_lien(valeur: Optional[str], nom: str) -> Optional[str]:
+    """Une date de lien : AAAA, AAAA-MM ou AAAA-MM-JJ, réelle, entre 1800 et 2100.
+
+    Vide → None. Le champ était libre : `since="n'importe quoi"` s'écrivait, et
+    `until` avant `since` aussi (audit du 15/11/2026).
+    """
+    v = (valeur or "").strip()
+    if not v:
+        return None
+    m = _FORME_DATE_LIEN.match(v)
+    ok = bool(m) and 1800 <= int(m.group(1)) <= 2100
+    if ok and m.group(2):
+        try:
+            datetime.strptime(v, "%Y-%m-%d" if m.group(3) else "%Y-%m")
+        except ValueError:
+            ok = False
+    if not ok:
+        raise HTTPException(400, f"« {nom} » : date attendue AAAA, AAAA-MM ou AAAA-MM-JJ "
+                                 f"(entre 1800 et 2100), reçu « {v[:40]}{'…' if len(v) > 40 else ''} ».")
+    return v
+
+
+def _dates_de_lien_coherentes(since: Optional[str], until: Optional[str]) -> None:
+    """`until` ne précède pas `since`. Comparés sur leur partie commune : « 2020 »
+    et « 2020-06 » ne se contredisent pas (juin est dans 2020)."""
+    if since and until:
+        n = min(len(since), len(until))
+        if until[:n] < since[:n]:
+            raise HTTPException(400, f"« until » ({until}) précède « since » ({since}).")
+
+
 @app.post("/api/atelier/entities/{entity_id}/relations")
 def add_relation(
     entity_id: int = FPath(..., ge=1),
@@ -4262,27 +4651,71 @@ def add_relation(
 ):
     if req.relation_type not in RELATION_TYPES:
         raise HTTPException(400, "relation_type invalide")
+    if req.relation_type in PRESUMES:
+        exiger(user, "validator", "Poser un lien présumé entre deux personnes")
     if req.confidence in PUBLIABLES:
         exiger(user, "validator", "Ajouter une relation publiable (verified)")
     if req.confidence not in ("verified", "probable", "hypothesis"):
         raise HTTPException(400, "confidence invalide")
     if req.direction not in ("from", "to"):
         raise HTTPException(400, "direction doit être 'from' ou 'to'")
+    if req.other_entity_id == entity_id:
+        raise HTTPException(400, "Un lien relie deux fiches différentes : on ne relie "
+                                 "pas une fiche à elle-même.")
+    if not au_moins(user, "validator") and origine_de(req.source) in (INSTITUTIONNEL, VERBATIM):
+        # Une source dit d'où vient le lien : « sirene » ou « cm » fait passer
+        # pour attesté par un registre ou un procès-verbal ce qu'un contributeur
+        # affirme. Le défaut « manual » et une source libre restent permis.
+        exiger(user, "validator", "Citer comme source un registre ou un procès-verbal")
+    since = _date_de_lien(req.since, "since")
+    until = _date_de_lien(req.until, "until")
+    _dates_de_lien_coherentes(since, until)
 
     from_id = entity_id          if req.direction == "from" else req.other_entity_id
     to_id   = req.other_entity_id if req.direction == "from" else entity_id
 
     conn = get_db_rw()
     try:
+        # Les DEUX bouts : seul l'autre était vérifié, et une fiche d'origine
+        # inexistante tombait dans le `except` ci-dessous, rendue en « existe déjà ».
+        if not row(conn, "SELECT 1 FROM entities WHERE id=?", (entity_id,)):
+            raise HTTPException(404, "Entité introuvable")
         if not row(conn, "SELECT 1 FROM entities WHERE id=?", (req.other_entity_id,)):
             raise HTTPException(404, "Entité cible introuvable")
+        # Même couple, même type, mêmes dates : un second lien qui ne diffère que
+        # par `source` double l'information sans rien dire de plus. NULL et ""
+        # se valent (le formulaire envoie "").
+        deja = row(conn, """
+            SELECT id FROM relations
+            WHERE from_id=? AND to_id=? AND relation_type=?
+              AND COALESCE(since,'')=? AND COALESCE(until,'')=?
+        """, (from_id, to_id, req.relation_type, since or "", until or ""))
+        if deja:
+            raise HTTPException(409, {
+                "message": "Ce lien existe déjà (même couple, même type, mêmes dates) : "
+                           "la source n'en fait pas un autre lien.",
+                "relation_id": deja["id"]})
+        # Le déclencheur écarterait l'écriture sans rien dire, et l'on
+        # journaliserait une création qui n'a pas eu lieu.
+        refus = refus_de_relation(conn, from_id, to_id, req.relation_type)
+        if refus:
+            raise HTTPException(409, {
+                "message": "Ce lien a été supprimé et refusé par un validateur : "
+                           "le refus doit être levé avant de le reposer.",
+                "refus_id": refus["id"]})
         try:
             r = conn.execute("""
                 INSERT INTO relations(from_id, to_id, relation_type, since, until, source, confidence)
                 VALUES(?,?,?,?,?,?,?)
-            """, (from_id, to_id, req.relation_type, req.since, req.until, req.source, req.confidence))
+            """, (from_id, to_id, req.relation_type, since, until, req.source, req.confidence))
+            if r.rowcount != 1:      # refus posé entre la vérification et l'écriture
+                raise HTTPException(409, "Ce lien vient d'être refusé par un validateur.")
             rel_id = r.lastrowid
-        except Exception:
+        except sqlite3.IntegrityError as e:
+            # Seule l'unicité (couple + type + source) se dit « existe déjà » ;
+            # toute autre contrainte est un défaut, pas un doublon.
+            if "UNIQUE" not in str(e):
+                raise
             raise HTTPException(409, "Cette relation existe déjà (même type + source)")
         conn.execute("""
             INSERT INTO audit_log(user_id, entity_id, table_name, action, field, new_value)
@@ -4313,12 +4746,31 @@ def update_relation(
             raise HTTPException(400, "confidence invalide")
         if req.confidence is not None and req.confidence != rel.get("confidence"):
             exiger(user, "validator", "Changer la fiabilité d'une relation")
+        if rel.get("relation_type") in PRESUMES or req.relation_type in PRESUMES:
+            exiger(user, "validator", "Modifier un lien présumé entre deux personnes")
+        if req.source is not None and str(rel.get("source") or "") != req.source:
+            # La source dit d'où vient le lien : la réécrire fait passer pour
+            # attesté ce qui ne l'est pas. Refusé avant toute proposition.
+            exiger(user, "validator", "Réécrire la source d'une relation")
         valeurs = {f: getattr(req, f) for f in _CHAMPS_RELATION if getattr(req, f) is not None}
+        for f in ("since", "until"):
+            if f in valeurs:
+                valeurs[f] = _date_de_lien(valeurs[f], f) or ""
+        _dates_de_lien_coherentes(valeurs.get("since", rel.get("since")),
+                                  valeurs.get("until", rel.get("until")))
         changes = {f: v for f, v in valeurs.items() if str(rel.get(f) or "") != str(v)}
+        if "relation_type" in changes and refus_de_relation(
+                conn, rel["from_id"], rel["to_id"], changes["relation_type"]):
+            raise HTTPException(409, "Ce type de lien entre ces deux fiches a été refusé "
+                                     "par un validateur : le refus doit être levé d'abord.")
         if changes and _doit_proposer(user, rel.get("confidence")):
             return _propose(conn, "relation", "relation", rel_id, rel["from_id"], changes,
                             {f: rel.get(f) for f in changes}, user,
                             relation=_relation_enriched(conn, rel_id))
+        # Écrire directement (relation non publiée) : un contributeur ne touche
+        # que celles qu'il a posées. Proposer, lui, reste ouvert (ci-dessus).
+        if changes and not au_moins(user, "validator") and _relation_d_autrui(conn, rel_id, user):
+            exiger(user, "validator", "Modifier une relation que vous n'avez pas posée")
         _ecrire_relation(conn, rel, valeurs, user)
         conn.commit()
         return _relation_enriched(conn, rel_id)
@@ -4330,29 +4782,189 @@ _CHAMPS_RELATION = ("relation_type", "since", "until", "source", "confidence")
 
 
 def _ecrire_relation(conn, rel: dict, valeurs: dict, user: dict) -> None:
-    for field, val in valeurs.items():
+    """N'écrit que ce qui change. Réécrire `relation_type` inchangé déclenchait
+    `relations_refus_respecte_maj` sur le frère d'un lien refusé : l'UPDATE
+    entier était avalé, le journal disait la fiabilité changée et elle ne
+    l'était pas (second avis de vigie-securite). Ligne non écrite → 409, et
+    l'appelant ne valide rien : ni changement ni journal."""
+    changes = {f: v for f, v in valeurs.items() if str(rel.get(f) or "") != str(v)}
+    if not changes:
+        return
+    cur = conn.execute(f"UPDATE relations SET {', '.join(f'{f}=?' for f in changes)} WHERE id=?",
+                       list(changes.values()) + [rel["id"]])
+    if cur.rowcount != 1:
+        conn.rollback()
+        raise HTTPException(409, "La relation n'a pas pu être modifiée : un refus "
+                                 "mémorisé ou une écriture concurrente l'en empêche.")
+    for field, val in changes.items():
         old = rel.get(field)
-        if str(old or "") != str(val):
-            conn.execute("""
-                INSERT INTO audit_log(user_id, entity_id, table_name, action, field, old_value, new_value)
-                VALUES(?,?,'relations','update',?,?,?)
-            """, (user["id"], rel["from_id"], field, str(old) if old else None, str(val)))
-    if valeurs:
-        conn.execute(f"UPDATE relations SET {', '.join(f'{f}=?' for f in valeurs)} WHERE id=?",
-                     list(valeurs.values()) + [rel["id"]])
+        conn.execute("""
+            INSERT INTO audit_log(user_id, entity_id, table_name, action, field, old_value, new_value)
+            VALUES(?,?,'relations','update',?,?,?)
+        """, (user["id"], rel["from_id"], field, str(old) if old else None, str(val)))
 
 @app.delete("/api/atelier/relations/{rel_id}")
-def delete_relation(rel_id: int = FPath(..., ge=1), user=Depends(require_au_moins("validator", "Supprimer une relation"))):
+def delete_relation(rel_id: int = FPath(..., ge=1),
+                    motif: Optional[str] = Query(None, max_length=500),
+                    user=Depends(require_au_moins("validator", "Supprimer une relation"))):
+    """Supprime le lien, le journalise entier, et — s'il vient d'un collecteur —
+    le refuse : la collecte suivante ne le recrée plus (cf. `relations_refusees`
+    dans le schéma). Un lien posé à l'atelier n'est pas refusé : aucune collecte
+    ne le réécrit, et le reposer reste un geste humain ordinaire."""
     conn = get_db_rw()
     try:
+        # Avant toute écriture : `executescript` valide la transaction en cours.
+        assurer_refus(conn)
         rel = row(conn, "SELECT * FROM relations WHERE id=?", (rel_id,))
         if not rel:
             raise HTTPException(404, "Relation introuvable")
+        motif = (motif or "").strip() or None
+        # Venu d'un collecteur = aucune création à l'atelier au journal (même
+        # critère que `_relation_d_autrui`). Un lien présumé a son circuit.
+        cree_a_l_atelier = row(conn, "SELECT 1 FROM audit_log WHERE table_name='relations' "
+                                     "AND action='create' AND field='relation_id' "
+                                     "AND new_value=?", (str(rel_id),))
+        a_refuser = not cree_a_l_atelier and rel["relation_type"] not in PRESUMES
+        # Le refus qui suit dure : la collecte ne réécrira plus ce lien. Sans
+        # motif, le validateur qui le relira (file « refus contredits ») ne
+        # saura pas pourquoi une source qui le redit a tort (décision de
+        # Julien, 15/11/2026, une fois l'écran capable de le demander).
+        if a_refuser and not motif:
+            raise HTTPException(400, "Ce lien vient d'un collecteur : le supprimer le "
+                                     "refuse pour les collectes suivantes. Dites pourquoi "
+                                     "(motif).")
+        # Le lien ENTIER, pas son seul identifiant : de quoi le rétablir à la main
+        # (les deux bouts, le type, les dates, la source, la fiabilité).
+        lien = json.dumps(
+            {k: rel.get(k) for k in ("id", "from_id", "to_id", "relation_type", "since",
+                                     "until", "source", "confidence", "metadata")},
+            ensure_ascii=False)
         conn.execute("""
-            INSERT INTO audit_log(user_id, entity_id, table_name, action, field, old_value)
-            VALUES(?,?,'relations','delete','relation_id',?)
-        """, (user["id"], rel["from_id"], str(rel_id)))
+            INSERT INTO audit_log(user_id, entity_id, table_name, action, field, old_value,
+                                  new_value)
+            VALUES(?,?,'relations','delete','relation_id',?,?)
+        """, (user["id"], rel["from_id"], lien, motif))
+        refus_id = None
+        if a_refuser:
+            deja = refus_de_relation(conn, rel["from_id"], rel["to_id"], rel["relation_type"])
+            if deja:
+                refus_id = deja["id"]
+            else:
+                refus_id = conn.execute("""
+                    INSERT INTO relations_refusees(from_id, to_id, relation_type, relation,
+                                                   motif, refuse_par)
+                    VALUES(?,?,?,?,?,?)
+                """, (rel["from_id"], rel["to_id"], rel["relation_type"], lien, motif,
+                      user["id"])).lastrowid
+                _journal(conn, user, rel["from_id"], "relations_refusees", "create",
+                         f"refus/{refus_id}", apres=json.dumps(
+                             {"relation": json.loads(lien), "motif": motif},
+                             ensure_ascii=False))
         conn.execute("DELETE FROM relations WHERE id=?", (rel_id,))
+        # Le même lien dit par une autre source reste en ligne : le rendre, pour
+        # que le validateur ne croie pas le lien retiré.
+        freres = rows(conn, "SELECT id, source, confidence FROM relations WHERE from_id=? "
+                            "AND to_id=? AND relation_type=? ORDER BY id",
+                      (rel["from_id"], rel["to_id"], rel["relation_type"]))
+        conn.commit()
+        return {"ok": True, "refus_id": refus_id,
+                "encore_presents": [r["id"] for r in freres],
+                # Par quelle source : l'écran le dit, sans quoi on croit le
+                # lien retiré alors qu'il reste en ligne.
+                "sources_restantes": freres}
+    finally:
+        conn.close()
+
+
+@app.get("/api/atelier/relations/refus")
+def lister_refus(entity_id: Optional[int] = Query(None, ge=1),
+                 user=Depends(require_au_moins("validator", "Lire les relations refusées"))):
+    """Les liens supprimés que la collecte ne recrée plus : qui, quand, pourquoi,
+    et combien de fois une source a tenté de les réécrire depuis."""
+    conn = get_db()
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
+                            " AND name='relations_refusees'").fetchone():
+            return {"refus": []}
+        filtre = "WHERE x.from_id = ? OR x.to_id = ?" if entity_id else ""
+        lignes = rows(conn, f"""
+            SELECT x.id, x.from_id, f.name AS from_name, x.to_id, t.name AS to_name,
+                   x.relation_type, x.relation, x.motif, u.email AS refuse_par,
+                   x.refuse_le, x.tentatives, x.derniere_tentative, x.derniere_source,
+                   r.email AS revu_par, x.revu_le
+            FROM relations_refusees x
+            JOIN entities f ON f.id = x.from_id
+            JOIN entities t ON t.id = x.to_id
+            LEFT JOIN users u ON u.id = x.refuse_par
+            LEFT JOIN users r ON r.id = x.revu_par
+            {filtre}
+            ORDER BY x.refuse_le DESC, x.id DESC
+        """, (entity_id, entity_id) if entity_id else ())
+        for ligne in lignes:
+            try:
+                ligne["relation"] = json.loads(ligne["relation"])
+            except (TypeError, ValueError):
+                pass
+            ligne["sources"] = rows(conn, """
+                SELECT source, premiere, derniere, tentatives,
+                       premiere > COALESCE(?, '') AS nouvelle
+                FROM relations_refus_sources WHERE refus_id = ? ORDER BY premiere
+            """, (ligne["revu_le"], ligne["id"]))
+        return {"refus": lignes}
+    finally:
+        conn.close()
+
+
+@app.post("/api/atelier/relations/refus/{refus_id}/garder")
+def garder_refus(refus_id: int = FPath(..., ge=1),
+                 motif: Optional[str] = Query(None, max_length=500),
+                 user=Depends(require_au_moins("validator", "Garder le refus d'une relation"))):
+    """Le refus est revu et tient : les sources qui le redisent à ce jour sont
+    tenues pour vues, la file « refus-contredits » ne le montre plus tant
+    qu'aucune source nouvelle ne le redit. Un motif donné ici remplit celui
+    d'un refus qui n'en avait pas ; il ne remplace pas un motif existant."""
+    conn = get_db_rw()
+    try:
+        assurer_refus(conn)
+        refus = row(conn, "SELECT * FROM relations_refusees WHERE id=?", (refus_id,))
+        if not refus:
+            raise HTTPException(404, "Refus introuvable")
+        motif = (motif or "").strip() or None
+        nouveau_motif = refus["motif"] if (refus["motif"] or "").strip() else motif
+        conn.execute("UPDATE relations_refusees SET revu_par=?, motif=?,"
+                     " revu_le=strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id=?",
+                     (user["id"], nouveau_motif, refus_id))
+        apres = row(conn, "SELECT * FROM relations_refusees WHERE id=?", (refus_id,))
+        _journal(conn, user, refus["from_id"], "relations_refusees", "update",
+                 f"refus/{refus_id}", avant=json.dumps(refus, ensure_ascii=False),
+                 apres=json.dumps({"revu_le": apres["revu_le"], "motif": nouveau_motif,
+                                   "motif_de_la_revue": motif}, ensure_ascii=False))
+        conn.commit()
+        return {"ok": True, "revu_le": apres["revu_le"], "motif": nouveau_motif}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/atelier/relations/refus/{refus_id}")
+def lever_refus(refus_id: int = FPath(..., ge=1),
+                motif: Optional[str] = Query(None, max_length=500),
+                user=Depends(require_au_moins("validator", "Lever le refus d'une relation"))):
+    """Lève le refus : la collecte suivante peut réécrire le lien. Rien n'est
+    recréé ici — le lien revient par sa source, ou ne revient pas."""
+    # Tenu ici, pas seulement à l'écran (avis de vigie-securite) : le refus
+    # avait un motif, le lever en demande un.
+    if not (motif or "").strip():
+        raise HTTPException(400, "Lever un refus demande de dire pourquoi (motif).")
+    conn = get_db_rw()
+    try:
+        assurer_refus(conn)
+        refus = row(conn, "SELECT * FROM relations_refusees WHERE id=?", (refus_id,))
+        if not refus:
+            raise HTTPException(404, "Refus introuvable")
+        _journal(conn, user, refus["from_id"], "relations_refusees", "delete",
+                 f"refus/{refus_id}", avant=json.dumps(refus, ensure_ascii=False),
+                 apres=(motif or "").strip() or None)
+        conn.execute("DELETE FROM relations_refusees WHERE id=?", (refus_id,))
         conn.commit()
         return {"ok": True}
     finally:
@@ -4373,6 +4985,10 @@ class DecisionProposition(BaseModel):
     #: dit. Refusé pour toute autre nature : celles-là portent déjà ce que le
     #: contributeur voulait écrire, et le corriger serait écrire à sa place.
     corrections: dict = {}
+    #: Ce que devient un SIGNALEMENT accepté (`ISSUES_SIGNALEMENT`) : écarter
+    #: la fiche, la marquer à revoir — les verdicts que le validateur pose
+    #: déjà —, ou, pour un doublon, « garder, fusion à faire ». Refusé ailleurs.
+    issue: Optional[str] = None
 
 
 def _valeurs_actuelles(conn, prop: dict) -> Optional[dict]:
@@ -4385,6 +5001,12 @@ def _valeurs_actuelles(conn, prop: dict) -> Optional[dict]:
         # avoir disparu, c'est l'acte d'où elle a été lue.
         # Retrouvé par sa clé datée s'il a été renuméroté depuis le dépôt.
         return {} if _marches_extraits.acte_de_proposition(conn, prop) else None
+    if prop["nature"] == "signalement":
+        # Un signalement ne remplace aucune valeur : ce qui compte, c'est que
+        # la fiche existe encore, et le verdict qu'elle porte aujourd'hui.
+        if not row(conn, "SELECT 1 AS ok FROM entities WHERE id=?", (prop["object_id"],)):
+            return None
+        return {"verdict": _verdict_de_fiche(conn, prop["object_id"])}
     if prop["nature"] == "fiche":
         ligne = row(conn, _FICHE_COURANTE, (prop["object_id"],))
     elif prop["nature"] == "coords":
@@ -4420,8 +5042,17 @@ def _acte_sous_les_yeux(conn, prop: dict) -> Optional[dict]:
 
 @app.get("/api/atelier/propositions")
 def atelier_propositions(etat: str = "en_attente", nature: Optional[str] = None,
+                         issue: Optional[str] = None,
+                         limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0),
                          user=Depends(require_auth)):
-    """La file des propositions. Un contributeur n'y voit que les siennes."""
+    """Une page de la file des propositions (`limit` ≤ 100, `total` dans la
+    réponse). Un contributeur n'y voit que les siennes.
+
+    `?etat=acceptee&issue=fusion_a_faire` : les fusions demandées, que
+    l'atelier ne fait pas lui-même (décision de Julien, 16/11/2026)."""
+    if issue is not None and issue not in _propositions.ISSUES_SIGNALEMENT:
+        raise HTTPException(400, "issue invalide — valeurs : "
+                                 + ", ".join(_propositions.ISSUES_SIGNALEMENT))
     if etat not in _propositions.ETATS:
         raise HTTPException(400, f"etat invalide — valeurs : {', '.join(_propositions.ETATS)}")
     if nature is not None and nature not in _propositions.NATURES:
@@ -4430,28 +5061,62 @@ def atelier_propositions(etat: str = "en_attente", nature: Optional[str] = None,
     try:
         _propositions.assurer_schema(conn)
         conn.commit()
+        auteur = None if au_moins(user, "validator") else user["id"]
+        total = _propositions.compter(conn, etat, auteur, nature=nature, issue=issue)
         lignes = _propositions.lister(
-            conn, etat, None if au_moins(user, "validator") else user["id"],
-            nature=nature)
+            conn, etat, auteur, limit=limit, offset=offset, nature=nature, issue=issue,
+            natures_lues=tuple(_EXTRAITS))
         for p in lignes:
             p["actuel"] = _valeurs_actuelles(conn, p) if etat == "en_attente" else None
+            if p["nature"] == "signalement" and (p["charge"] or {}).get("doublon_de"):
+                p["doublon"] = row(conn, "SELECT id, name, type FROM entities WHERE id=?",
+                                   (p["charge"]["doublon_de"],))
             if p["nature"] in _EXTRAITS:
                 p["acte"] = _acte_sous_les_yeux(conn, p)
                 # Calculés à la lecture, pas au dépôt : un marché accepté hier
                 # doit apparaître comme doublon possible de la ligne d'aujourd'hui.
                 if etat == "en_attente":
                     p["doublons"] = _EXTRAITS[p["nature"]].doublons(conn, p["charge"])
-        # Les propositions des contributeurs restent en tête, les plus anciennes
-        # d'abord : quelqu'un attend. Les marchés lus viennent ensuite, l'acte
-        # le plus récent d'abord (Julien, 07/10/2026) — un rapport couvre dix
-        # ans de procès-verbaux, et la file s'ouvrait sur 2016.
-        lus = [p for p in lignes if p["nature"] in _EXTRAITS]
-        lus.sort(key=lambda p: (p.get("acte") or {}).get("date") or "", reverse=True)
-        lignes = [p for p in lignes if p["nature"] not in _EXTRAITS] + lus
-        return {"propositions": lignes, "peut_trancher": au_moins(user, "validator"),
+        return {"propositions": lignes, "total": total, "offset": offset, "limit": limit,
+                "peut_trancher": au_moins(user, "validator"),
                 "corrigeables": {n: list(m.CORRIGEABLES) for n, m in _EXTRAITS.items()}}
     finally:
         conn.close()
+
+
+def _exiger_a_jour(conn, prop: dict, actuel: dict) -> None:
+    """409 si un champ visé a changé depuis que la proposition a été faite.
+
+    Une proposition porte ce que son auteur avait sous les yeux (`avant`).
+    L'accepter sans comparer écrasait une correction posée entre-temps par un
+    validateur, sans qu'aucun des deux le sache (audit du 15/11/2026). Le
+    validateur refuse alors la proposition en le disant, et l'auteur repropose
+    sur la fiche à jour.
+    """
+    def meme(a, b):
+        # Même règle que `_audit` et `_changements_fiche` : NULL et "" se
+        # valent, et 1000 vaut "1000" — sans quoi une valeur inchangée
+        # bloquerait l'acceptation.
+        return str("" if a is None else a) == str("" if b is None else b)
+
+    avant = prop.get("avant") or {}
+    champs = [{"champ": c, "avant": avant[c], "apres": actuel.get(c)}
+              for c in prop.get("charge") or {}
+              if c in avant and not meme(actuel.get(c), avant[c])]
+    if champs:
+        # L'auteur du CHAMP qui a changé, pas de la dernière écriture sur la
+        # fiche. Une relation n'a pas de journal par champ : on ne nomme
+        # personne plutôt que d'accuser à tort.
+        if prop["nature"] == "fiche":
+            par, le = _dernier_auteur(conn, prop["entity_id"], champs[0]["champ"])
+        elif prop["nature"] == "coords":
+            par, le = _dernier_auteur(conn, prop["entity_id"], "coords")
+        else:
+            par, le = None, None
+        raise _conflit("Ce que la proposition corrige a changé depuis qu'elle a été "
+                       "faite : elle ne peut plus être acceptée telle quelle. "
+                       "Refusez-la en le disant ; son auteur repartira de la "
+                       "fiche à jour.", par, le, champs=champs)
 
 
 @app.post("/api/atelier/propositions/{proposition_id}/decision")
@@ -4475,7 +5140,37 @@ def atelier_trancher_proposition(
                                      + (f" par {prop['tranche_par']}." if prop["tranche_par"] else "."))
         if req.corrections and not (req.accepter and prop["nature"] in _EXTRAITS):
             raise HTTPException(400, "Seule une ligne extraite se corrige en l'acceptant.")
+        if req.issue is not None and not (req.accepter and prop["nature"] == "signalement"):
+            raise HTTPException(400, "Seul un signalement accepté porte une issue.")
         motif = req.motif
+        issue = None
+        if req.accepter and prop["nature"] == "signalement":
+            issue = req.issue
+            if issue not in _propositions.ISSUES_SIGNALEMENT:
+                raise HTTPException(400, "Accepter un signalement, c'est écarter la fiche "
+                                         "(« ecarte »), la marquer à revoir (« a_revoir »), "
+                                         "ou, pour un doublon, la garder en demandant la "
+                                         "fusion (« fusion_a_faire ») : dire lequel.")
+            if not row(conn, "SELECT 1 AS ok FROM entities WHERE id=?", (prop["object_id"],)):
+                raise HTTPException(404, "La fiche visée n'existe plus.")
+            doublon_de = (prop["charge"] or {}).get("doublon_de")
+            if issue == _propositions.FUSION_A_FAIRE:
+                if prop["charge"].get("motif") != "doublon" or not doublon_de:
+                    raise HTTPException(400, "« Garder, fusion à faire » ne répond qu'à un "
+                                             "signalement de doublon.")
+                if not row(conn, "SELECT 1 AS ok FROM entities WHERE id=?", (doublon_de,)):
+                    raise HTTPException(409, "La fiche désignée comme doublon n'existe plus : "
+                                             "il n'y a rien à fusionner.")
+            # Même ordre que pour une correction : `_decider` tient sa propre
+            # transaction ; le verdict est posé d'abord, la proposition close
+            # ensuite. Le verdict déjà en place ne s'écrit pas deux fois. La
+            # fusion à faire, elle, ne touche pas la fiche.
+            elif _verdict_de_fiche(conn, prop["object_id"]) != issue:
+                _decider("entity", prop["object_id"],
+                         AnnotationUpdate(review_status=issue), user)
+            motif = ({"ecarte": "fiche écartée", "a_revoir": "fiche à revoir",
+                      "fusion_a_faire": f"fiche gardée, fusion à faire avec la fiche n° {doublon_de}"}[issue]
+                     + (f" — {req.motif.strip()}" if req.motif.strip() else ""))
         if req.accepter and prop["nature"] in _EXTRAITS:
             extraits = _EXTRAITS[prop["nature"]]
             if _valeurs_actuelles(conn, prop) is None:
@@ -4500,25 +5195,50 @@ def atelier_trancher_proposition(
             _decider(prop["object_type"], prop["object_id"],
                      AnnotationUpdate(corrections=prop["charge"]), user)
         conn.execute("BEGIN IMMEDIATE")
-        if req.accepter and prop["nature"] != "correction" and prop["nature"] not in _EXTRAITS:
+        if req.accepter and prop["nature"] not in ("correction", "signalement") \
+                and prop["nature"] not in _EXTRAITS:
             oid, charge = prop["object_id"], prop["charge"]
             if prop["nature"] == "fiche":
                 current = row(conn, _FICHE_COURANTE, (oid,))
                 if not current:
                     raise HTTPException(404, "La fiche visée n'existe plus.")
-                _ecrire_fiche(conn, oid, _changements_fiche(current, charge, user), user)
+                _exiger_a_jour(conn, prop, current)
+                # Le motif du validateur qui accepte vaut motif du changement :
+                # une fiche reclassée institutionnelle depuis la proposition
+                # l'exige, et le refus du motif (400) laisse la proposition.
+                _ecrire_fiche(conn, oid,
+                              _changements_fiche(current, charge, user, motif=req.motif),
+                              user, motif=req.motif)
             elif prop["nature"] == "coords":
                 old = row(conn, "SELECT lat, lng FROM entities WHERE id=?", (oid,))
                 if not old:
                     raise HTTPException(404, "La fiche visée n'existe plus.")
+                _exiger_a_jour(conn, prop, old)
                 _ecrire_coords(conn, oid, charge["lat"], charge["lng"], old, user)
             else:
                 rel = row(conn, "SELECT * FROM relations WHERE id=?", (oid,))
                 if not rel:
                     raise HTTPException(404, "La relation visée n'existe plus.")
+                _exiger_a_jour(conn, prop, rel)
+                # Refusé depuis la proposition : le dire, plutôt que de
+                # journaliser un changement que le déclencheur avalerait.
+                if charge.get("relation_type") and refus_de_relation(
+                        conn, rel["from_id"], rel["to_id"], charge["relation_type"]):
+                    raise HTTPException(409, "Ce type de lien entre ces deux fiches a été "
+                                             "refusé par un validateur depuis la proposition.")
                 _ecrire_relation(conn, rel, charge, user)
         _propositions.clore(conn, proposition_id, "acceptee" if req.accepter else "refusee",
                             user, motif)
+        if issue:
+            conn.execute("UPDATE propositions SET issue=? WHERE id=?", (issue, proposition_id))
+        if issue == _propositions.FUSION_A_FAIRE:
+            # Au journal des DEUX fiches : la fusion demandée se lit dans
+            # l'historique de l'une comme de l'autre.
+            demande = json.dumps({"fiche": prop["object_id"], "doublon_de": doublon_de,
+                                  "proposition": proposition_id}, ensure_ascii=False)
+            for eid in (prop["object_id"], doublon_de):
+                _journal(conn, user, eid, "propositions", _propositions.FUSION_A_FAIRE,
+                         f"proposition/{proposition_id}", apres=demande)
         conn.commit()
         return _propositions.lire(conn, proposition_id)
     finally:
@@ -4617,9 +5337,79 @@ def atelier_retirer_proposition(proposition_id: int = FPath(..., ge=1),
         conn.close()
 
 
+def _verdict_de_fiche(conn, entity_id: int) -> str:
+    a = row(conn, "SELECT review_status FROM annotations WHERE object_type='entity' "
+                  "AND object_id=?", (entity_id,))
+    return (verdict_de(a["review_status"]) if a else None) or JAMAIS_RELU
+
+
+class SignalementFiche(BaseModel):
+    motif: str
+    doublon_de: Optional[int] = None
+    texte: str = Field("", max_length=500)
+
+
+@app.post("/api/atelier/entities/{entity_id}/signalement", status_code=202)
+def atelier_signaler_fiche(entity_id: int = FPath(..., ge=1),
+                           req: SignalementFiche = ...,
+                           user=Depends(require_auth)):
+    """Demande de retirer une fiche, de la fusionner avec un doublon, ou de la
+    revoir. Ouvert à tout compte, et toujours une PROPOSITION : la fiche ne
+    bouge pas tant qu'un validateur n'a pas tranché (décision de Julien,
+    15/11/2026, cf. `collectors/propositions.py`).
+
+    Deux onglets, un même auteur, une même fiche : le second signalement
+    reprend le premier (règle de #278). Chaque signalement porte toutes ses
+    clés, `doublon_de` comprise : la reprise vaut donc remplacement, et un
+    « doublon » corrigé en « à retirer » ne garde pas l'ancienne fiche visée."""
+    if req.motif not in _propositions.MOTIFS_SIGNALEMENT:
+        raise HTTPException(400, "motif invalide — valeurs : "
+                                 + ", ".join(_propositions.MOTIFS_SIGNALEMENT))
+    texte = " ".join((req.texte or "").split())
+    doublon_de = req.doublon_de if req.motif == "doublon" else None
+    if req.motif == "doublon":
+        if not doublon_de:
+            raise HTTPException(400, "Un doublon se signale avec l'autre fiche : la "
+                                     "choisir dans la recherche.")
+        if doublon_de == entity_id:
+            raise HTTPException(400, "Une fiche n'est pas le doublon d'elle-même.")
+    conn = get_db_rw()
+    try:
+        if not row(conn, "SELECT 1 AS ok FROM entities WHERE id=?", (entity_id,)):
+            raise HTTPException(404, "Entité introuvable")
+        if doublon_de and not row(conn, "SELECT 1 AS ok FROM entities WHERE id=?",
+                                  (doublon_de,)):
+            raise HTTPException(404, "La fiche désignée comme doublon est introuvable.")
+        _propositions.assurer_schema(conn)
+        conn.commit()
+        # Un plafond par auteur (avis de vigie-securite) : la file se lit par
+        # pages de 200, et un seul compte pouvait en pousser dehors les
+        # propositions des autres. Remplacer son signalement sur la même fiche
+        # ne compte pas.
+        en_attente = row(conn, "SELECT COUNT(*) AS n FROM propositions WHERE "
+                               "etat='en_attente' AND nature='signalement' AND "
+                               "propose_par=? AND object_id<>?", (user["id"], entity_id))["n"]
+        if en_attente >= _propositions.PLAFOND_SIGNALEMENTS:
+            raise HTTPException(409, f"Vous avez déjà {en_attente} signalements qui attendent "
+                                     "un validateur. Attendez qu'ils soient relus avant "
+                                     "d'en envoyer d'autres.")
+        pid, reprises = _propositions.proposer(
+            conn, "signalement", "entity", entity_id, entity_id,
+            {"motif": req.motif, "doublon_de": doublon_de, "texte": texte},
+            {"verdict": _verdict_de_fiche(conn, entity_id)}, user, rendre_reprises=True)
+        conn.commit()
+    finally:
+        conn.close()
+    message = ("Signalement envoyé. Un validateur le lira dans la file des propositions "
+               "et décidera ; la fiche ne change pas d'ici là.")
+    if reprises:
+        message += " Il remplace votre signalement précédent sur cette fiche."
+    return {"ok": True, "proposition": pid, "reprend": reprises, "message": message}
+
+
 # ─── /api/budget-annexe (public) ──────────────────────────────────────────────
 
-@app.get("/api/budget-annexe")
+@app.get("/api/budget-annexe", dependencies=[Depends(require_auth)])
 def budget_annexe_list(entity_id: Optional[int] = None, year: Optional[int] = None):
     conn = get_db()
     try:
@@ -4772,7 +5562,9 @@ def _ecrire_coords(conn, entity_id: int, lat: float, lng: float, old: dict, user
 class NoteCreate(BaseModel):
     note:       str
     source:     str = "manual"
-    confidence: str = "verified"
+    # Sans valeur : `verified` pour un validateur, `probable` pour un
+    # contributeur, qui ne pose pas de fiabilité publiable (audit du 15/11/2026).
+    confidence: Optional[str] = None
     date:       Optional[str] = None
 
 class NoteUpdate(BaseModel):
@@ -4796,15 +5588,22 @@ def create_note(entity_id: int = FPath(..., ge=1), req: NoteCreate = ..., user=D
             raise HTTPException(404, "Entité introuvable")
         if _notes_reservees(fiche, user):
             exiger(user, "validator", _NOTE_SUR_PERSONNE)
+        tranche = au_moins(user, "validator")
+        confiance = req.confidence or ("verified" if tranche else "probable")
+        if confiance in ("verified", "confirmed") and not tranche:
+            exiger(user, "validator", "Poser la fiabilité d'une note")
         date = req.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
         cur = conn.execute(
             "INSERT INTO entity_notes (entity_id, date, note, source, confidence)"
             " VALUES (?,?,?,?,?)",
-            (entity_id, date, req.note.strip(), req.source, req.confidence)
+            (entity_id, date, req.note.strip(), req.source, confiance)
         )
+        # L'auteur d'une note n'avait pas de trace : il en faut une pour savoir
+        # à qui elle est (cf. `update_note`).
+        _journal(conn, user, entity_id, "entity_notes", "create", f"note/{cur.lastrowid}")
         conn.commit()
         return {"id": cur.lastrowid, "entity_id": entity_id, "date": date,
-                "note": req.note.strip(), "source": req.source, "confidence": req.confidence}
+                "note": req.note.strip(), "source": req.source, "confidence": confiance}
     finally:
         conn.close()
 
@@ -4818,6 +5617,18 @@ def update_note(note_id: int = FPath(..., ge=1), req: NoteUpdate = ..., user=Dep
         if _notes_reservees(row(conn, "SELECT type FROM entities WHERE id=?",
                                 (existing["entity_id"],)), user):
             exiger(user, "validator", _NOTE_SUR_PERSONNE)
+        if not au_moins(user, "validator"):
+            # Un contributeur réécrivait la note d'un autre, et la passait en
+            # `verified` (audit du 15/11/2026).
+            auteur = conn.execute(
+                "SELECT user_id FROM audit_log WHERE table_name='entity_notes' "
+                "AND action='create' AND field=? ORDER BY id LIMIT 1",
+                (f"note/{note_id}",)).fetchone()
+            if not auteur or auteur[0] != user["id"]:
+                exiger(user, "validator", "Modifier la note d'un autre compte")
+            if req.confidence in ("verified", "confirmed") \
+                    and req.confidence != existing.get("confidence"):
+                exiger(user, "validator", "Poser la fiabilité d'une note")
         updates, vals = [], []
         if req.note is not None:
             updates.append("note=?"); vals.append(req.note.strip())
@@ -4828,6 +5639,9 @@ def update_note(note_id: int = FPath(..., ge=1), req: NoteUpdate = ..., user=Dep
         if updates:
             vals.append(note_id)
             conn.execute(f"UPDATE entity_notes SET {','.join(updates)} WHERE id=?", vals)
+            _journal(conn, user, existing["entity_id"], "entity_notes", "update",
+                     f"note/{note_id}", avant=existing["note"],
+                     apres=req.note.strip() if req.note is not None else None)
             conn.commit()
         return row(conn, "SELECT id, date, note, source, confidence FROM entity_notes WHERE id=?", (note_id,))
     finally:
@@ -4874,6 +5688,8 @@ def add_website(entity_id: int = FPath(..., ge=1), req: WebsiteAdd = ..., user=D
             " VALUES (?,?,?,?,?)",
             (entity_id, req.url.strip(), statut, req.score, req.found_by)
         )
+        _journal(conn, user, entity_id, "entity_websites", "create",
+                 f"site {req.url.strip()}", apres=statut)
         conn.commit()
         return row(conn, "SELECT * FROM entity_websites WHERE entity_id=? AND url=?",
                    (entity_id, req.url.strip()))
@@ -5040,10 +5856,11 @@ import requests as _requests
 # `127.0.0.1` et non `localhost` : Ollama n'écoute qu'en IPv4, et sur macOS
 # `localhost` résout d'abord en IPv6 — la requête part vers `::1` où rien
 # n'écoute. Même piège que le proxy de l'atelier (cf. dashboard/vite.config.js).
-_OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+from collectors import index_sens as _index_sens
+_OLLAMA_URL   = _index_sens.OLLAMA_URL
 _OLLAMA_EMBED = f"{_OLLAMA_URL}/api/embeddings"
 _OLLAMA_CHAT  = f"{_OLLAMA_URL}/api/chat"
-_EMBED_MODEL  = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+_EMBED_MODEL  = _index_sens.MODELE
 _CHAT_MODEL   = os.environ.get("OLLAMA_CHAT_MODEL", "gemma3:4b")
 
 
@@ -5063,10 +5880,16 @@ def rag_config(user=Depends(require_auth)):
         conn.close()
     return {
         "enabled": RAG_ENABLED,
+        # « Faire résumer » ne s'affiche que si la génération est ouverte.
+        "ask_enabled": _ask_ouvert(),
         "embed_model": _EMBED_MODEL,
         "chat_model": _CHAT_MODEL,
         "chunks": chunks,
     }
+
+
+def _ask_ouvert() -> bool:
+    return RAG_ENABLED and RAG_ASK_ENABLED
 
 
 # ─── Brancher une IA depuis l'atelier (admin) ────────────────────────────────
@@ -5190,8 +6013,26 @@ def _embed(text: str) -> np.ndarray:
     return np.array(r.json()["embedding"], dtype=np.float32)
 
 
+def _modele_incompatible(conn) -> Optional[str]:
+    """Pourquoi l'index ne peut pas être interrogé avec le modèle que sert
+    Ollama ; `None` s'il le peut. Lève si Ollama ne répond pas."""
+    emp = _index_sens.empreinte(_requests, _OLLAMA_URL, _EMBED_MODEL)
+    try:
+        return _index_sens.incompatibilite(conn, _EMBED_MODEL, emp)
+    except sqlite3.OperationalError:
+        # Base que ni une passe ni l'indexeur n'ont encore migrée : ses
+        # vecteurs ne disent pas de quel modèle ils viennent.
+        n = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+        if not n:
+            return None
+        return (f"{n} extraits de l'index ne disent pas quel modèle les a calculés "
+                "(index antérieur au 07/11/2026). Reconstruire l'index : "
+                "`python3 scripts/build_rag_index.py --reset`.")
+
+
 @app.get("/api/rag/search")
-def rag_search(q: str, limit: int = 8, user=Depends(require_auth)):
+def rag_search(q: str = Query(..., max_length=2000), limit: int = Query(8, ge=1, le=50),
+               user=Depends(require_auth)):
     """Recherche sémantique dans l'index (pas de génération). LOCAL UNIQUEMENT.
 
     Ce qu'elle apporte, et qu'aucune recherche plein texte ne peut donner :
@@ -5204,19 +6045,41 @@ def rag_search(q: str, limit: int = 8, user=Depends(require_auth)):
     index approximatif. Mesuré le 15/08/2026 sur 18 176 chunks : 0,10 s de
     lecture et 0,03 s de calcul. À l'échelle d'une commune, la simplicité vaut
     mieux qu'une structure d'index à tenir à jour.
+
+    Refusée (409) si l'index a été construit par un autre modèle que celui que
+    sert Ollama : la comparaison rendrait des voisins au hasard, avec des
+    scores plausibles (`collectors/index_sens.py`).
     """
     if not RAG_ENABLED:
         raise HTTPException(503, "RAG désactivé sur cet atelier (RAG_ENABLED=0). "
                                  "Interroger localement avec Ollama.")
     try:
-        q_vec = _embed(q)
-    except Exception as e:
-        raise HTTPException(503, f"Ollama indisponible : {e}")
+        limit = min(max(int(limit), 1), 50)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "limit : un entier de 1 à 50")
 
     conn = get_db()
     try:
+        try:
+            raison = _modele_incompatible(conn)
+        except Exception:                               # noqa: BLE001
+            # Pas le texte de l'exception : il porte l'adresse et la réponse du serveur.
+            raise HTTPException(503, "Le modèle d'embeddings ne répond pas sur cette machine.")
+        if raison:
+            raise HTTPException(409, raison)
+        try:
+            q_vec = _embed(q)
+        except Exception:                               # noqa: BLE001
+            raise HTTPException(503, "Le modèle d'embeddings ne répond pas sur cette machine.")
+        # Les notes sur une personne physique sont réservées au validateur dans
+        # la fiche (`_notes_reservees`) : l'index les porte en clair, il ne
+        # doit pas les rendre à qui la fiche les cache (audit du 15/11/2026).
+        reserve = "" if au_moins(user, "validator") else (
+            " WHERE NOT (source_table = 'entity_notes' AND entity_id IN"
+            " (SELECT id FROM entities WHERE type = 'person'))")
         db_rows = conn.execute(
             "SELECT source_table, source_id, entity_id, chunk_text, vector FROM embeddings"
+            + reserve
         ).fetchall()
     finally:
         conn.close()
@@ -5247,12 +6110,22 @@ def rag_search(q: str, limit: int = 8, user=Depends(require_auth)):
 
 @app.post("/api/rag/ask")
 def rag_ask(body: dict = Body(...), user=Depends(require_auth)):
-    """Recherche + génération (Gemma 4 via Ollama). LOCAL UNIQUEMENT. body: {question, limit?}"""
-    if not RAG_ENABLED:
-        raise HTTPException(503, "RAG désactivé sur cet atelier (RAG_ENABLED=0). "
-                                 "Interroger localement avec Ollama.")
+    """Recherche + génération (via Ollama). LOCAL UNIQUEMENT. body: {question, limit?}
+
+    Fermée tant que `RAG_ASK_ENABLED=1` n'est pas posé dans `.env`, même quand
+    la recherche est ouverte : un serveur peut n'avoir que le modèle
+    d'embeddings. Un administrateur ne l'ouvre pas depuis l'atelier."""
+    if not _ask_ouvert():
+        raise HTTPException(503, "La génération de réponse est fermée sur cet atelier "
+                                 "(RAG_ASK_ENABLED=0) ; la recherche par sens, elle, "
+                                 "reste disponible si elle est active.")
     question = body.get("question", "").strip()
-    limit     = int(body.get("limit", 6))
+    # Borné : chaque extrait part dans le prompt, et `limit` venait tel quel
+    # du client (audit du 06/11/2026).
+    try:
+        limit = min(max(int(body.get("limit", 6)), 1), 20)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "limit : un entier de 1 à 20")
     if not question:
         raise HTTPException(400, "question vide")
 
@@ -5447,7 +6320,8 @@ def geo_review(limit: int = Query(150, ge=1, le=500), user=Depends(require_auth)
                    CASE WHEN {GEO_A_FAIRE} THEN 1 ELSE 0 END AS a_faire,
                    ( (SELECT COUNT(*) FROM financial_flows f WHERE f.from_id=e.id OR f.to_id=e.id)*3
                    + (SELECT COUNT(*) FROM marches_publics m WHERE m.titulaire_id=e.id OR m.acheteur_id=e.id)*3
-                   + MIN((SELECT COUNT(*) FROM relations r WHERE r.from_id=e.id OR r.to_id=e.id),12)
+                   + MIN((SELECT COUNT(*) FROM relations r WHERE (r.from_id=e.id OR r.to_id=e.id)
+                          {"" if au_moins(user, "validator") else _SANS_PRESUMES}),12)
                    + CASE WHEN e.type='service' THEN 2 ELSE 0 END ) AS expo
             {GEO_DEPUIS}
             ORDER BY a_faire DESC, expo DESC
@@ -5467,7 +6341,9 @@ def geo_review(limit: int = Query(150, ge=1, le=500), user=Depends(require_auth)
 
 # ─── /api/atelier/ia — sync IA local → atelier hébergé ───────────────────────
 # Le batch local (Mac) génère synthèses + embeddings, puis les pousse via ces endpoints.
-# Le RAG live (/api/rag/*) reste local uniquement — ne pas exposer sur le VPS.
+# La recherche (/api/rag/search) s'ouvre sur un serveur qui porte son propre
+# Ollama, sur la boucle locale ; la génération (/api/rag/ask) reste fermée
+# tant que RAG_ASK_ENABLED=1 n'est pas posé.
 
 @app.get("/api/atelier/ia/pending")
 def ia_pending(
@@ -5489,7 +6365,7 @@ def ia_pending(
                    p.firstname, p.lastname,
                    s.category AS service_category,
                    (SELECT COUNT(*) FROM relations r
-                    WHERE r.from_id = e.id OR r.to_id = e.id) AS nb_relations,
+                    WHERE (r.from_id = e.id OR r.to_id = e.id){reserve}) AS nb_relations,
                    (SELECT COUNT(*) FROM entity_notes n WHERE n.entity_id = e.id) AS nb_notes
             FROM entities e
             LEFT JOIN businesses   b ON b.entity_id = e.id
@@ -5499,7 +6375,7 @@ def ia_pending(
             WHERE e.confidence IN ('verified','confirmed')
             ORDER BY nb_relations DESC, nb_notes DESC
             LIMIT ?
-        """, (limit,))
+        """.format(reserve="" if au_moins(user, "validator") else _SANS_PRESUMES), (limit,))
 
         # Filtrer ceux qui n'ont pas encore de synthèse sur disque
         existing_ids = set()
@@ -5556,13 +6432,20 @@ class EmbeddingItem(BaseModel):
     source_table: str
     source_id:    int
     entity_id:    Optional[int] = None
-    chunk_text:   str
-    vector:       list[float]   # vecteur float32 (768 dim nomic-embed-text)
+    chunk_text:   str = Field(max_length=20_000)
+    # Vecteur float32 (768 dimensions pour nomic-embed-text), fini : un NaN ou
+    # un infini rendrait tous les scores illisibles.
+    vector:       list[float] = Field(min_length=64, max_length=4096)
+    model_config = {"allow_inf_nan": False}
+    # Le modèle qui a calculé le vecteur, et son empreinte Ollama : sans eux,
+    # la recherche refuse l'index (collectors/index_sens.py).
+    modele:           str = Field(pattern=r"^[\w.:/-]{1,80}$")
+    modele_empreinte: str = Field(pattern=r"^[0-9a-f]{12}$")
 
 
 @app.post("/api/atelier/ia/embeddings")
 def push_embeddings(
-    items: list[EmbeddingItem],
+    items: list[EmbeddingItem] = Body(..., max_length=500),
     user=Depends(require_au_moins("validator", "Déposer l'index de recherche")),
 ):
     """
@@ -5573,6 +6456,13 @@ def push_embeddings(
     conn = get_db_rw()
     saved, skipped = 0, 0
     try:
+        # Une seule dimension par index : un vecteur d'une autre taille ferait
+        # tomber toutes les recherches (revue vigie-securite du 07/11, E).
+        en_place = conn.execute("SELECT LENGTH(vector) FROM embeddings LIMIT 1").fetchone()
+        tailles = {len(i.vector) * 4 for i in items} | ({en_place[0]} if en_place else set())
+        if len(tailles) > 1:
+            raise HTTPException(400, "Vecteurs de dimensions différentes : "
+                                     f"{sorted(t // 4 for t in tailles)}.")
         for item in items:
             if not item.vector or not item.chunk_text:
                 skipped += 1
@@ -5580,14 +6470,17 @@ def push_embeddings(
             # Sérialiser le vecteur float32 en bytes (compatible numpy.frombuffer)
             vec_bytes = struct.pack(f"{len(item.vector)}f", *item.vector)
             conn.execute("""
-                INSERT INTO embeddings (source_table, source_id, entity_id, chunk_text, vector)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO embeddings (source_table, source_id, entity_id, chunk_text, vector,
+                                        modele, modele_empreinte)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_table, source_id)
                 DO UPDATE SET chunk_text=excluded.chunk_text,
                               vector=excluded.vector,
+                              modele=excluded.modele,
+                              modele_empreinte=excluded.modele_empreinte,
                               created_at=datetime('now')
             """, (item.source_table, item.source_id, item.entity_id,
-                  item.chunk_text, vec_bytes))
+                  item.chunk_text, vec_bytes, item.modele, item.modele_empreinte))
             saved += 1
         conn.commit()
     finally:

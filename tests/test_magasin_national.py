@@ -4,6 +4,7 @@ from __future__ import annotations
 import gzip
 import io
 import json
+import shutil
 from datetime import date
 
 import pytest
@@ -244,6 +245,7 @@ def test_les_deux_formes_de_consolide_sont_lues(tmp_path, monkeypatch, contenu, 
     (cache / "decp.json").write_bytes(contenu)
     monkeypatch.setattr(marches, "DECP_CACHE", cache)
     monkeypatch.setattr(marches, "COMMUNE_SIREN", "213001407")
+    monkeypatch.setattr(marches, "COMMUNE_SIRENS", ["213001407"])
     monkeypatch.setattr(marches, "CAC_SIREN", "200070316")
     monkeypatch.setattr(marches, "ACHETEUR_JETONS", ())
 
@@ -264,6 +266,7 @@ def test_les_montants_restent_des_nombres_ordinaires(tmp_path, monkeypatch):
     (cache / "decp.json").write_bytes(CONSOLIDE_TABLEAU)
     monkeypatch.setattr(marches, "DECP_CACHE", cache)
     monkeypatch.setattr(marches, "COMMUNE_SIREN", "213001407")
+    monkeypatch.setattr(marches, "COMMUNE_SIRENS", ["213001407"])
     monkeypatch.setattr(marches, "CAC_SIREN", "200070316")
     monkeypatch.setattr(marches, "ACHETEUR_JETONS", ())
 
@@ -304,6 +307,7 @@ def test_la_memoire_ne_suit_pas_la_taille_du_fichier(tmp_path, monkeypatch):
 
     monkeypatch.setattr(marches, "DECP_CACHE", cache)
     monkeypatch.setattr(marches, "COMMUNE_SIREN", "213001407")
+    monkeypatch.setattr(marches, "COMMUNE_SIRENS", ["213001407"])
     monkeypatch.setattr(marches, "CAC_SIREN", "200070316")
     monkeypatch.setattr(marches, "ACHETEUR_JETONS", ())
 
@@ -378,6 +382,7 @@ def test_un_consolide_illisible_n_est_pas_un_consolide_vide(tmp_path, monkeypatc
     monkeypatch.setattr(marches, "DECP_CACHE", cache)
     monkeypatch.setattr(marches, "_echecs_reseau", [])
     monkeypatch.setattr(marches, "COMMUNE_SIREN", "213001407")
+    monkeypatch.setattr(marches, "COMMUNE_SIRENS", ["213001407"])
     monkeypatch.setattr(marches, "CAC_SIREN", "200070316")
     monkeypatch.setattr(marches, "ACHETEUR_JETONS", ())
 
@@ -386,3 +391,249 @@ def test_un_consolide_illisible_n_est_pas_un_consolide_vide(tmp_path, monkeypatc
     assert not fichier.exists(), "resté au magasin, il serait relu sept jours"
     with pytest.raises(RuntimeError):
         marches._relever_echecs_reseau()
+
+
+# ── Un magasin sticky : on n'y remplace que ce qui est à soi ─────────────────
+#
+# Sur le serveur, `durcir.sh` du portail pose le sticky bit sur les dossiers du
+# magasin, partagé entre `vigie` (portail) et les comptes des ateliers. La sonde
+# d'écriture y passe, puis le renommage sur le fichier de l'autre compte échoue
+# (EPERM) : DECP retéléchargeait trois fois, LOVAC et FINESS relisaient l'ancienne
+# copie en la disant déposée.
+
+
+@pytest.fixture
+def dossier_sticky(tmp_path, monkeypatch):
+    """Un dossier sticky dont le fichier appartient à « un autre compte » —
+    simulé en changeant l'identité que voit le code, faute de root pour chown."""
+    import os
+    from collectors import national_store
+
+    dossier = tmp_path / "magasin"
+    dossier.mkdir()
+    dossier.chmod(0o1775)
+    (dossier / "a-l-autre.csv").write_bytes(b"ancien")
+    autre = os.geteuid() + 1
+    monkeypatch.setattr(national_store.os, "geteuid", lambda: autre)
+    return dossier
+
+
+def test_la_sonde_voit_un_fichier_d_un_autre_compte_en_dossier_sticky(dossier_sticky):
+    from collectors.national_store import magasin_ecrivable
+
+    assert magasin_ecrivable(dossier_sticky), "le dossier accepte un fichier neuf"
+    assert magasin_ecrivable(dossier_sticky, "absent.csv")
+    assert not magasin_ecrivable(dossier_sticky, "a-l-autre.csv")
+    dossier_sticky.chmod(0o775)
+    assert magasin_ecrivable(dossier_sticky, "a-l-autre.csv"), "sans sticky, le groupe remplace"
+
+
+@pytest.mark.parametrize("module", ["lovac", "sante"])
+def test_un_magasin_qui_refuse_ne_fait_pas_relire_l_ancienne_copie(module, tmp_path, monkeypatch):
+    """Au-delà de deux fois sa validité, la copie de l'autre compte n'est plus
+    relue : relire l'ancienne en la disant déposée publiait un millésime périmé."""
+    import importlib
+    import os
+    import time
+
+    collecteur = importlib.import_module(f"collectors.{module}")
+    ancien = tmp_path / "magasin" / collecteur.FICHIER.name
+    ancien.parent.mkdir()
+    ancien.write_bytes(b"ancien")
+    vieux = time.time() - (2 * collecteur.CACHE_JOURS + 1) * 86400
+    os.utime(ancien, (vieux, vieux))
+    monkeypatch.setattr(collecteur, "CACHE", ancien.parent)
+    monkeypatch.setattr(collecteur, "FICHIER", ancien)
+    monkeypatch.setattr(collecteur, "est_frais", lambda *a: False)
+    monkeypatch.setattr(collecteur, "magasin_ecrivable", lambda *a: False)
+    monkeypatch.setattr(collecteur, "archive_fetch", lambda *a, **k: None)
+    monkeypatch.setattr(collecteur, "fetch_json", lambda *a, **k: {"resources": [
+        {"format": "csv", "title": "communes géolocalisées", "url": "https://example.test/f.csv"}]})
+
+    def urlopen(*a, **k):
+        reponse = ReponseFactice(b"neuf")
+        reponse.status = 200
+        return reponse
+
+    monkeypatch.setattr(collecteur.urllib.request, "urlopen", urlopen)
+    rendu = collecteur._telecharger()
+    chemin = rendu[1] if isinstance(rendu, tuple) else rendu
+    try:
+        assert chemin != ancien and chemin.read_bytes() == b"neuf"
+        assert ancien.read_bytes() == b"ancien", "le fichier de l'autre compte est laissé"
+    finally:
+        shutil.rmtree(chemin.parent, ignore_errors=True)
+
+
+def test_decp_refuse_une_url_du_catalogue_qui_n_est_pas_https(monkeypatch):
+    """Une ressource du catalogue en `file:` ferait copier un fichier local dans
+    le magasin, lu ensuite par toutes les instances."""
+    from collectors import marches_publics as marches
+
+    catalogue = {"resources": [
+        {"title": "decp-2025.json", "url": "https://static.data.gouv.fr/decp-2025.json"},
+        {"title": "decp-2024.json", "url": "file:///etc/vigie/decp-2024.json"},
+        {"title": "decp-2023.json", "url": "http://exemple.fr/decp-2023.json"},
+    ]}
+    monkeypatch.setattr(marches, "fetch_json", lambda url, timeout=30: catalogue)
+    monkeypatch.setattr(marches, "_echecs_reseau", [])
+    ressources = marches.discover_decp_resources()
+    assert [r["title"] for r in ressources] == ["decp-2025.json"]
+    assert len(marches._echecs_reseau) == 2
+    with pytest.raises(RuntimeError):
+        marches._relever_echecs_reseau()
+
+
+@pytest.mark.parametrize("module", ["lovac", "sante"])
+def test_un_lecteur_lit_le_perime_borne_et_le_declare(module, tmp_path, monkeypatch):
+    """Le magasin n'a qu'un écrivain : quand son passage a du retard, le lecteur
+    lit le fichier périmé de moins de deux fois sa validité, sans réseau, et le
+    rapport du step le dit."""
+    import importlib
+    import os
+    import time
+    from collectors import national_store
+
+    collecteur = importlib.import_module(f"collectors.{module}")
+    ancien = tmp_path / "magasin" / collecteur.FICHIER.name
+    ancien.parent.mkdir()
+    ancien.write_bytes(b"ancien")
+    vieux = time.time() - (collecteur.CACHE_JOURS + 1) * 86400
+    os.utime(ancien, (vieux, vieux))
+    monkeypatch.setattr(collecteur, "CACHE", ancien.parent)
+    monkeypatch.setattr(collecteur, "FICHIER", ancien)
+    monkeypatch.setattr(collecteur, "magasin_ecrivable", lambda *a: False)
+    monkeypatch.setattr(collecteur, "archive_fetch", lambda *a, **k: None)
+    monkeypatch.setattr(collecteur, "fetch_json", lambda *a, **k: {"resources": [
+        {"format": "csv", "title": "communes géolocalisées", "url": "https://example.test/f.csv"}]})
+    monkeypatch.setattr(collecteur.urllib.request, "urlopen",
+                        lambda *a, **k: pytest.fail("aucun téléchargement attendu"))
+    monkeypatch.setattr(national_store, "perimes_lus", [])
+    rendu = collecteur._telecharger()
+    chemin = rendu[1] if isinstance(rendu, tuple) else rendu
+    assert chemin == ancien
+    assert len(national_store.perimes_lus) == 1 and ancien.name in national_store.perimes_lus[0]
+
+
+def test_le_facteur_un_refuse_tout_perime(tmp_path, monkeypatch):
+    import os
+    import time
+    from collectors import national_store
+    from collectors.national_store import perime_lisible
+
+    monkeypatch.setattr(national_store, "perimes_lus", [])
+
+    fichier = tmp_path / "restrictions.zip"
+    fichier.write_bytes(b"x")
+    vieux = time.time() - 1.5 * 86400
+    os.utime(fichier, (vieux, vieux))
+    assert perime_lisible(fichier, 1, facteur=2)
+    assert not perime_lisible(fichier, 1, facteur=1)
+    assert not perime_lisible(fichier, None)
+
+
+def test_un_json_tronque_n_entre_pas_au_magasin(tmp_path):
+    from collectors.national_store import (ContenuInvalide, copier_atomiquement,
+                                           ecrire_atomiquement)
+
+    cible = tmp_path / "decp-2025.json"
+    with pytest.raises(ContenuInvalide):
+        copier_atomiquement(cible, io.BytesIO(b'{"marches": [{"id": 1}, '))
+    assert not cible.exists()
+    assert not ecrire_atomiquement(cible, b'{"a": ')
+    assert not cible.exists()
+    assert ecrire_atomiquement(cible, b'{"a": 1}')
+    assert not list(tmp_path.glob(".*.part"))
+
+
+def test_un_gz_ou_un_zip_corrompu_n_entre_pas_au_magasin(tmp_path):
+    import zipfile
+    from collectors.national_store import ContenuInvalide, copier_atomiquement
+
+    with pytest.raises(ContenuInvalide):
+        copier_atomiquement(tmp_path / "dvf.csv.gz", io.BytesIO(gzip.compress(b"a" * 1000)[:-12]))
+    tampon = io.BytesIO()
+    with zipfile.ZipFile(tampon, "w") as archive:
+        archive.writestr("../hors.txt", "x")
+    with pytest.raises(ContenuInvalide):
+        copier_atomiquement(tmp_path / "piege.zip", io.BytesIO(tampon.getvalue()))
+    assert not (tmp_path / "dvf.csv.gz").exists() and not (tmp_path / "piege.zip").exists()
+
+
+def test_un_fichier_qui_a_fondu_ne_remplace_pas_le_precedent(tmp_path):
+    from collectors.national_store import ContenuInvalide, copier_atomiquement
+
+    cible = tmp_path / "base.csv"
+    cible.write_bytes(b"x" * (3 << 20))
+    with pytest.raises(ContenuInvalide):
+        copier_atomiquement(cible, io.BytesIO(b"x" * (1 << 20)))
+    assert cible.stat().st_size == 3 << 20
+    assert copier_atomiquement(cible, io.BytesIO(b"y" * (2 << 20)))
+
+
+def test_le_rapport_du_step_dit_les_perimes_lus(monkeypatch, capsys):
+    pytest.importorskip("pdfplumber", reason="job « tests-deps » : pip install -r requirements.txt")  # run_all tire collectors.conseils
+    from collectors import national_store, run_all
+
+    def collecteur():
+        national_store.perimes_lus.append("decp/decp-2025.json (9.0 j, validité 7 j)")
+
+    monkeypatch.setattr(national_store, "perimes_lus", [])
+    monkeypatch.setitem(run_all.STEPS, "essai_perime", ("essai", collecteur))
+    monkeypatch.setattr(run_all, "SANS_JOURNAL", set(run_all.SANS_JOURNAL) | {"essai_perime"})
+    run_all.run_step("essai_perime")
+    sortie = capsys.readouterr().out
+    assert "1 fichier(s) périmé(s) lu(s)" in sortie and "decp-2025.json" in sortie
+    assert national_store.perimes_lus == []
+
+
+def test_chez_l_ecrivain_un_refus_fait_echouer_le_step(tmp_path, monkeypatch):
+    """Un lecteur se passe du magasin qui refuse ; l'écrivain, non : sinon sa
+    passe sortait en 0 sans avoir rien rafraîchi."""
+    from collectors import national_store
+    from collectors.national_store import (ContenuInvalide, copier_atomiquement,
+                                           ecrire_atomiquement, magasin_ecrivable,
+                                           perime_lisible)
+
+    monkeypatch.setenv("VIGIE_ECRIVAIN_MAGASIN", "1")
+    with pytest.raises(ContenuInvalide):
+        ecrire_atomiquement(tmp_path / "a.json", b'{"a": ')
+    ferme = tmp_path / "ferme"
+    ferme.mkdir()
+    ferme.chmod(0o555)
+    try:
+        with pytest.raises(PermissionError):
+            magasin_ecrivable(ferme, "x.csv")
+        with pytest.raises(OSError):
+            copier_atomiquement(ferme / "x.csv", io.BytesIO(b"x"))
+    finally:
+        ferme.chmod(0o755)
+    vieux = tmp_path / "vieux.csv"
+    vieux.write_bytes(b"x")
+    monkeypatch.setattr(national_store, "perimes_lus", [])
+    assert not perime_lisible(vieux, 0.0001), "l'écrivain ne se contente pas d'un périmé"
+
+
+def test_un_retrecissement_accepte_a_la_main_passe(tmp_path, monkeypatch):
+    from collectors.national_store import copier_atomiquement
+
+    cible = tmp_path / "decp" / "decp-2024-09.json"
+    cible.parent.mkdir()
+    cible.write_bytes(b"[" + b"1," * (2 << 20) + b"1]")
+    neuf = b"[1,2,3]"
+    with pytest.raises(Exception):
+        copier_atomiquement(cible, io.BytesIO(neuf))
+    monkeypatch.setenv("VIGIE_ACCEPTER_RETRECISSEMENT", "decp/decp-2024-09.json")
+    assert copier_atomiquement(cible, io.BytesIO(neuf))
+    assert cible.read_bytes() == neuf
+
+
+def test_un_membre_de_zip_en_lecteur_windows_est_refuse(tmp_path):
+    import zipfile
+    from collectors.national_store import ContenuInvalide, copier_atomiquement
+
+    tampon = io.BytesIO()
+    with zipfile.ZipFile(tampon, "w") as archive:
+        archive.writestr("C:/Windows/x.txt", "x")
+    with pytest.raises(ContenuInvalide):
+        copier_atomiquement(tmp_path / "piege.zip", io.BytesIO(tampon.getvalue()))

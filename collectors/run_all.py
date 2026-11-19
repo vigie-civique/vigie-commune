@@ -43,6 +43,7 @@ from collectors.config        import (COMMUNE_NAME, COMMUNES, COMMUNES_INSEE,
                                       COMMUNES_INSEE_ADRESSE, DB_PATH, STEP_META,
                                       communes_du_step, cp_du_step,
                                       registre_du_step)
+from collectors               import mesure, national_store
 from collectors.db            import (init_db, get_conn, stats,
                                       log_run_start, log_run_end)
 from collectors.osm           import import_osm
@@ -68,6 +69,12 @@ from collectors.plu           import run as run_plu
 from collectors.equipements   import run as run_equipements
 from collectors.dpe           import run as run_dpe
 from collectors.lovac         import run as run_lovac
+from collectors.enaf          import run as run_enaf
+from collectors.vigieau       import run as run_vigieau
+from collectors.cantines      import run as run_cantines
+from collectors.odre          import run as run_odre
+from collectors.loyers        import run as run_loyers
+from collectors.rpls          import run as run_rpls
 from collectors.guichets      import run as run_guichets
 from collectors.mobilite      import run as run_mobilite
 from collectors.sante         import run as run_sante
@@ -89,6 +96,7 @@ from collectors.subventions_etat import run as run_subventions
 from collectors.dotations_investissement import run as run_dotations
 from collectors.subventions_ouvertes import run as run_subv_ouvertes
 from collectors.jaune_associations import run as run_jaune
+from collectors.fdva_resultats import run as run_fdva
 # main() de cm_finances lit sys.argv : appelé depuis ici, il tenterait de parser
 # les options de run_all. On prend la fonction qu'il enveloppe.
 from collectors.cm_finances    import run_subventions as _run_subv_cm
@@ -209,7 +217,7 @@ STEPS = {
     # périmètre : les étendre aux communes membres de l'intercommunalité
     # produisait un annuaire où la commune de collecte était minoritaire.
     #
-    # sirene et dvf sont ADRESSÉS : leur registre ajoute les communes déléguées
+    # sirene et dvf sont ADRESSÉS : leur registre ajoute les anciennes communes
     # — celles qu'une fusion a absorbées mais que les répertoires indexent
     # toujours sous leur ancien code INSEE. Les oublier fait disparaître des
     # établissements et des mutations d'un territoire.
@@ -239,6 +247,15 @@ STEPS = {
     # La vacance de plus de deux ans, que le recensement ne distingue pas. Le
     # fichier des communes seulement : aucune adresse de logement n'entre.
     "lovac":    ("Logements vacants du parc privé (LOVAC, Cerema)", run_lovac),
+    # Sources data.gouv ajoutées le 29/10/2026. Agrégats par commune : ni
+    # parcelle (ENAF), ni adresse de logement (RPLS), ni nom d'exploitant
+    # (ODRÉ), ni cantine privée nommée.
+    "enaf":     ("Consommation d'espaces naturels, agricoles et forestiers (Cerema)", run_enaf),
+    "vigieau":  ("Restrictions d'eau en sécheresse (VigiEau)", run_vigieau),
+    "cantines": ("Cantines et télédéclarations EGalim (ma-cantine)", run_cantines),
+    "odre":     ("Installations de production d'électricité (registre ODRÉ)", run_odre),
+    "loyers":   ("Loyers d'annonce (Carte des loyers)", run_loyers),
+    "rpls":     ("Logements sociaux (RPLS, SDES)", run_rpls),
     # Des services, jamais leurs agents : les responsables nommés de l'annuaire
     # ne sont pas lus. Une DILA injoignable rend un avertissement.
     "guichets": ("Guichets compétents (Annuaire de l'administration, DILA)", run_guichets),
@@ -341,6 +358,10 @@ STEPS = {
     # associations ». Après `rna` et `sirene`, dont il lit les identifiants.
     "jaune":    ("Subventions de l'État aux associations (jaune budgétaire)",
                  run_jaune),
+    # Ce que le FDVA a ACCORDÉ l'année même, d'après les résultats publiés par
+    # la DRAJES ; le jaune ne dira ce qui a été versé que trois ans plus tard.
+    # Fichier déposé à la main au magasin : sans dépôt, le step ne lit rien.
+    "fdva":     ("Subventions FDVA accordées (résultats DRAJES)", run_fdva),
     "cm_flux":  ("Flux financiers extraits des séances",  lambda: run_cm_flux(commit=True)),
     # `since=None` : reprise incrémentale depuis la dernière analyse connue.
     "eau":      ("Qualité des cours d'eau (Hub'Eau)",     lambda: run_qualite_eau(None)),
@@ -417,11 +438,24 @@ STEPS = {
 
 
 def count_items(conn, name: str):
-    """Nombre d'items produits par ce collecteur, ou None si non mesurable."""
+    """Nombre d'items produits par ce collecteur, ou None si non mesurable.
+
+    Une table témoin que le collecteur n'a pas encore créée vaut ZÉRO, pas
+    None : il n'a rien produit. None rendait `items_added` vide à la première
+    passe d'un step neuf, et `deploy/collecte.sh`, qui ne republie que ce qui
+    a été ajouté, ne publiait pas ce qu'il venait de collecter (Lasalle,
+    29/10/2026, six steps data.gouv).
+    """
     meta = STEP_META.get(name)
     if not meta:
         return None
     _, _, table, where = meta
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type IN ('table','view')"
+                            " AND name=?", (table,)).fetchone():
+            return 0
+    except Exception:
+        return None
     sql = f"SELECT COUNT(*) FROM {table}" + (f" WHERE {where}" if where else "")
     try:
         return conn.execute(sql).fetchone()[0]
@@ -459,6 +493,9 @@ def run_step(name: str):
             print(f"  ⚠ journal collector_runs indisponible : {e}")
             conn = run_id = None
 
+    # Ce que la source RENDRA, à côté de ce que la table gagnera
+    # (`collectors/mesure.py`) : un zéro ne dit pas lequel des deux s'est tari.
+    mesure.debut()
     t0 = time.time()
     status, err = "ok", None
     try:
@@ -477,6 +514,16 @@ def run_step(name: str):
         status, err = "error", f"{type(e).__name__}: {e}"
     finally:
         elapsed = time.time() - t0
+        # Un fichier périmé lu faute de mieux se dit dans le rapport du step ET
+        # dans son journal `collector_runs`, à côté de l'erreur s'il y en a une :
+        # le relevé ne doit pas passer pour un relevé du jour.
+        if national_store.perimes_lus:
+            note = (f"magasin : {len(national_store.perimes_lus)} fichier(s) périmé(s) lu(s) — "
+                    + ", ".join(national_store.perimes_lus))
+            print(f"  ⚠ {note}")
+            err = f"{err} ; {note}" if err else note
+            national_store.perimes_lus.clear()
+        mesure.fin(conn, run_id)
         if conn is not None and run_id is not None:
             try:
                 log_run_end(conn, run_id, status, count_items(conn, name), before, err)

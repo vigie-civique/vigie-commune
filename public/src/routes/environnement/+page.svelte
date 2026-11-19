@@ -15,6 +15,17 @@
   $: controleEau = data.controleEau
   $: dechets = data.dechets
   $: incendie = data.incendie
+  $: vigieau = data.vigieau
+  $: electricite = data.electricite
+
+  // ── Sécheresse : les niveaux, du plus léger au plus grave ─────────────────
+  const NIVEAUX_SECHERESSE = [
+    ['vigilance', 'vigilance'], ['alerte', 'alerte'],
+    ['alerte_renforcee', 'alerte renforcée'], ['crise', 'crise'],
+  ]
+  const POUR = { AEP: 'l’eau potable distribuée', SOU: 'les eaux souterraines', SUP: 'les eaux superficielles' }
+  $: secheresseDerniere = vigieau?.annees?.at(-1)
+  const kwh = (v) => v == null ? '-' : nb(Math.round(v / 1000))
 
   // ── Les déchets ────────────────────────────────────────────────────────────
   const DECHETS = {
@@ -85,6 +96,12 @@
     .map(s => ({ ...s, dernier: derniere(s.code_service, 'D204.0') }))
     .filter(s => s.dernier)
   $: anneesPrix = [...new Set(eauPotable.flatMap(s => s.prix.map(p => p.annee)))].sort()
+  // Qui gère : le snapshot ne sort l'opérateur que filtré (personne morale,
+  // vrai nom, fin de contrat encore à venir à la date déclarée). En régie,
+  // un opérateur nommé est un prestataire, pas un délégataire.
+  const gestion = (g) => !g ? null
+    : (g.role === 'delegataire' ? `délégation à ${g.nom}` : `en régie, avec le prestataire ${g.nom}`)
+      + (g.fin ? ` jusqu'au ${fmtDate(g.fin)}` : '')
   const euros = (v) => v == null ? '-'
     : new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v) + ' €'
 
@@ -149,7 +166,7 @@
 
 
   {#if stations.length || risques.length || icpe.length || eauPotable.length
-       || controleEau || dechets || incendie}
+       || controleEau || dechets || incendie || vigieau || electricite}
     <div class="tiles">
       <div class="tile"><span class="tval">{nb(totalAnalyses)}</span><span class="tlabel">analyses de cours d'eau et captages{#if periodeAnalyses}, {periodeAnalyses}{/if}</span></div>
       <div class="tile"><span class="tval">{stations.length}</span><span class="tlabel">stations de mesure, dans {communesStations.size} commune{communesStations.size > 1 ? 's' : ''}</span></div>
@@ -192,6 +209,7 @@
         </h3>
         <p class="note">
           {#if s.type_collectivite}{s.type_collectivite}{/if}{#if s.nbCommunes > 1}, {s.nbCommunes} communes desservies{/if}{#if s.siren}{' '} <span class="muted">· SIREN {s.siren}</span>{/if}
+          {#if s.gestionnaire}<br />Gestion : {gestion(s.gestionnaire)} <span class="muted">(déclaration SISPEA {s.gestionnaire.annee})</span>{/if}
         </p>
         <div class="tiles">
           {#if s.dernier}
@@ -261,7 +279,7 @@
         <ul class="plain">
           {#each assainissement as s}
             <li><strong>{euros(s.dernier.valeur)} le m³</strong> en {s.dernier.annee}
-              <span class="muted"> : {s.nom || s.libelle || `service n° ${s.code_service}`}</span></li>
+              <span class="muted"> : {s.nom || s.libelle || `service n° ${s.code_service}`}{#if s.gestionnaire}, {gestion(s.gestionnaire)} (déclaration SISPEA {s.gestionnaire.annee}){/if}</span></li>
           {/each}
         </ul>
       {/if}
@@ -335,6 +353,73 @@
           </table>
         </details>
       {/each}
+    {/if}
+
+    <!-- ── Sécheresse : les restrictions d'eau ──────────────────────── -->
+    {#if vigieau}
+      {@const d = secheresseDerniere}
+      <h2 id="secheresse">Les restrictions d'eau en sécheresse</h2>
+      <Niveau type="calcul" base="les niveaux de restriction que VigiEau (ministère de la Transition écologique) attribue chaque jour à la commune, comptés jour par jour">
+        {#if d.plus_touchee.jours}Du 1er janvier au {fmtDate(d.dernier_jour)}, {COMMUNE} a passé
+          <b>{nb(d.plus_touchee.jours)} jour{d.plus_touchee.jours > 1 ? 's' : ''}</b> sous restriction
+          pour {POUR[d.plus_touchee.zone] || vigieau.zones[d.plus_touchee.zone]}{#if d.plus_touchee.crise}, dont
+          <b>{nb(d.plus_touchee.crise)} au niveau crise</b>{/if}, sur {nb(d.jours_releves)} jours relevés.
+        {' '}{:else}Du 1er janvier au {fmtDate(d.dernier_jour)}, aucune restriction d'eau n'a visé
+          {COMMUNE}, sur {nb(d.jours_releves)} jours relevés.{/if}
+      </Niveau>
+      <table class="secheresse">
+        <caption class="visually-hidden">Jours de restriction d’eau, année par année, pour la ressource la plus touchée</caption>
+        <thead>
+          <tr><th scope="col">Année</th><th scope="col">ressource la plus touchée</th>
+            <th scope="col" class="r">jours sous restriction</th>
+            <th scope="col" class="r">dont crise</th><th scope="col" class="r">jours relevés</th></tr>
+        </thead>
+        <tbody>
+          {#each [...vigieau.annees].reverse() as a}
+            <tr><td>{a.annee}</td><td>{a.plus_touchee.jours ? vigieau.zones[a.plus_touchee.zone] : '·'}</td>
+              <td class="r">{nb(a.plus_touchee.jours)}</td>
+              <td class="r">{nb(a.plus_touchee.crise)}</td><td class="r">{nb(a.jours_releves)}</td></tr>
+          {/each}
+        </tbody>
+      </table>
+      <details>
+        <summary>Le détail par ressource et par niveau</summary>
+        <table class="secheresse">
+          <caption class="visually-hidden">Jours de restriction d’eau par année, ressource et niveau</caption>
+          <thead>
+            <tr><th scope="col">Année</th><th scope="col">Ressource</th>
+              <th scope="col" class="r">sans restriction</th>
+              {#each NIVEAUX_SECHERESSE as [, libelle]}<th scope="col" class="r">{libelle}</th>{/each}
+              <th scope="col" class="r">jours relevés</th></tr>
+          </thead>
+          <tbody>
+            {#each [...vigieau.annees].reverse() as a}
+              {#each Object.keys(vigieau.zones) as z}
+                <tr>
+                  <td>{a.annee}</td><td>{vigieau.zones[z]}</td>
+                  <td class="r">{a.zones[z]?.aucune || '·'}</td>
+                  {#each NIVEAUX_SECHERESSE as [k]}<td class="r">{a.zones[z]?.[k] || '·'}</td>{/each}
+                  <td class="r">{a.jours_releves}</td>
+                </tr>
+              {/each}
+            {/each}
+          </tbody>
+        </table>
+      </details>
+      <p class="note">
+        Le préfet fixe ces niveaux par arrêté, zone d'alerte par zone d'alerte ;
+        VigiEau reporte chaque jour celui qui s'applique à la commune. Un jour sans
+        restriction est compté comme tel : la somme d'une ligne donne les jours
+        que le fichier couvre, pas une année entière quand l'année est en cours.
+        VigiEau remonte au 1<sup>er</sup> mai 2010 : la première année est partielle.
+        Les zones d'alerte propres à l'eau potable distribuée n'apparaissent dans
+        le fichier que pour les années récentes&nbsp;: avant, un « 0 » sur l'eau
+        potable ne dit pas qu'aucune restriction n'a visé la commune. C'est pourquoi
+        chaque année est lue sur la ressource la plus touchée.
+        Source&nbsp;: <a href={vigieau.page_jeu} rel="noopener">VigiEau, données sécheresse</a>.
+        Une commune peut relever de plusieurs zones : le niveau retenu est celui
+        que VigiEau lui attribue.
+      </p>
     {/if}
 
     <!-- ── Qualité de l'eau ─────────────────────────────────────────── -->
@@ -687,6 +772,45 @@
       </p>
     {/if}
 
+    {#if electricite}
+      <h2 id="electricite">L'électricité produite dans la commune</h2>
+      {#if electricite.filieres.length}
+        <Niveau type="calcul" base="les lignes du registre national des installations de production et de stockage d'électricité (ODRÉ) au {fmtDate(electricite.date_registre)}, additionnées">
+          Le registre national compte
+          <b>{nb(electricite.filieres.reduce((s, f) => s + f.installations, 0))} installations</b>
+          raccordées au réseau public dans la commune, pour une puissance de
+          <b>{nb(electricite.filieres.reduce((s, f) => s + (f.puissance_kw || 0), 0))} kW</b>.
+        </Niveau>
+        <table>
+          <caption class="visually-hidden">Installations de production d’électricité par filière</caption>
+          <thead><tr><th scope="col">Filière</th><th scope="col" class="r">installations</th><th scope="col" class="r">puissance (kW)</th><th scope="col" class="r">énergie injectée sur 12 mois (MWh)</th></tr></thead>
+          <tbody>
+            {#each electricite.filieres as f}
+              <tr><td>{f.filiere}</td><td class="r">{nb(f.installations)}</td><td class="r">{nb(f.puissance_kw)}</td><td class="r">{f.energie_masquee ? 'non donnée' : kwh(f.energie_injectee_kwh)}</td></tr>
+            {/each}
+          </tbody>
+        </table>
+      {:else}
+        <Niveau type="fait" source="Registre national des installations de production et de stockage d'électricité, ODRÉ, au {fmtDate(electricite.date_registre)}" href={electricite.page_jeu}>
+          Le registre national ne compte <b>aucune installation</b> de production
+          ou de stockage d'électricité raccordée au réseau public dans la commune.
+          Il couvre les réseaux de RTE, d'Enedis et des régies qui lui transmettent
+          leurs données : une installation raccordée au réseau d'une autre régie
+          peut ne pas y figurer.
+        </Niveau>
+      {/if}
+      <p class="note">
+        Les installations sont comptées par filière, sans être désignées : au-delà
+        de 36 kW, le registre nomme chacune, et le nom d'une centrale sur le toit
+        d'un hangar est souvent celui de l'exploitant. Sous 36 kW, le registre les
+        regroupe déjà par commune. Quand une filière compte moins de trois
+        installations, l'énergie qu'elles injectent n'est pas donnée&nbsp;: elle dirait
+        ce que vend un exploitant que chacun connaît. Une installation non raccordée au réseau public
+        (autoconsommation isolée) n'y figure pas. Source&nbsp;:
+        <a href={electricite.page_jeu} rel="noopener">registre national, Open Data Réseaux Énergies</a>.
+      </p>
+    {/if}
+
     <p class="src">
       Sources : SISPEA (prix et performance de l'eau potable), agences
       régionales de santé via Hub'Eau (contrôle sanitaire de l'eau distribuée),
@@ -729,7 +853,7 @@
 
   .chips { display: flex; flex-wrap: wrap; gap: .35rem; margin: .8rem 0; }
   .chips button { padding: .28rem .7rem; border: 1px solid var(--trait); border-radius: 99px;
-                  background: #fff; color: var(--gris); font-size: .8rem; cursor: pointer; }
+                  background: var(--carte); color: var(--gris); font-size: .8rem; cursor: pointer; }
   .chips button.on { border-color: var(--ardoise); background: var(--ardoise-pale); color: var(--ardoise-fonce); }
 
   .chart-wrap { overflow-x: auto; }
@@ -751,7 +875,7 @@
   th { color: var(--gris); font-weight: 500; }
   .r { text-align: right; }
   .sub2 { display: block; color: var(--gris); font-size: .78rem; }
-  .tag { font-size: .68rem; background: #f6e7e5; color: var(--depense);
+  .tag { font-size: .68rem; background: var(--depense-pale); color: var(--depense);
          padding: .05rem .4rem; border-radius: 99px; margin-left: .3rem; }
 
   .plain { list-style: none; padding: 0; margin: .3rem 0; }

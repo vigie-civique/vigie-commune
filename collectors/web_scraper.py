@@ -16,6 +16,7 @@ Usage :
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import time
@@ -168,13 +169,67 @@ def extract_contact_info(text: str) -> dict:
     }
 
 
+# `127.0.0.1` et non `localhost` : Ollama n'écoute qu'en IPv4 (cf. api.py).
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+MODELE_WEB = os.environ.get("OLLAMA_WEB_MODEL", "gemma4:26b")
+
+
+def _empreinte_modele() -> str | None:
+    """L'empreinte que sert Ollama pour `MODELE_WEB` (12 caractères, l'« ID » de
+    `ollama list`). Le nom ne suffit pas : un `ollama pull` met une autre
+    version sous le même nom (charte IA, engagement 4). Même lecture que
+    `api._empreinte_modele`, pour le modèle du scraper. `None` si le serveur
+    ne la donne pas : la trace garde le nom seul.
+    """
+    try:
+        with urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=5) as r:
+            modeles = json.load(r).get("models") or []
+    except Exception:                                   # noqa: BLE001
+        return None
+    noms = {MODELE_WEB, f"{MODELE_WEB}:latest"}
+    for m in modeles:
+        if m.get("name") in noms or m.get("model") in noms:
+            return (m.get("digest") or "")[:12] or None
+    return None
+
+
+def source_de_la_note() -> str:
+    """`gemma_web:<modèle>@<empreinte>` : quel modèle a écrit la note
+    (revue d'architecture du 07/11/2026, C11)."""
+    empreinte = _empreinte_modele()
+    return f"gemma_web:{MODELE_WEB}" + (f"@{empreinte}" if empreinte else "")
+
+
+def ollama_texte(prompt: str, timeout: int = 180) -> str:
+    """La réponse d'Ollama par son API HTTP locale, sans image.
+
+    Le CLI `ollama run` charge comme IMAGE tout chemin de fichier local qu'il
+    lit dans son prompt (démontré à l'audit du 06/11/2026) : le texte d'une
+    page lue sur le web pouvait faire lire un fichier du poste au modèle.
+    L'API ne prend d'image que dans un champ `images`, jamais envoyé ici.
+
+    Sous `reseau.garder()` (collecte planifiée), la boucle locale est refusée :
+    l'appel échoue, il ne contourne pas la garde. Ces passes se lancent à la main.
+    """
+    charge = {"model": MODELE_WEB, "stream": False,
+              "messages": [{"role": "user", "content": prompt}]}
+    requete = urllib.request.Request(
+        f"{OLLAMA_URL}/api/chat", data=json.dumps(charge).encode(),
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(requete, timeout=timeout) as r:
+        reponse = json.load(r)
+    contenu = (reponse.get("message") or {}).get("content") or ""
+    # Les versions récentes rendent le raisonnement à part (`message.thinking`) ;
+    # un bloc <think> laissé dans `content` par une version ancienne est retiré.
+    return re.sub(r"^\s*<think>.*?</think>", "", contenu, flags=re.S).strip()
+
+
 def gemma_analyze(entity_name: str, entity_type: str, text: str) -> str | None:
     """
     Analyse le texte scrapé avec Gemma 4 pour extraire des informations non structurées :
     personnes mentionnées, événements, liens avec d'autres entités locales, signaux notables.
     Retourne une synthèse textuelle ou None si échec.
     """
-    import subprocess
     if not text or len(text) < 100:
         return None
     prompt = (
@@ -189,22 +244,9 @@ def gemma_analyze(entity_name: str, entity_type: str, text: str) -> str | None:
         f"Si rien de notable, réponds 'Rien de notable.'"
     )
     try:
-        result = subprocess.run(
-            ["ollama", "run", "gemma4:26b", prompt],
-            capture_output=True, text=True, timeout=180
-        )
-        output = result.stdout
-        # Supprimer les codes ANSI
-        import re as _re
-        output = _re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', output)
-        # Extraire uniquement la réponse finale (après le bloc de réflexion)
-        if "...done thinking." in output:
-            output = output.split("...done thinking.")[-1]
-        output = output.strip()
-        if output:
-            return output
+        return ollama_texte(prompt) or None
     except Exception as e:
-        print(f"    [Gemma erreur] {e}")
+        print(f"    [Gemma erreur] {type(e).__name__}")
     return None
 
 
@@ -531,8 +573,8 @@ def update_entity_from_scrape(conn, result: dict) -> None:
     if result.get("gemma_note"):
         conn.execute(
             "INSERT INTO entity_notes (entity_id, date, note, source, confidence)"
-            " VALUES (?, date('now'), ?, 'gemma_web', 'unverified')",
-            (eid, result["gemma_note"])
+            " VALUES (?, date('now'), ?, ?, 'unverified')",
+            (eid, result["gemma_note"], source_de_la_note())
         )
 
     if result.get("description"):

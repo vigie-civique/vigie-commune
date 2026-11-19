@@ -146,10 +146,12 @@
           <h3>Relations →</h3>
           <ul class="rel-list">
             {#each detail.relations_out as r}
-              <li on:click={() => focusGraph(r.target_id)}>
-                <span class="rel-type">{r.relation_type}</span>
-                <span class="rel-name">{r.target_name}</span>
-                <span class="rel-kind">{r.target_type}</span>
+              <li>
+                <button type="button" on:click={() => focusGraph(r.target_id)}>
+                  <span class="rel-type">{r.relation_type}</span>
+                  <span class="rel-name">{r.target_name}</span>
+                  <span class="rel-kind">{r.target_type}</span>
+                </button>
               </li>
             {/each}
           </ul>
@@ -162,10 +164,12 @@
           <h3>← Relations entrantes</h3>
           <ul class="rel-list">
             {#each detail.relations_in as r}
-              <li on:click={() => focusGraph(r.source_id)}>
-                <span class="rel-type">{r.relation_type}</span>
-                <span class="rel-name">{r.source_name}</span>
-                <span class="rel-kind">{r.source_type}</span>
+              <li>
+                <button type="button" on:click={() => focusGraph(r.source_id)}>
+                  <span class="rel-type">{r.relation_type}</span>
+                  <span class="rel-name">{r.source_name}</span>
+                  <span class="rel-kind">{r.source_type}</span>
+                </button>
               </li>
             {/each}
           </ul>
@@ -258,7 +262,21 @@
     padding: .2rem 0;
     cursor: pointer;
   }
-  .rel-list li:hover { color: var(--lien); }
+  .rel-list button {
+    display: flex;
+    gap: .5rem;
+    align-items: baseline;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .rel-list button:hover, .rel-list button:focus-visible { color: var(--lien); }
+  .rel-list button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .rel-type { color: var(--alerte); flex-shrink: 0; }
   .rel-name { flex: 1; }
   .rel-kind { color: var(--texte-doux); font-size: .7rem; }

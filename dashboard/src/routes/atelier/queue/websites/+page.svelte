@@ -1,8 +1,10 @@
 <script>
   import { lienSur } from '#lib/liens.js'
   import { onMount } from 'svelte'
+  import { COMMUNE } from '#lib/instance.js'
   import { authFetch, currentUser } from '#lib/stores/auth.js'
   import { auMoins } from '#lib/roles.js'
+  import { libelleType, erreurHttp, motifReponse, phraseErreur } from '#lib/libelles.js'
 
   // Qui réserve, c'est le compte connecté : l'API ne lit plus le nom envoyé.
   $: me = $currentUser?.email || ''
@@ -23,16 +25,10 @@
     loading = true; error = ''
     try {
       const res = await authFetch(`/atelier/queue/websites?status=${statusFilter}&limit=200`)
-      if (!res.ok) throw new Error(res.status)
+      if (!res.ok) throw erreurHttp(res)
       candidates = await res.json()
-    } catch(e) { error = e.message }
+    } catch(e) { error = phraseErreur(e) }
     finally { loading = false }
-  }
-
-  // Le détail d'une erreur de l'API : un objet { message, par, … } ou une chaîne.
-  async function motif(res, defaut) {
-    const d = (await res.json().catch(() => ({}))).detail
-    return (typeof d === 'object' ? d?.message : d) || defaut
   }
 
   async function setStatus(id, status) {
@@ -44,7 +40,7 @@
       })
       if (res.ok) candidates = candidates.filter(c => c.id !== id)
       else {
-        avis = await motif(res, `Échec de l'enregistrement (${res.status}).`)
+        avis = await motifReponse(res, "L'enregistrement a échoué")
         if (res.status === 409) await load()
       }
     } finally {
@@ -66,7 +62,7 @@
           c.id === id ? { ...c, reservation: { par: r.locked_by, expire_dans_min: r.expires_in_min } } : c
         )
       } else {
-        avis = await motif(res, `Réservation impossible (${res.status}).`)
+        avis = await motifReponse(res, 'La réservation a échoué')
         if (res.status === 409) await load()
       }
     } finally {
@@ -78,7 +74,7 @@
     avis = ''
     const res = await authFetch(`/atelier/queue/${id}/claim?table=entity_websites`, { method: 'DELETE' })
     if (res.ok) candidates = candidates.map(c => c.id === id ? { ...c, reservation: null } : c)
-    else avis = await motif(res, `Libération impossible (${res.status}).`)
+    else avis = await motifReponse(res, 'La libération a échoué')
   }
 
   function scoreColor(s) {
@@ -95,39 +91,39 @@
   }, {})
 </script>
 
-<svelte:head><title>Queue — Websites candidats</title></svelte:head>
+<svelte:head><title>Adresses de sites — Atelier {COMMUNE}</title></svelte:head>
 
 <div class="queue-page">
   <div class="queue-header">
-    <h1>Websites candidats</h1>
+    <h1>Adresses de sites à confirmer</h1>
     <div class="queue-controls">
-      <select bind:value={statusFilter} on:change={load}>
-        <option value="candidate">candidate</option>
-        <option value="validated">validated</option>
-        <option value="rejected">rejected</option>
+      <select bind:value={statusFilter} on:change={load} aria-label="Adresses à afficher">
+        <option value="candidate">À confirmer</option>
+        <option value="validated">Confirmées</option>
+        <option value="rejected">Écartées</option>
       </select>
       <button class="btn-reload" on:click={load}>↺ Recharger</button>
-      <span class="count-info">{candidates.length} URL{candidates.length !== 1 ? 's' : ''}</span>
+      <span class="count-info">{candidates.length} adresse{candidates.length !== 1 ? 's' : ''}</span>
     </div>
   </div>
 
   {#if error}<p class="err-msg">{error}</p>{/if}
   {#if avis}<p class="avis" role="status">{avis}</p>{/if}
-  {#if $currentUser && !tranche}<p class="avis" role="status">Vous proposez ; un validateur tranche. Ces sites attendent son verdict.</p>{/if}
+  {#if $currentUser && !tranche}<p class="avis" role="status">Vous pouvez lire ces adresses. Seul un validateur les confirme ou les écarte.</p>{/if}
   {#if loading}<p class="muted-center">Chargement…</p>
   {:else if candidates.length === 0}
-    <p class="muted-center">Aucune URL avec le statut "{statusFilter}".</p>
+    <p class="muted-center">Aucune adresse {statusFilter === "candidate" ? "à confirmer" : statusFilter === "validated" ? "confirmée" : "écartée"}.</p>
   {:else}
     <div class="candidate-list">
       {#each candidates as c (c.id)}
         <div class="candidate-row" class:low-score={c.score < 0.5}>
           <div class="cand-entity">
             <a href="/atelier/entite/{c.entity_id}" class="entity-link">{c.entity_name}</a>
-            <span class="type-badge type-{c.entity_type}">{c.entity_type}</span>
+            <span class="type-badge type-{c.entity_type}">{libelleType(c.entity_type)}</span>
           </div>
           <a href={lienSur(c.url)} target="_blank" rel="noopener" class="cand-url">{c.url}</a>
-          <span class="cand-score" style="color:{scoreColor(c.score)}">
-            {c.score != null ? c.score.toFixed(2) : '—'}
+          <span class="cand-score" style="color:{scoreColor(c.score)}" title="Indice de ressemblance entre le site trouvé et la fiche, de 0 à 1">
+            {c.score != null ? c.score.toFixed(2).replace('.', ',') : '—'}
           </span>
           <span class="cand-source muted">{c.found_by}</span>
           {#if c.reservation}{' '}
@@ -139,7 +135,7 @@
             </span>
           {' '}{:else if tranche}{' '}
             <button class="btn-claim" on:click={() => claimItem(c.id)}
-                    disabled={claiming[c.id]}>→ Prendre</button>
+                    disabled={claiming[c.id]}>→ Prendre en charge</button>
           {' '}{:else}{' '}
             <span></span>
           {' '}{/if}
@@ -147,11 +143,11 @@
             {#if tranche}
             {#if statusFilter !== 'validated'}{' '}
               <button class="btn-validate" on:click={() => setStatus(c.id,'validated')}
-                      disabled={saving[c.id] || (c.reservation && c.reservation.par !== me)}>✓ Valider</button>
+                      disabled={saving[c.id] || (c.reservation && c.reservation.par !== me)}>✓ Confirmer</button>
             {' '}{/if}
             {#if statusFilter !== 'rejected'}{' '}
               <button class="btn-reject"   on:click={() => setStatus(c.id,'rejected')}
-                      disabled={saving[c.id] || (c.reservation && c.reservation.par !== me)}>✕ Rejeter</button>
+                      disabled={saving[c.id] || (c.reservation && c.reservation.par !== me)}>✕ Écarter</button>
             {' '}{/if}
             {/if}
           </div>
@@ -213,5 +209,13 @@
   .cand-lock { display: flex; align-items: center; gap: .35rem; color: var(--alerte); white-space: nowrap; }
   .btn-liberer { border: 1px solid var(--alerte-bordure); border-radius: 4px; padding: .1rem .4rem;
                  font-size: .68rem; color: var(--alerte-texte); cursor: pointer; }
+  @media (max-width: 900px) {
+    .queue-page { padding: .8rem; }
+    .queue-controls { margin-left: 0; flex-wrap: wrap; }
+    .candidate-row { grid-template-columns: 1fr auto; row-gap: .4rem; }
+    .cand-entity, .cand-url { grid-column: 1 / -1; }
+    .cand-actions { grid-column: 1 / -1; flex-wrap: wrap; }
+    .cand-url { white-space: normal; overflow-wrap: anywhere; }
+  }
   .muted-center { color: var(--texte-doux); text-align: center; margin-top: 2rem; }
 </style>

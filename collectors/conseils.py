@@ -31,28 +31,32 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import urllib.parse
 import urllib.request
 import shutil
 import subprocess
 import unicodedata
+from collections import Counter
 from pathlib import Path
 
 import pdfplumber
 
+from . import mesure
 from .archive import archive_fetch
-from .config import (COMMUNE_NAME, COMMUNE_SIREN, EPCI_NOM, EPCI_SIREN,
+from .config import (COMMUNE_NAME, COMMUNE_SIREN, COMMUNE_SIRENS, EPCI_NOM, EPCI_SIREN,
                      HEADERS, ROOT)
 from .cle_acte import a_la_colonne as _a_la_colonne_cle, cle_acte, cle_seance
-from .cm_ocr import OPTIONS_OCRMYPDF, garder_texte, texte_garde
+from .cm_ocr import (environnement_ocr, garder_texte, options_ocrmypdf,
+                     pages_gardees, texte_garde)
 from .cm_parser import link_persons_to_event
 from .connecteurs import charger
 from .connecteurs.base import date_fr
 from .convocation import est_convocation, lire as lire_convocation
 from .db import transaction, upsert_entity
-from .pv_parsers import (acte_unique, deliberations, presences,
-                         reference_actes)
+from .pv_parsers import (acte_unique, deliberations, deliberations_a_la_page,
+                         presences, reference_actes)
 from .texte_document import format_de, texte_de
 
 PDF_DIR = ROOT / "data" / "pv"
@@ -204,13 +208,17 @@ def telecharger(url: str, source: str = "") -> tuple[bytes, str] | None:
     return raw, fmt
 
 
-def texte_pdf(chemin: Path) -> str:
+def pages_pdf(chemin: Path) -> list[str]:
     try:
         with pdfplumber.open(str(chemin)) as pdf:
-            return "\n".join((p.extract_text() or "") for p in pdf.pages)
+            return [(p.extract_text() or "") for p in pdf.pages]
     except Exception as e:
         print(f"  [pv][erreur] lecture {chemin.name} → {e}")
-        return ""
+        return []
+
+
+def texte_pdf(chemin: Path) -> str:
+    return "\n".join(pages_pdf(chemin))
 
 
 def _trop_mince(chemin: Path, texte: str) -> bool:
@@ -244,7 +252,12 @@ def _pages_natives(chemin: Path) -> list[str]:
 
 
 def _texte_ocerise(original: Path, cible: Path) -> str:
-    """Le texte du PDF océrisé, la couche native de l'original en tête de page.
+    return "\n".join(_pages_ocerisees(original, cible))
+
+
+def _pages_ocerisees(original: Path, cible: Path) -> list[str]:
+    """Les pages du PDF océrisé, la couche native de l'original en tête de page.
+    Le texte gardé est leur jointure : le manifeste en tire les débuts de page.
 
     `--force-ocr` rastérise la page entière pour la relire, cachet compris, et
     le cachet relu sort abîmé : « 1ÈAS-DEL2610.01-DE », « 080-21000
@@ -258,18 +271,58 @@ def _texte_ocerise(original: Path, cible: Path) -> str:
     """
     natives = _pages_natives(original)
     if not any(p.strip() for p in natives):
-        return texte_pdf(cible)
+        return pages_pdf(cible)
     try:
         with pdfplumber.open(str(cible)) as pdf:
             relues = [(p.extract_text() or "") for p in pdf.pages]
     except Exception as e:
         print(f"  [pv][erreur] lecture {cible.name} → {e}")
-        return ""
-    return "\n".join(f"{n.strip()}\n{r}" if n.strip() else r
-                     for n, r in zip(natives, relues))
+        return []
+    return [f"{n.strip()}\n{r}" if n.strip() else r for n, r in zip(natives, relues)]
 
 
-def lire_document(doc, avec_ocr: bool = False) -> tuple[str, str, bool] | None:
+# Pages à océriser par passe planifiée, sur le serveur (2 cœurs, ~6 s la page).
+# Au-delà, le PV attend la passe suivante ; un document plus long que le plafond
+# à lui seul ne se fait qu'à la main (`--ocr`, sans plafond).
+PLAFOND_PAGES_OCR = int(os.environ.get("VIGIE_OCR_PAGES_MAX", "60"))
+
+
+def nouveau_budget_ocr(pages_max: int | None) -> dict | None:
+    """Le compte des pages que cette passe peut encore océriser, ou rien (sans limite)."""
+    if not pages_max:
+        return None
+    return {"max": pages_max, "pages": pages_max, "reportes": 0, "trop_longs": 0}
+
+
+def _lire_pdf(cache: Path, avec_ocr: bool, budget: dict | None) -> tuple[str, str, bool]:
+    """Le texte d'un PDF en cache. `avec_ocr` décide de LANCER la reconnaissance,
+    jamais d'utiliser celle qui est déjà faite : une passe qui relirait un scan
+    océrisé par sa seule couche native écraserait la bonne lecture par la mauvaise
+    (un scan tamponné n'a pour couche native que ses cachets)."""
+    texte = texte_pdf(cache)
+    if not _trop_mince(cache, texte):
+        return texte, "pdf", False
+    cible = cache.with_suffix(".ocr.pdf")
+    if texte_garde(cible) is not None or (cible.exists() and cible.stat().st_size > 0):
+        lu = ocr(cache)             # déjà reconnu : relire ne coûte aucune reconnaissance
+        return lu, "pdf", bool(lu)
+    if not avec_ocr:
+        return texte, "pdf", False
+    if budget is not None:
+        pages = _nb_pages(cache)
+        if pages > budget["max"]:
+            budget["trop_longs"] += 1
+            return texte, "pdf", False
+        if pages > budget["pages"]:
+            budget["reportes"] += 1
+            return texte, "pdf", False
+        budget["pages"] -= pages
+    lu = ocr(cache)
+    return lu, "pdf", bool(lu)
+
+
+def lire_document(doc, avec_ocr: bool = False,
+                  budget: dict | None = None) -> tuple[str, str, bool] | None:
     """(texte, format, océrisé) — ou rien si le document est hors d'atteinte.
 
     Les PDF gardent leur cache sur disque : ils sont lourds, immuables une fois
@@ -278,11 +331,7 @@ def lire_document(doc, avec_ocr: bool = False) -> tuple[str, str, bool] | None:
     """
     cache = _cible_cache(doc.url)
     if cache.exists() and cache.stat().st_size > 0:
-        texte = texte_pdf(cache)
-        if avec_ocr and _trop_mince(cache, texte):
-            texte = ocr(cache)
-            return texte, "pdf", bool(texte)
-        return texte, "pdf", False
+        return _lire_pdf(cache, avec_ocr, budget)
 
     recu = telecharger(doc.url, doc.source)
     if recu is None:
@@ -293,11 +342,7 @@ def lire_document(doc, avec_ocr: bool = False) -> tuple[str, str, bool] | None:
 
     PDF_DIR.mkdir(parents=True, exist_ok=True)
     cache.write_bytes(raw)
-    texte = texte_pdf(cache)
-    if avec_ocr and _trop_mince(cache, texte):
-        texte = ocr(cache)
-        return texte, "pdf", bool(texte)
-    return texte, "pdf", False
+    return _lire_pdf(cache, avec_ocr, budget)
 
 
 # ── Écriture ─────────────────────────────────────────────────────────────────
@@ -475,6 +520,10 @@ def enregistrer_deliberation(conn, doc, portee: str, delib: dict) -> int:
     # Seuls les régimes qui savent le dire le posent.
     if delib.get("titre_origine"):
         meta["titre_origine"] = delib["titre_origine"]
+    # Les pages de l'acte dans sa pièce, quand le découpage à la page les connaît :
+    # la fiche « acte relu » (lot 4) montrera l'image de la page.
+    if delib.get("pages"):
+        meta["pages"] = delib["pages"]
     if portee == "epci":
         meta["instance"] = EPCI_NOM
 
@@ -543,6 +592,46 @@ def enregistrer_deliberation(conn, doc, portee: str, delib: dict) -> int:
     return eid
 
 
+def _marquer_ocr(conn, eid: int, url: str) -> None:
+    """L'acte dont le texte vient d'une pièce océrisée le dit lui-même.
+
+    🔴 Le drapeau `ocr` de la séance ne suffisait pas (D5, relevé le 24/10/2026
+    sur base fictive) : la métadonnée de séance fusionne ses pièces et la
+    dernière lue l'emporte, son adresse est celle de la pièce la plus probante
+    — le procès-verbal passe avant le recueil —, et sur un portail d'actes
+    c'est celle du portail. Un acte d'un recueil océrisé publié avec un PV
+    natif ne retrouvait donc plus `ocr`, et sa ligne de tableau entrait
+    `verified`. L'adresse fait la condition : le jumeau que la pièce n'a fait
+    que compléter garde son texte, et son texte n'est pas océrisé.
+    """
+    conn.execute(
+        "UPDATE events SET metadata=json_patch(COALESCE(metadata,'{}'), ?)"
+        " WHERE id=? AND source_url=?",
+        (json.dumps({"ocr": True}), eid, url))
+
+
+# Le délai de l'OCR suit la longueur du document. Un délai fixe de 1 800 s a
+# fait échouer, le 23/10/2026, un recueil de 521 pages sur le serveur (2 cœurs) :
+# mesuré à 5,8 s par page avec `--oversample 400` et `--rotate-pages`, contre
+# 1 s sur un Mac. Dix secondes par page laissent la marge ; le plancher garde
+# l'ancien délai pour les documents courts.
+SECONDES_PAR_PAGE = 10
+DELAI_OCR_MIN = 1800
+
+
+def delai_ocr(pages: int) -> int:
+    return max(DELAI_OCR_MIN, pages * SECONDES_PAR_PAGE)
+
+
+def _nb_pages(chemin: Path) -> int:
+    """0 si le PDF ne s'ouvre pas : le plancher s'applique, ocrmypdf dira pourquoi."""
+    try:
+        with pdfplumber.open(chemin) as pdf:
+            return len(pdf.pages)
+    except Exception:
+        return 0
+
+
 def ocr(chemin: Path, langue: str = "fra") -> str:
     """Texte d'un PDF scanné, par reconnaissance optique.
 
@@ -561,7 +650,8 @@ def ocr(chemin: Path, langue: str = "fra") -> str:
     if (garde := texte_garde(cible)) is not None:
         return garde
     if cible.exists() and cible.stat().st_size > 0:
-        return garder_texte(cible, _texte_ocerise(chemin, cible))
+        pages = _pages_ocerisees(chemin, cible)
+        return garder_texte(cible, "\n".join(pages), pages, langue=langue)
     if not shutil.which("ocrmypdf"):
         print("  [ocr] ocrmypdf introuvable — `brew install ocrmypdf`")
         return ""
@@ -573,15 +663,14 @@ def ocr(chemin: Path, langue: str = "fra") -> str:
     print(f"  [ocr] {chemin.name} …", flush=True)
     try:
         subprocess.run(
-            ["ocrmypdf", "-l", langue, *OPTIONS_OCRMYPDF, str(chemin), str(cible)],
-            # Le délai a été doublé avec le coût : `--oversample 400` fait passer
-            # la reconnaissance d'environ une demi-seconde à une seconde par
-            # page, et le plus long procès-verbal du corpus en compte 310.
-            check=True, capture_output=True, timeout=1800)
+            ["ocrmypdf", "-l", langue, *options_ocrmypdf(), str(chemin), str(cible)],
+            check=True, capture_output=True, timeout=delai_ocr(_nb_pages(chemin)),
+            env=environnement_ocr())
     except (subprocess.SubprocessError, OSError) as e:
         print(f"  [ocr][échec] {chemin.name} → {e}")
         return ""
-    return garder_texte(cible, _texte_ocerise(chemin, cible))
+    pages = _pages_ocerisees(chemin, cible)
+    return garder_texte(cible, "\n".join(pages), pages, langue=langue)
 
 
 # « Séance du 25 juin 2026 », dans l'en-tête d'un acte. Repli de deuxième rang :
@@ -611,7 +700,9 @@ def date_de_seance(texte: str, doc, portee: str) -> tuple[str, str, dict]:
     ref = reference_actes(texte)
     if ref:
         attendu = EPCI_SIREN if portee == "epci" else COMMUNE_SIREN
-        if attendu and ref["siren"] != attendu:
+        # Un acte d'avant la fusion porte l'ancien SIREN de la commune.
+        attendus = {EPCI_SIREN} if portee == "epci" else set(COMMUNE_SIRENS)
+        if attendu and ref["siren"] not in attendus:
             # Ne pas refuser la pièce : le portail d'un EPCI publie aussi les
             # actes de son CCAS ou d'un syndicat, qui ont leur propre SIREN.
             # Le signaler suffit, et laisse l'arbitrage à l'atelier.
@@ -674,7 +765,7 @@ def _date_de_mediatheque_refusee(doc, texte: str, verbose: bool) -> bool:
 
 
 def traiter_acte(conn, doc, portee: str, verbose: bool = True,
-                 avec_ocr: bool = False) -> dict:
+                 avec_ocr: bool = False, budget: dict | None = None) -> dict:
     """Enregistre une pièce qui EST une délibération, sans rien découper.
 
     Un portail de publicité légale publie les actes un par un, avec leur numéro
@@ -686,7 +777,7 @@ def traiter_acte(conn, doc, portee: str, verbose: bool = True,
     d'un même jour, et le seul endroit où lire les présents.
     """
     p = PORTEES[portee]
-    lu = lire_document(doc, avec_ocr)
+    lu = lire_document(doc, avec_ocr, budget)
     if lu is None:
         return {"statut": "inaccessible", "delibs": 0}
     texte, format_, ocrise = lu
@@ -714,6 +805,8 @@ def traiter_acte(conn, doc, portee: str, verbose: bool = True,
     delib = acte_unique(doc.acte.get("objet") or doc.libelle, texte,
                         doc.acte.get("numero") or "")
     eid = enregistrer_deliberation(conn, doc, portee, delib)
+    if ocrise:
+        _marquer_ocr(conn, eid, doc.url)
     conn.execute(
         "UPDATE events SET metadata=json_patch(metadata, ?) WHERE id=?",
         (json.dumps({"type_acte": doc.acte.get("type") or "",
@@ -787,13 +880,46 @@ def traiter_convocation(conn, doc, portee: str, texte: str, verbose: bool = True
     return {"statut": "convocation", "delibs": 0, "retirees": retirees}
 
 
+def assemblee_qui_tient(conn, url: str | None, portee: str) -> str | None:
+    """Le type de séance ou d'acte de l'AUTRE assemblée qui tient déjà ce document.
+
+    Un document appartient à une seule collectivité : le procès-verbal de la CC
+    reste celui de la CC, même quand un redécoupage le reprend. Le 29/08/2026,
+    `redecouper_pv` a relu les PV de la CC en portée communale : 833 actes en
+    double, retirés en septembre, et des séances du conseil municipal qui
+    servaient le PV de la CC, restées en ligne jusqu'au 07/11 (43 à Lasalle, 44
+    à Brassac). L'identité d'une séance porte bien l'assemblée ; c'est la
+    PORTÉE donnée au document qui était fausse, et rien ne la confrontait à ce
+    que la base savait déjà.
+
+    Limite : le premier arrivé fait foi. Un PV de la CC lu en portée communale
+    AVANT toute collecte de la CC passerait encore.
+    """
+    if not url:
+        return None
+    autre = PORTEES["epci" if portee == "commune" else "commune"]
+    row = conn.execute(
+        "SELECT e.type FROM events e WHERE e.type IN (?, ?) AND (e.source_url = ?"
+        " OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(e.metadata)"
+        " THEN e.metadata ELSE '{}' END, '$.pieces') p"
+        " WHERE json_extract(p.value, '$.url') = ?)) LIMIT 1",
+        (autre["seance"], autre["delib"], url, url)).fetchone()
+    return row[0] if row else None
+
+
 def traiter(conn, doc, portee: str, verbose: bool = True,
-            avec_ocr: bool = False) -> dict:
+            avec_ocr: bool = False, budget: dict | None = None) -> dict:
     """Télécharge, lit et enregistre un procès-verbal, quel que soit son format."""
+    tenu = assemblee_qui_tient(conn, doc.url, portee)
+    if tenu:
+        if verbose:
+            print(f"  [pv] {doc.url} — déjà rattaché à « {tenu} » : "
+                  f"pas une pièce de la portée {portee}, écarté")
+        return {"statut": "autre_assemblee", "delibs": 0}
     if getattr(doc, "acte", None):
-        return traiter_acte(conn, doc, portee, verbose, avec_ocr)
+        return traiter_acte(conn, doc, portee, verbose, avec_ocr, budget)
     p = PORTEES[portee]
-    lu = lire_document(doc, avec_ocr)
+    lu = lire_document(doc, avec_ocr, budget)
     if lu is None:
         return {"statut": "inaccessible", "delibs": 0}
     texte, format_, ocrise = lu
@@ -815,12 +941,31 @@ def traiter(conn, doc, portee: str, verbose: bool = True,
         return {"statut": "sans_couche_texte" if format_ == "pdf" else "texte_trop_court",
                 "delibs": 0}
 
-    # Seul un PDF a des pages, donc un en-tête de page. Cf. `_sans_entetes`.
-    delibs = deliberations(texte, pagine=(format_ == "pdf"))
+    # Une liasse océrisée dont le manifeste garde les débuts de page se découpe
+    # À LA PAGE (cf. `pv_parsers.actes_par_page`) ; le contrôle de la suite des
+    # numéros entre dans la fiche de séance — un numéro manquant y est un acte
+    # absorbé par son voisin, à reprendre dans l'atelier.
+    pages = pages_gardees(_cible_cache(doc.url).with_suffix(".ocr.pdf"), texte) if ocrise else None
+    # Ce que le découpage écarte — rubrique des décisions par délégation, titre
+    # en fragment, renvoi d'un visa — se compte sur la fiche de séance : rien ne
+    # disparaît sans motif (relecture vigie-securite du 15/11/2026).
+    ecarts = Counter()
+    delibs, suite = deliberations_a_la_page(texte, pages, ecarts)
+    # Compté : un texte océrisé qui retombe sur l'ancien régime (pages absentes, ou
+    # qui ne recomposent pas le texte) ne se voyait nulle part.
+    decoupage = "page" if delibs else ("repli" if ocrise else None)
+    if not delibs:
+        # Seul un PDF a des pages, donc un en-tête de page. Cf. `_sans_entetes`.
+        # Le repli recompte depuis zéro : ce que la lecture à la page a écarté
+        # sans rien garder serait sinon compté deux fois.
+        ecarts = Counter()
+        delibs = deliberations(texte, pagine=(format_ == "pdf"), ecarts=ecarts)
     pres = presences(texte, _ordre_noms(portee))
     seance_id = enregistrer_seance(
         conn, doc, portee,
         {"nb_deliberations": len(delibs), "ocr": ocrise, "format": format_,
+         **({"suite_des_actes": suite} if suite else {}),
+         **({"ecarts_du_decoupage": dict(ecarts)} if ecarts else {}),
          **(doc.meta or {}), **pres})
 
     if not delibs:
@@ -834,13 +979,15 @@ def traiter(conn, doc, portee: str, verbose: bool = True,
     link_persons_to_event(conn, seance_id, pres["absents"], "absent")
     for d in delibs:
         eid = enregistrer_deliberation(conn, doc, portee, d)
+        if ocrise:
+            _marquer_ocr(conn, eid, doc.url)
         link_persons_to_event(conn, eid, pres["presents"], "présent")
 
     if verbose:
         regime = delibs[0]["regime"] if delibs else "non découpé"
         print(f"  [pv] {doc.date} — {len(delibs)} délibérations ({regime}), "
               f"{len(pres['presents'])} présents, {len(pres['pouvoirs'])} pouvoirs")
-    return {"statut": "ok", "delibs": len(delibs)}
+    return {"statut": "ok", "delibs": len(delibs), "decoupage": decoupage}
 
 
 # ── Point d'entrée ───────────────────────────────────────────────────────────
@@ -870,13 +1017,20 @@ def complement_mediatheque(portee: str, documents: list) -> list:
 
 def collecter(portee: str = "commune", depuis: str | None = None,
               limit: int = 0, commit: bool = True,
-              catalogue_seul: bool = False, avec_ocr: bool = False) -> None:
+              catalogue_seul: bool = False, avec_ocr: bool = False,
+              pages_ocr_max: int | None = None) -> None:
+    """`pages_ocr_max` : plafond de pages à océriser sur cette passe (passe
+    planifiée) ; sans lui, `--ocr` à la main n'a pas de limite."""
     instance = COMMUNE_NAME if portee == "commune" else (EPCI_NOM or "EPCI")
     print(f"\n[conseils] {instance} — catalogue des procès-verbaux")
 
     documents = charger(portee=portee).catalogue_pv(portee)
     documents += complement_mediatheque(portee, documents)
     documents.sort(key=lambda d: d.date, reverse=True)
+    # Le catalogue entier, avant le filtre `depuis` et avant ce que la base
+    # connaît déjà : le site le rend tel quel à chaque passe. Une refonte qui
+    # perd la page des PV le fait tomber (Lasalle, famille C des leçons).
+    mesure.lu(f"pv-{portee}", len(documents), None, complete=True)
     print(f"  {len(documents)} procès-verbaux catalogués"
           + (f" ({documents[-1].date} → {documents[0].date})" if documents else ""))
     if depuis:
@@ -896,7 +1050,21 @@ def collecter(portee: str = "commune", depuis: str | None = None,
             upsert_entity(conn, type="service", name=EPCI_NOM,
                           confidence="verified")
 
+    # Les décisions prises par délégation, quand la source les publie à part
+    # (portail d'actes) : leur type propre, titre seul (collectors/decisions.py).
+    # Avant les procès-verbaux, dont une source interrompue arrête la passe.
+    # `getattr` : un connecteur écrit hors de `Connecteur` n'a pas la méthode.
+    catalogue = getattr(charger(portee=portee), "catalogue_decisions", None)
+    decisions = catalogue(portee) if catalogue else []
+    if decisions:
+        from .decisions import collecter as collecter_decisions
+        compte = collecter_decisions(portee, decisions)
+        print(f"  {len(decisions)} décision(s) par délégation : "
+              + ", ".join(f"{n} {c}" for c, n in sorted(compte.items())))
+
     resume = {"ok": 0, "sans_couche_texte": 0, "inaccessible": 0, "delibs": 0}
+    budget = nouveau_budget_ocr(pages_ocr_max) if avec_ocr else None
+    decoupage = {"page": 0, "repli": 0}
     # Une transaction PAR document, et non une seule pour tout le corpus : lire
     # deux cents PDF prend une vingtaine de minutes, pendant lesquelles une
     # transaction unique garde le verrou d'écriture et fait échouer tout autre
@@ -905,13 +1073,18 @@ def collecter(portee: str = "commune", depuis: str | None = None,
     for doc in documents:
         with transaction() as conn:
             if catalogue_seul:
+                if assemblee_qui_tient(conn, doc.url, portee):
+                    resume["autre_assemblee"] = resume.get("autre_assemblee", 0) + 1
+                    continue
                 enregistrer_seance(conn, doc, portee)
                 resume["ok"] += 1
                 continue
-            r = traiter(conn, doc, portee, avec_ocr=avec_ocr)
+            r = traiter(conn, doc, portee, avec_ocr=avec_ocr, budget=budget)
             # `.get` et non `[]` : `traiter` rend aussi « texte_trop_court »,
             # absent du résumé — une page web courte faisait tomber la collecte
             # entière sur un KeyError, après des dizaines de documents lus.
+            if r.get("decoupage") in decoupage:
+                decoupage[r["decoupage"]] += 1
             resume[r["statut"]] = resume.get(r["statut"], 0) + 1
             resume["delibs"] += r["delibs"]
 
@@ -922,7 +1095,17 @@ def collecter(portee: str = "commune", depuis: str | None = None,
           + f", {resume['inaccessible']} inaccessibles"
           + (f", {resume['date_non_attestee']} pièce(s) de médiathèque écartée(s) : "
              f"date du nom de fichier absente du texte"
-             if resume.get("date_non_attestee") else ""))
+             if resume.get("date_non_attestee") else "")
+          + (f", {resume['autre_assemblee']} pièce(s) écartée(s) : déjà tenue(s) "
+             f"par l'autre assemblée" if resume.get("autre_assemblee") else ""))
+    if decoupage["page"] or decoupage["repli"]:
+        print(f"  [ocr] découpage des PV océrisés : {decoupage['page']} à la page, "
+              f"{decoupage['repli']} en repli sur l'ancien régime")
+    if budget and (budget["reportes"] or budget["trop_longs"] or budget["pages"] < budget["max"]):
+        print(f"  [ocr] {budget['max'] - budget['pages']} page(s) océrisée(s) sur "
+              f"{budget['max']} permises ; {budget['reportes']} PV reporté(s) à la "
+              f"prochaine passe, {budget['trop_longs']} plus long(s) que le plafond "
+              f"(à faire à la main : --ocr)")
 
     # Une pièce retirée du site est une lacune connue ; un site qui ne répond
     # plus, non. Aucune réponse du tout, ou plus d'une pièce sur cinq sans
@@ -961,6 +1144,8 @@ def collecter_archives(portee: str = "commune", limit: int = 0,
     # est d'autant plus trompeur que le zéro est plausible (25/08/2026, Brassac).
     incidents: list[str] = []
     documents = catalogue_archive(portee, incidents=incidents)
+    # Avant le zéro qui lève : une archive qui ne rend plus rien se mesure.
+    mesure.lu(f"wayback-pv-{portee}", len(documents), None, complete=True)
     if not documents:
         if incidents:
             raise SourceInterrompue(
@@ -1019,12 +1204,12 @@ def import_pv_archives() -> None:
 
 def import_conseil_municipal() -> None:
     """Entrée appelée par run_all (step `cm`)."""
-    collecter("commune")
+    collecter("commune", avec_ocr=True, pages_ocr_max=PLAFOND_PAGES_OCR)
 
 
 def import_conseil_communautaire() -> None:
     """Entrée appelée par run_all (step `cc_epci`)."""
-    collecter("epci")
+    collecter("epci", avec_ocr=True, pages_ocr_max=PLAFOND_PAGES_OCR)
 
 
 if __name__ == "__main__":

@@ -108,3 +108,21 @@ class TestPages:
 
     def test_l_accueil_cite_toutes_ses_tuiles(self):
         assert "blocs={tableau.map((t) => `accueil.${t.cle}`)}" in _texte(PAGES["accueil"])
+
+    def test_l_accueil_developpe_ses_sigles_au_premier_emploi(self):
+        """Les sources des tuiles se lisent dans l'ordre des tuiles (les quatre de
+        tête, puis les autres) : un sigle y est développé la première fois, et
+        seulement là (brief instances-accueil-maquette, 09/11/2026)."""
+        tableau = _texte(TABLEAU)
+        tete = re.findall(r"'([^']+)'", re.search(r"const TETE = \[([^\]]+)\]", tableau).group(1))
+        ordre = tete + [c for c in _cles_des_tuiles() if c not in tete]
+        sources = [BLOCS[f"accueil.{c}"]["source"] for c in ordre]
+        developpes = {
+            "DGFiP": "Direction générale des Finances publiques (DGFiP)",
+            "OFGL": "Observatoire des finances et de la gestion publique locales (OFGL)",
+            "SISPEA": "observatoire national des services d'eau et d'assainissement (base SISPEA)",
+        }
+        for sigle, long in developpes.items():
+            premiere = next(s for s in sources if sigle in s)
+            assert long in premiere, f"{sigle} : premier emploi non développé — « {premiere} »"
+            assert sum(long in s for s in sources) == 1, f"{sigle} développé plus d'une fois"

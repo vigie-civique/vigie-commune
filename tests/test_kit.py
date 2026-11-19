@@ -120,6 +120,33 @@ def test_le_kit_ne_semboite_pas(depot):
 
 
 
+def test_la_configuration_de_l_assistant_ne_sort_pas(depot):
+    """`.claude/` et `CLAUDE.md` portent des chemins de poste : hors du kit,
+    comme hors du miroir public."""
+    (depot / ".claude").mkdir()
+    (depot / ".claude" / "settings.json").write_text('{"x": "' + CHEMIN_PERSONNEL + '/s.py"}')
+    (depot / "CLAUDE.md").write_text("# configuration\n")
+    subprocess.run(["git", "-C", str(depot), "add", "-A"], check=True, capture_output=True)
+    retenus = {p.relative_to(depot).as_posix() for p in kit.fichiers(depot)}
+    assert "collectors/rna.py" in retenus
+    assert not any(r.startswith(".claude") or r == "CLAUDE.md" for r in retenus)
+
+
+def test_les_syntheses_nominatives_ne_sortent_pas(depot):
+    """Les synthèses IA de l'atelier (dashboard/static/api/syntheses/) ne
+    partent pas dans le kit, même versionnées par erreur."""
+    d = depot / "dashboard" / "static" / "api" / "syntheses"
+    d.mkdir(parents=True)
+    (d / "99001-0001.json").write_text('{"niveau_interet": 3, "texte": "fictif"}')
+    subprocess.run(["git", "-C", str(depot), "add", "-A", "-f"], check=True, capture_output=True)
+    suivis = subprocess.run(["git", "-C", str(depot), "ls-files"], check=True,
+                            capture_output=True, text=True).stdout
+    assert "dashboard/static/api/syntheses/99001-0001.json" in suivis   # le piège est posé
+    retenus = {p.relative_to(depot).as_posix() for p in kit.fichiers(depot)}
+    assert "collectors/rna.py" in retenus
+    assert not any(r.startswith("dashboard/static/api/") for r in retenus)
+
+
 # ── L'exception des images (06/10/2026) ──────────────────────────────────────
 # Le dépôt versionne quatre icônes PNG. Elles n'échappent pas au contrôle :
 # elles sont nommées une par une, et ne peuvent porter que de l'image.

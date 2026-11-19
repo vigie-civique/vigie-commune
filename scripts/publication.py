@@ -112,6 +112,13 @@ VERSIONS_GARDEES = 1
 # semaines après que ces règles avaient été resserrées.
 VERSIONS = ROOT / "audits" / "versions"
 
+# Chaque version promue, gardée : son manifeste et une archive compressée du
+# snapshot, dans `PUBLIEES/AAAAMMJJ/` (revue d'architecture du 07/11/2026, C3).
+# `VERSIONS_GARDEES` ne garde qu'une version en arrière, pour revenir ; ceci
+# sert à MONTRER ce qui était servi un jour donné, face à un élu qui conteste
+# un chiffre vu trois semaines plus tôt. Rétention : `elaguer_les_archives`.
+PUBLIEES = ROOT / "audits" / "publiees"
+
 # Mais `VERSIONS` n'est pas dans le montage des destinations. Sous systemd
 # (`ProtectSystem=strict`), chaque `ReadWritePaths` est un montage « bind » à
 # part : `audits`, `dashboard/static` et `public` sont trois montages, et
@@ -1067,6 +1074,61 @@ def miroir(src: Path, dest: Path) -> dict:
             "fichiers_retires": retires}
 
 
+def archiver_la_version(dossier: Path, quand: datetime | None = None) -> dict:
+    """Range le manifeste et une archive `.tar.gz` de `dossier` (la version qui
+    vient d'être mise en service) dans `PUBLIEES/AAAAMMJJ/`, suffixés de
+    l'heure : deux promotions du même jour se gardent toutes les deux.
+    L'archive s'écrit à côté puis se renomme : une archive présente est entière.
+    """
+    import tarfile
+    quand = quand or datetime.now(timezone.utc).astimezone()
+    jour = PUBLIEES / quand.strftime("%Y%m%d")
+    jour.mkdir(parents=True, exist_ok=True)
+    heure = quand.strftime("%H%M%S")
+    manifeste = jour / f"manifeste-{heure}.json"
+    archive = jour / f"snapshot-{heure}.tar.gz"
+    provisoire = archive.with_name(archive.name + ".partiel")
+    with tarfile.open(provisoire, "w:gz") as tar:
+        tar.add(dossier, arcname="snapshot")
+    os.replace(provisoire, archive)
+    if (Path(dossier) / "manifeste.json").is_file():
+        shutil.copy2(Path(dossier) / "manifeste.json", manifeste)
+    return {"manifeste": str(manifeste) if manifeste.exists() else None,
+            "archive": str(archive), "octets": archive.stat().st_size,
+            "elaguees": elaguer_les_archives(quand)}
+
+
+# Rétention décidée le 07/11/2026 : tout garder 13 mois, puis une version par
+# mois (la première du mois). ~3 Mo l'archive pour Lasalle, ~1,1 Go la 1re année.
+GARDER_TOUT_MOIS = 13
+
+
+def elaguer_les_archives(quand: datetime) -> int:
+    """Au-delà de `GARDER_TOUT_MOIS`, ne garde que la première version de chaque
+    mois (archive et manifeste de même heure). Rend le nombre de fichiers ôtés."""
+    mois = quand.year * 12 + quand.month - 1 - GARDER_TOUT_MOIS
+    seuil = f"{mois // 12:04d}{mois % 12 + 1:02d}{min(quand.day, 28):02d}"
+    vues, otes = set(), 0
+    if not PUBLIEES.is_dir():
+        return 0
+    for jour in sorted(d for d in PUBLIEES.iterdir()
+                       if d.is_dir() and d.name.isdigit() and len(d.name) == 8):
+        if jour.name >= seuil:
+            break
+        for archive in sorted(jour.glob("snapshot-*.tar.gz")):
+            if jour.name[:6] not in vues:
+                vues.add(jour.name[:6])
+                continue
+            heure = archive.name[len("snapshot-"):-len(".tar.gz")]
+            for f in (archive, jour / f"manifeste-{heure}.json"):
+                if f.exists():
+                    f.unlink()
+                    otes += 1
+        if not any(jour.iterdir()):
+            jour.rmdir()
+    return otes
+
+
 def _differences(avant: dict | None, apres: dict | None) -> dict:
     """Ce qui a bougé entre l'aperçu contrôlé et la copie publiée.
 
@@ -1083,9 +1145,64 @@ def _differences(avant: dict | None, apres: dict | None) -> dict:
     return ecarts
 
 
+# ── Garde de volume (passe automatique) ──────────────────────────────────────
+# Revue d'architecture du 07/11/2026, C2 : onze collecteurs vident puis
+# réécrivent leur table, et la passe de nuit publiait dès qu'une autre source
+# ajoutait une ligne. Une source tronquée partait donc en ligne sans regard
+# humain. Avant toute mise en service AUTOMATIQUE, chaque fichier du manifeste
+# neuf est comparé à celui de la version servie : plus de moitié de ses objets
+# perdus, ou zéro, et la passe refuse. Les petits fichiers (moins de
+# `PLANCHER_DE_VOLUME` objets servis) ne jouent pas : une table de trois lignes
+# qui en perd deux est une correction, pas une troncature.
+# Décision de Julien (07/11/2026) : seuil, plancher, et passe automatique seule.
+PLANCHER_DE_VOLUME = 20
+PERTE_MAXIMALE = 0.5
+
+
+def _objets_du_manifeste(dossier: Path) -> dict[str, int]:
+    try:
+        manifeste = json.loads((Path(dossier) / "manifeste.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {f["chemin"]: f["objets"] for f in manifeste.get("fichiers") or []
+            if isinstance(f.get("objets"), int)}
+
+
+def chutes_de_volume(neuf: Path, servi: Path) -> list[dict]:
+    """Les fichiers du manifeste neuf qui perdent trop par rapport au servi.
+
+    Un fichier servi absent du neuf compte comme tombé à zéro. Rien de servi
+    (première publication, manifeste illisible) : rien à comparer.
+    """
+    avant, apres = _objets_du_manifeste(servi), _objets_du_manifeste(neuf)
+    chutes = []
+    for chemin, n_avant in sorted(avant.items()):
+        if n_avant < PLANCHER_DE_VOLUME:
+            continue
+        n_apres = apres.get(chemin, 0)
+        if n_apres == 0 or n_apres < n_avant * (1 - PERTE_MAXIMALE):
+            chutes.append({"chemin": chemin, "servi": n_avant, "neuf": n_apres})
+    return chutes
+
+
+def consigner_passe_outre(conn, auteur: str | None, motif: str, chutes: list[dict]) -> int:
+    """Le passage outre la garde de volume, dans `audit_log`. Rend l'id écrit.
+
+    `table_name='publication'` : ce geste ne déclenche pas à lui seul une
+    republication (`GESTES_SANS_EFFET_SUR_LE_SITE`)."""
+    cur = conn.execute(
+        "INSERT INTO audit_log(user_id, table_name, action, new_value) VALUES(?,?,?,?)",
+        (None, "publication", "garde-de-volume-passee-outre",
+         json.dumps({"auteur": auteur, "motif": motif, "chutes": chutes},
+                    ensure_ascii=False)[:4000]))
+    conn.commit()
+    return cur.lastrowid
+
+
 def publier(auteur: str | None = None, role: str | None = None,
             source: Path | None = None, controleur=None,
-            apercu: dict | None = None) -> dict:
+            apercu: dict | None = None, passe_auto: bool = False,
+            passer_outre: str | None = None, consigner=None) -> dict:
     """Porte un aperçu DÉJÀ contrôlé vers les deux emplacements servis.
 
     Le contrôle est rejoué trois fois — sur le brouillon avant de bouger, puis
@@ -1105,6 +1222,13 @@ def publier(auteur: str | None = None, role: str | None = None,
 
     `apercu` : l'aperçu d'un compte (`apercu_du_compte`). Dans l'atelier, l'admin
     publie SON aperçu, généré par lui ; un aperçu expiré ne se publie pas.
+
+    `passe_auto` : la passe de nuit (`deploy/collecte.sh`). Elle seule est
+    soumise à la garde de volume (`chutes_de_volume`) ; une publication faite
+    par un humain la montre (`chutes_de_volume` du résultat) sans la bloquer.
+    `passer_outre` : le motif écrit qui lève la garde, consigné par
+    `consigner(chutes, motif)` AVANT la mise en service — un motif qui ne
+    s'écrit pas ne lève rien.
     """
     if not peut_publier(role):
         raise PublicationRefusee(
@@ -1122,11 +1246,16 @@ def publier(auteur: str | None = None, role: str | None = None,
                 "actuel de la base.")
         source = Path(apercu["repertoire"])
 
+    if passer_outre is not None and not passer_outre.strip():
+        raise PublicationRefusee("Passer outre la garde de volume exige un motif écrit.")
+
     with verrou_de_publication():
-        return _publier_sous_verrou(auteur, source, controleur, apercu)
+        return _publier_sous_verrou(auteur, source, controleur, apercu,
+                                    passe_auto, passer_outre, consigner)
 
 
-def _publier_sous_verrou(auteur, source, controleur, apercu=None) -> dict:
+def _publier_sous_verrou(auteur, source, controleur, apercu=None, passe_auto=False,
+                         passer_outre=None, consigner=None) -> dict:
     source = (source or BROUILLON).resolve()
     controleur = controleur or controler
     etat = lire_etat()
@@ -1145,6 +1274,23 @@ def _publier_sous_verrou(auteur, source, controleur, apercu=None) -> dict:
         raise PublicationRefusee(
             "Aperçu refusé par le contrôle d'étanchéité — rien n'a été publié, "
             "le site public est inchangé.", {"controle": controle_apercu})
+
+    # 1 bis. La garde de volume, contre la version SERVIE (pas contre le
+    #    brouillon d'hier, que rien ne garantit avoir été publié).
+    chutes = chutes_de_volume(source, PUBLIE)
+    passe_outre_id = None
+    if chutes and passer_outre:
+        if consigner is None:
+            raise PublicationRefusee(
+                "Le motif du passage outre n'a nulle part où s'écrire — rien n'a été publié.")
+        passe_outre_id = consigner(chutes, passer_outre.strip())
+    elif chutes and passe_auto:
+        raise PublicationRefusee(
+            "Garde de volume : " + ", ".join(
+                f"{c['chemin']} {c['servi']} → {c['neuf']}" for c in chutes)
+            + ". La passe automatique ne publie pas une telle baisse — rien n'a "
+            "été publié, le site est inchangé. Publier à la main, ou passer outre "
+            "avec un motif (--passer-outre).", {"chutes_de_volume": chutes})
 
     # 2. Vers ce que l'atelier sert — construit à côté, contrôlé, puis mis en
     #    service d'un seul geste. Un refus laisse l'ancienne version entière et
@@ -1177,9 +1323,17 @@ def _publier_sous_verrou(auteur, source, controleur, apercu=None) -> dict:
             "NE PAS DÉPLOYER. Le site conserve sa version précédente.",
             {"controle": controle_site})
 
+    # 4. La version servie, archivée. Un échec ici ne défait pas la
+    #    publication (elle est faite) : il se dit dans le résultat.
+    try:
+        archive = archiver_la_version(PUBLIE)
+    except Exception as e:                              # noqa: BLE001
+        archive = {"erreur": f"{type(e).__name__}: {e}"}
+
     publie = {
         "publie_le": maintenant(),
         "publie_par": auteur,
+        "archive": archive,
         "repertoire": str(PUBLIE),
         "apercu_genere_le": brouillon.get("genere_le"),
         "apercu_genere_par": brouillon.get("genere_par"),
@@ -1195,6 +1349,8 @@ def _publier_sous_verrou(auteur, source, controleur, apercu=None) -> dict:
         "controle_site": controle_site,
         "differences": _differences(brouillon.get("stats"),
                                     _stats_du_repertoire(PUBLIE)),
+        "chutes_de_volume": chutes,
+        **({"garde_passee_outre": passe_outre_id} if passe_outre_id else {}),
         "existe": True,
     }
     etat["publie"] = publie
@@ -1835,8 +1991,16 @@ def main(argv: list[str] | None = None) -> int:
     gestes = parser.add_subparsers(dest="geste", required=True)
     gestes.add_parser("apercu", help="construire le snapshot dans le brouillon, "
                                      "et le contrôler")
-    gestes.add_parser("publier", help="promouvoir le brouillon contrôlé vers les "
-                                      "deux emplacements servis")
+    pub_ = gestes.add_parser("publier", help="promouvoir le brouillon contrôlé vers "
+                                             "les deux emplacements servis")
+    # En ligne de commande, la garde joue TOUJOURS (avis vigie-securite du
+    # 07/11/2026) : sans cela `publier` nu publiait une chute sans motif. Seule
+    # la route de l'atelier (admin, Lasalle) appelle `publier()` sans garde.
+    # `--passe-auto` reste accepté : `deploy/collecte.sh` le passe.
+    pub_.add_argument("--passe-auto", action="store_true",
+                      help="(sans effet : la garde de volume joue toujours ici)")
+    pub_.add_argument("--passer-outre", metavar="MOTIF",
+                      help="lever la garde de volume ; motif consigné dans audit_log")
     verifier = gestes.add_parser("verifier", help="constater que le site en ligne "
                                                   "sert la version promue")
     verifier.add_argument("--essais", type=int, default=1,
@@ -1890,7 +2054,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.geste == "publier":
-            publie = publier(auteur=auteur, role="admin")
+            def consigner(chutes, motif):
+                from collectors.db import get_conn
+                conn = get_conn()
+                try:
+                    return consigner_passe_outre(conn, auteur, motif, chutes)
+                finally:
+                    conn.close()
+            publie = publier(auteur=auteur, role="admin", passe_auto=True,
+                             passer_outre=args.passer_outre, consigner=consigner)
+            for c in publie.get("chutes_de_volume") or []:
+                print(f"   ⚠ baisse publiée : {c['chemin']} {c['servi']} → {c['neuf']}")
             print(f"   promu : empreinte {publie['empreinte']} → {PUBLIE}, {SITE}")
             if publie.get("differences"):
                 print(f"   ⚠ écarts entre l'aperçu et la copie : {publie['differences']}")

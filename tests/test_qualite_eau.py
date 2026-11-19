@@ -43,10 +43,12 @@ def test_une_station_hors_selection_est_purgee_avec_ses_analyses(base):
     assert base.execute("SELECT COUNT(*) FROM eau_analyses").fetchone()[0] == 1
 
 
-def test_une_selection_vide_purge_tout(base):
-    """Une commune sans station, sans bassin déclaré : rien ne doit rester
-    publié sous son nom."""
+def test_une_selection_vide_ne_purge_rien(base):
+    """Hub'Eau qui rend `{"data": []}` (paramètre renommé, panne partielle) ne
+    doit pas effacer toutes les stations et leurs analyses : la passe de nuit
+    publierait une page Environnement vide (revue du 07/11/2026, C6)."""
     ensure_tables(base)
     _station(base, "05148200")
-    assert purger_hors_selection(base, []) == 1
-    assert base.execute("SELECT COUNT(*) FROM eau_stations").fetchone()[0] == 0
+    assert purger_hors_selection(base, []) == 0
+    assert base.execute("SELECT COUNT(*) FROM eau_stations").fetchone()[0] == 1
+    assert base.execute("SELECT COUNT(*) FROM eau_analyses").fetchone()[0] == 1

@@ -35,7 +35,7 @@ TYPES = ("demonstration", "constitution", "tenue")
 LIBELLES = {
     "demonstration": "Portage de démonstration",
     "constitution":  "Vigie locale en constitution",
-    "tenue":         "Instance tenue",
+    "tenue":         "Vigie locale tenue par des habitants",
 }
 
 TEXTES = {

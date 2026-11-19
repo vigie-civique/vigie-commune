@@ -75,10 +75,18 @@ def compter_objets(chemin: Path, brut: bytes) -> int | None:
 def revision_du_moteur(racine: Path = ROOT) -> tuple[str | None, bool | None]:
     """Le commit du moteur qui construit, et s'il porte des modifications non
     validées. `(None, None)` hors d'un dépôt git (une archive du kit) : le dire
-    vaut mieux que d'inventer un numéro."""
+    vaut mieux que d'inventer un numéro.
+
+    `safe.directory` est passé en ligne de commande : sur le VPS, le dépôt de
+    Lasalle appartient à root et la publication tourne sous
+    `vigie-atelier-lasalle`, et git refusait le dépôt (« dubious ownership »).
+    Le manifeste servi portait `revision_moteur: null` sans que rien ne le
+    signale (relevé du 28/10/2026). Le garde-fou de git protège d'un dépôt
+    écrit par un tiers ; celui-ci l'est par root, et l'exception ne vaut que
+    pour ces deux lectures."""
     def git(*args):
-        return subprocess.run(["git", "-C", str(racine), *args], capture_output=True,
-                              text=True, timeout=20)
+        return subprocess.run(["git", "-c", f"safe.directory={racine}", "-C", str(racine),
+                               *args], capture_output=True, text=True, timeout=20)
     try:
         tete = git("rev-parse", "HEAD")
         if tete.returncode != 0:
@@ -95,8 +103,30 @@ def etape_retirer_manifeste(out) -> None:
     (Path(out) / NOM).unlink(missing_ok=True)
 
 
-def etape_manifeste(out, stats) -> None:
-    """Le dernier fichier du snapshot : tous les autres, et qui les a écrits."""
+def _sha256_du_fichier(chemin: Path) -> str | None:
+    try:
+        return hashlib.sha256(Path(chemin).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def dernier_geste(conn) -> int | None:
+    """Le dernier `audit_log.id` : le repère de base de la construction."""
+    try:
+        return conn.execute("SELECT MAX(id) FROM audit_log").fetchone()[0]
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
+def etape_manifeste(out, stats, conn=None) -> None:
+    """Le dernier fichier du snapshot : tous les autres, et qui les a écrits.
+
+    L'en-tête dit aussi AVEC QUOI il a été construit (revue d'architecture du
+    07/11/2026, C3) : l'empreinte des règles de publication et de l'instance,
+    et le dernier geste du journal. À base, règles et horloge égales, deux
+    constructions sont identiques à l'octet : ces trois repères suffisent à
+    dire ce qu'il faudrait réunir pour reconstruire une version servie."""
+    from collectors.config import INSTANCE, RULES_PATH
     # Le registre importe ce module : la liste des étapes se lit à l'appel.
     from scripts.snapshot.etapes import ETAPES
 
@@ -123,6 +153,9 @@ def etape_manifeste(out, stats) -> None:
         "genere_le": stats.get("generated_at"),
         "revision_moteur": revision,
         "moteur_modifie": modifie,
+        "regles_sha256": _sha256_du_fichier(RULES_PATH),
+        "instance_sha256": _sha256_du_fichier(INSTANCE),
+        "audit_log_id": dernier_geste(conn) if conn is not None else None,
         "total": len(fichiers),
     }
     # Une ligne par fichier : le manifeste se relit et se compare ligne à ligne.

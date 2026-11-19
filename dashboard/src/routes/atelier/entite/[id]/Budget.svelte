@@ -43,7 +43,8 @@
               {#if brouillon.suppr.includes(b.id)}{' '}
                 <button class="lien-annuler" on:click={() => basculerSuppr(b.id)}>rétablir</button>
               {' '}{:else}{' '}
-                <button class="icon-del" title="Supprimer" on:click={() => basculerSuppr(b.id)}>✕</button>
+                <button class="btn-texte danger" title="Efface la ligne de la base"
+                        aria-label="Supprimer cette ligne : l'effacer de la base" on:click={() => basculerSuppr(b.id)}>Supprimer</button>
               {' '}{/if}
             </td>
           </tr>

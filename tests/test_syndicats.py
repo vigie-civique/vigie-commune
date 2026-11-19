@@ -169,3 +169,190 @@ def test_sans_table_la_fiche_na_pas_dencart(tmp_path):
     conn = sqlite3.connect(tmp_path / "ancienne.db")
     conn.row_factory = sqlite3.Row
     assert _snapshot().comptes_syndicats_par_entite(conn) == {}
+
+
+# ── L'intercommunalité elle-même (23/10/2026) ────────────────────────────────
+
+def test_les_associations_se_lisent_a_part_des_communes():
+    """6574x : personnes de droit privé ; 6573x : communes, CCAS, budgets annexes."""
+    postes = agreger([_compte("65748", obnetdeb=287000.0),
+                      _compte("657341", obnetdeb=12000.0)])[(2024, "20009119700018")]["postes"]
+    assert postes["subventions_versees"] == 299000.0
+    assert postes["subventions_personnes_privees"] == 287000.0
+
+
+def test_l_epci_se_trouve_par_sa_configuration(base, entite, monkeypatch):
+    import collectors.config as config
+    from collectors.syndicats_comptes import epci_du_territoire
+    monkeypatch.setattr(config, "EPCI_NOM", "CC des Épreuves")
+    monkeypatch.setattr(config, "EPCI_SIREN", "209900019")
+    from collectors.nom_normalise import normaliser
+    eid = entite("CC des Épreuves", "service")
+    base.execute("UPDATE entities SET name_norm=? WHERE id=?", (normaliser("CC des Épreuves"), eid))
+    assert epci_du_territoire(base) == (eid, "209900019", "CC des Épreuves")
+    monkeypatch.setattr(config, "EPCI_SIREN", "")
+    assert epci_du_territoire(base) is None
+
+
+def test_l_epci_ecrit_par_sirene_se_trouve_par_son_siren(base, entite, monkeypatch):
+    # Dossier national du 31/10/2026 : la seule fiche de la communauté portait
+    # le libellé du registre, et le nom de la configuration ne la trouvait pas.
+    import collectors.config as config
+    from collectors.syndicats_comptes import epci_du_territoire
+    monkeypatch.setattr(config, "EPCI_NOM", "CC des Épreuves")
+    monkeypatch.setattr(config, "EPCI_SIREN", "209900019")
+    eid = entite("COMMUNAUTE DE COMMUNES DES EPREUVES", "service")
+    base.execute("INSERT INTO businesses (entity_id, siren) VALUES (?, '209900019')", (eid,))
+    assert epci_du_territoire(base) == (eid, "209900019", "CC des Épreuves")
+
+
+def test_la_fiche_de_l_epci_dit_que_ce_sont_ses_comptes(base, entite):
+    epci = entite("CC", "service")
+    synd = entite("SIAEP", "service")
+    importer(base, epci, "209900019", [_compte("65748", obnetdeb=5.0)], source="dgfip-gfp")
+    importer(base, synd, "200091197", [_compte("6156", obnetdeb=1.0)])
+    comptes = _snapshot().comptes_syndicats_par_entite(base)
+    assert comptes[epci][0]["de"] == "epci"
+    assert comptes[synd][0]["de"] == "syndicat"
+
+
+def test_une_balance_non_lue_met_le_step_en_echec(tmp_path, schema_sql, monkeypatch):
+    import sqlite3
+    import pytest
+    from collectors import syndicats_comptes as sc
+    chemin = tmp_path / "b.db"
+    c = sqlite3.connect(chemin)
+    c.executescript(schema_sql)
+    c.close()
+    monkeypatch.setattr(sc, "DB_PATH", chemin)
+    monkeypatch.setattr(sc, "epci_du_territoire", lambda conn: (None, "209900019", "CC"))
+
+    def panne(*a, **k):
+        raise OSError("réseau")
+    monkeypatch.setattr(sc, "telecharger", panne)
+    with pytest.raises(RuntimeError, match="209900019"):
+        sc.run()
+
+
+def test_une_intercommunalite_sans_fiche_ne_se_lit_pas_en_silence(tmp_path, schema_sql, monkeypatch):
+    """Écrite sans fiche, la balance aurait `entity_id` NULL, que le snapshot
+    écarte : le journal aurait compté des postes que personne ne verrait."""
+    import sqlite3
+    import pytest
+    from collectors import syndicats_comptes as sc
+    chemin = tmp_path / "b.db"
+    c = sqlite3.connect(chemin)
+    c.executescript(schema_sql)
+    c.close()
+    monkeypatch.setattr(sc, "DB_PATH", chemin)
+    monkeypatch.setattr(sc, "epci_du_territoire", lambda conn: (None, "209900019", "CC"))
+    monkeypatch.setattr(sc, "telecharger", lambda *a, **k: [_compte("65748", obnetdeb=5.0)])
+    with pytest.raises(RuntimeError, match="209900019"):
+        sc.run()
+    c = sqlite3.connect(chemin)
+    assert c.execute("SELECT COUNT(*) FROM comptes_syndicats").fetchone()[0] == 0
+
+
+
+def test_un_delai_depasse_se_lit_comme_une_panne_passagere(tmp_path, schema_sql, monkeypatch, capsys):
+    """Le 31/10, l'export DGFiP est resté muet un quart d'heure : chaque syndicat
+    tombait en délai dépassé, et le service local classait le step en défaut
+    faute de reconnaître le message. Les lignes suivent la forme qu'il lit
+    (`portail-local/local_service/server.py`, DETAIL et CROIX)."""
+    import re
+    import socket
+    import sqlite3
+    import pytest
+    from collectors import syndicats_comptes as sc
+    chemin = tmp_path / "b.db"
+    c = sqlite3.connect(chemin)
+    c.executescript(schema_sql)
+    c.close()
+    monkeypatch.setattr(sc, "DB_PATH", chemin)
+    monkeypatch.setattr(sc, "epci_du_territoire", lambda conn: (1, "209900019", "CC"))
+    monkeypatch.setattr(sc, "syndicats_du_territoire",
+                        lambda conn: [(2, "252703863", "Syndicat de prévention, collecte")])
+
+    def muet(*a, **k):
+        raise socket.timeout("The read operation timed out")
+    monkeypatch.setattr(sc, "telecharger", muet)
+    with pytest.raises(RuntimeError) as e:
+        sc.run()
+    assert str(e.value) == "relevés en échec : 209900019, 252703863"
+    details = re.findall(r"\[(\w+)\] (?:\d[\dAB]\d{3} )?(.+?) : échec → (.*)", capsys.readouterr().out)
+    assert {(step, cle) for step, cle, _ in details} == {
+        ("syndicats", "209900019"), ("syndicats", "252703863")}
+    assert all("timed out" in motif for _, _, motif in details)
+
+# ── Trois règles, relevées sur la balance 2025 de la CC (24/10/2026) ─────────
+# Lignes recopiées du jeu DGFiP `balances-comptables-des-groupements-a-
+# fiscalite-propre-depuis-2010`, SIREN 200034601 : la page servait −900 653 €
+# de dette, −7 339 € de personnel, et des ventes au-dessus des recettes.
+
+def _cc(compte, ident, **montants):
+    return _compte(compte, exer="2025", ident=ident, **{"oobdeb": 0.0, "oobcre": 0.0, **montants})
+
+
+def test_une_ecriture_dordre_ne_compte_ni_en_recette_ni_en_depense():
+    """OBNET comprend l'ordre ; la variation de stocks (7135) et la sortie d'un
+    bien (21321 crédité par ordre) ne sont pas des opérations réelles."""
+    bois = "20003460100043"
+    postes = agreger([
+        _cc("701", bois, obnetcre=9558.0),
+        _cc("7135", bois, obnetdeb=6089.2, obnetcre=3350.0, oobdeb=6089.2, oobcre=3350.0),
+    ])[(2025, bois)]["postes"]
+    assert postes["recettes_fonctionnement"] == postes["ventes_et_redevances"] == 9558.0
+
+    principal = "20003460100019"
+    postes = agreger([
+        _cc("2111", principal),
+        _cc("21321", principal, obnetcre=220444.45, oobcre=220444.45),
+    ])[(2025, principal)]["postes"]
+    assert postes["depenses_investissement"] == 0.0             # et non −220 444,45
+
+
+def test_le_personnel_est_le_chapitre_012():
+    """Le budget Déchets paie son personnel en 6215 ; son 64198 (remboursements
+    sur rémunérations) est une atténuation, pas du personnel en moins."""
+    dechets = "20003460100092"
+    postes = agreger([
+        _cc("6215", dechets, obnetdeb=586397.83),
+        _cc("6475", dechets, obnetdeb=111.6),
+        _cc("64198", dechets, obnetcre=7451.04),
+    ])[(2025, dechets)]["postes"]
+    assert round(postes["personnel"], 2) == 586509.43
+
+
+def test_un_encours_negatif_nest_pas_une_dette():
+    """Le 1641 du budget eau n'a jamais été crédité : 900 653 € de capital
+    remboursé, pas une dette de −900 653 €. Le budget Déchets, lui, a un vrai
+    encours."""
+    eau, dechets = "20003460100100", "20003460100092"
+    comptes = agreger([
+        _cc("1641", eau, bedeb=640530.01, obnetdeb=260123.13, sd=900653.14),
+        _cc("1641", dechets, becre=553109.52, obnetdeb=43388.44, sc=509721.08),
+    ])
+    assert "encours_dette" not in comptes[(2025, eau)]["postes"]
+    assert comptes[(2025, eau)]["postes"]["encours_dette_non_lisible"] == 900653.14
+    assert comptes[(2025, dechets)]["postes"]["encours_dette"] == 509721.08
+
+
+def test_un_poste_que_la_regle_ne_produit_plus_disparait_au_rejeu(base, entite):
+    eau = "20003460100100"
+    cc = entite("CC", "service")
+    importer(base, cc, "200034601", [_cc("1641", eau, sc=1000.0)], source="dgfip-gfp")
+    importer(base, cc, "200034601", [_cc("1641", eau, sd=900653.14)], source="dgfip-gfp")
+    postes = {r[0] for r in base.execute("SELECT poste FROM comptes_syndicats")}
+    assert postes == {"encours_dette_non_lisible"}
+
+
+def test_les_remboursements_de_la_m57_developpee_ne_sont_pas_du_personnel():
+    """6439 et 6449 sont au chapitre 013 en M57 développée (plans de comptes
+    normatifs 2023-2026) : des recettes, comme 6419."""
+    m57 = "20003460100019"
+    postes = agreger([
+        _compte("64111", exer="2025", ident=m57, obnetdeb=1000.0),
+        _compte("6439", exer="2025", ident=m57, obnetcre=100.0),
+        _compte("6449", exer="2025", ident=m57, obnetcre=50.0),
+    ])[(2025, m57)]["postes"]
+    assert postes["personnel"] == 1000.0

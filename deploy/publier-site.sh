@@ -4,6 +4,7 @@
 #   ./deploy/publier-site.sh                         # aperçu + promotion + build, sans mise en ligne
 #   ./deploy/publier-site.sh --deployer              # … et mise en ligne, puis constat
 #   ./deploy/publier-site.sh --deployer --deja-promu # déployer la version promue, sans rien reconstruire
+#   ./deploy/publier-site.sh --deployer --passer-outre "motif"  # lever la garde de volume
 #
 # Ce script tourne sur la MACHINE QUI PORTE LA BASE, pas sur un serveur : le
 # site public n'a pas de backend, tout est figé au build. La base ne quitte
@@ -40,12 +41,21 @@ PUBLICATION="$ROOT/scripts/publication.py"
 
 DEPLOYER=0
 DEJA_PROMU=0
-for option in "$@"; do
-  case "$option" in
+# Garde de volume (`publication.py`, revue du 07/11/2026, C2) : elle joue à
+# chaque publication en ligne de commande ; `--passer-outre MOTIF` la lève,
+# motif consigné dans `audit_log`. `--passe-auto` est gardé pour collecte.sh.
+OPTIONS_PUBLIER=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --deployer)   DEPLOYER=1 ;;
     --deja-promu) DEJA_PROMU=1 ;;
-    *) echo "✖ option inconnue : $option" >&2; exit 1 ;;
+    --passe-auto) OPTIONS_PUBLIER+=(--passe-auto) ;;
+    --passer-outre)
+      if [ -z "${2:-}" ]; then echo "✖ --passer-outre exige un motif" >&2; exit 1; fi
+      OPTIONS_PUBLIER+=(--passer-outre "$2"); shift ;;
+    *) echo "✖ option inconnue : $1" >&2; exit 1 ;;
   esac
+  shift
 done
 
 # Où publier — résolu AVANT de travailler : découvrir qu'il manque une
@@ -113,7 +123,7 @@ if [ "$DEJA_PROMU" -eq 0 ]; then
   echo "2/5 — Promotion : l'aperçu contrôlé devient la version servie"
   # Recontrôlé à l'arrivée, mis en service par renommage, `version.json` écrit :
   # c'est cette empreinte que l'étape 5 cherchera en ligne.
-  "$PY" "$PUBLICATION" publier
+  "$PY" "$PUBLICATION" publier ${OPTIONS_PUBLIER[@]+"${OPTIONS_PUBLIER[@]}"}
 else
   echo "1-2/5 — Sautées (--deja-promu) : la version promue part telle quelle"
   if [ ! -f "$ROOT/public/static/data/version.json" ]; then

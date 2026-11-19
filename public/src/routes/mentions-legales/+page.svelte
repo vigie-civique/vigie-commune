@@ -1,5 +1,5 @@
 <script>
-  import { CODE_POSTAL, COMMUNE_DE, CONTACT_EMAIL, DIRECTEUR_PUBLICATION, EDITEUR_NOM, EDITEUR_SIEGE, EDITEUR_STATUT, EDITEUR_TELEPHONE, EPCI, HEBERGEUR, PREFECTURE, SITE_NOM } from '#lib/instance.js'
+  import { CODE_POSTAL, COMMUNE_DE, CONTACT_EMAIL, DESTINATAIRES, DIRECTEUR_PUBLICATION, EDITEUR_NOM, EDITEUR_SIEGE, EDITEUR_STATUT, EDITEUR_TELEPHONE, EPCI, HEBERGEUR, PREFECTURE, SITE_NOM } from '#lib/instance.js'
 </script>
 
 <svelte:head><title>Mentions légales - {SITE_NOM}</title>
@@ -78,24 +78,73 @@
     <li>Article 9.2.e : pour la seule appartenance politique que les candidats ont eux-mêmes rendue
       publique (listes et étiquettes déposées). Les données de SIRENE, du RNA et des mandats ne relèvent
       pas de l'article 9.</li>
-    <li>Article 85 RGPD et article 80 de la loi Informatique et Libertés : liberté d'expression et d'information.</li>
+    <!-- L'article 80 de la loi Informatique et Libertés était cité ici. Il
+         réserve son régime au journalisme exercé à titre professionnel et à
+         l'expression universitaire, artistique ou littéraire : l'éditeur n'en
+         relève pas (avis du 27/10/2026). L'article 85 du RGPD suivait : il
+         renvoie aux États le soin de concilier, et n'est pas une base légale
+         (avis du 14/11/2026). -->
   </ul>
 
   <h2>Données publiées</h2>
   <p>
     Le site ne publie que des données issues de sources publiques officielles (SIRENE, RNA, DVF,
     BODACC, OFGL, DGFiP, Répertoire national des élus, délibérations municipales et communautaires,
-    publications de la {PREFECTURE}), citées et datées. Les personnes physiques n'y figurent
-    qu'au titre d'une fonction publique, d'un mandat électif ou d'une responsabilité de structure
-    inscrite dans un registre public. Aucune adresse personnelle, coordonnée privée ni donnée de
-    vie privée n'a vocation à être publiée : un masquage automatique les retire des textes cités,
-    et tout défaut relevé est corrigé, puis signalé. La méthode complète est décrite sur la page
+    publications de la {PREFECTURE}), citées et datées.
+  </p>
+  <!-- La page promettait trois cas (fonction, mandat, registre) alors que les
+       titres de délibérations nommaient aussi des particuliers et des agents.
+       La règle ci-dessous est celle de SECURITY.md : les deux textes se
+       modifient ensemble. -->
+  <p>Hors du texte cité d'une délibération, une personne physique n'est nommée que dans trois cas :</p>
+  <ul>
+    <li>elle exerce une fonction publique ou tient un mandat électif, y compris lorsqu'un acte
+      la désigne pour représenter la collectivité ;</li>
+    <li>elle dirige une entreprise, un registre public l'inscrit comme telle, et l'acte la cite
+      à ce titre ;</li>
+    <li>elle est titulaire d'un marché public en entreprise individuelle, et seulement comme
+      titulaire de ce marché.</li>
+  </ul>
+  <p>
+    Hors de ces cas, une personne citée dans le titre d'un acte est désignée par son rôle
+    (« un particulier », « un agent » et sa fonction, « le président de l'association »). La
+    nature de la décision, son montant et le lien vers l'acte publié par la collectivité sont
+    conservés. Un titre réduit à un nom, sans décision, n'est pas publié.
+    Le texte d'une délibération, quand il est reproduit sous son titre, est cité tel que la
+    collectivité l'a publié. Quand la recherche du site lit ce texte, elle n'en retient que
+    les mots courants : aucun nom de personne n'y est indexé. Ce texte n'est pas proposé à
+    l'indexation des moteurs de recherche externes.
+  </p>
+  <p>
+    Quand une décision porte sur la situation d'une personne (créance effacée ou impayé, aide
+    sociale, logement d'habitation, mesure individuelle concernant un agent, litige avec un
+    particulier), le site n'en reproduit pas le texte : il en donne le titre, la date, le
+    montant et le lien vers la pièce publiée par la collectivité. Dans le texte d'une aide à
+    la rénovation d'un bien, l'adresse du bien est masquée.
+  </p>
+  <p>
+    Aucune adresse personnelle, date de naissance ni coordonnée privée n'a vocation à être
+    publiée : un masquage automatique les retire, titres et textes compris, et tout défaut
+    relevé est corrigé, puis signalé. La méthode complète est décrite sur la page
     <a href="/methode">Méthode</a>.
   </p>
 
   {#if EDITEUR_NOM}
     <h2>Responsable du traitement</h2>
     <p>{EDITEUR_NOM}{#if EDITEUR_SIEGE}, {EDITEUR_SIEGE}{/if}. Contact : <a href="mailto:{CONTACT_EMAIL}">{CONTACT_EMAIL}</a>.</p>
+  {/if}
+
+  <!--
+    Destinataires et transferts hors de l'UE : clé editeur.destinataires de
+    config/instance.json, une liste de paragraphes. Comme l'hébergeur, ils
+    dépendent de l'éditeur et non du code : écrits ici, ils feraient déclarer
+    à un repreneur les prestataires d'un autre.
+  -->
+  {#if DESTINATAIRES.length}
+    <h2>Destinataires et transferts hors de l'Union européenne</h2>
+    {#each DESTINATAIRES as paragraphe}
+      <p>{paragraphe}</p>
+    {/each}
   {/if}
 
   <h2>Durée de conservation</h2>

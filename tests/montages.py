@@ -60,7 +60,7 @@ def reloger(publication, racine: Path, monkeypatch) -> dict[str, Path]:
     """
     ancienne = publication.ROOT
     lieux = {nom: racine / getattr(publication, nom).relative_to(ancienne)
-             for nom in ("PUBLIE", "SITE", "VERSIONS", "BROUILLON", "ETAT", "VERROU")}
+             for nom in ("PUBLIE", "SITE", "VERSIONS", "PUBLIEES", "BROUILLON", "ETAT", "VERROU")}
     monkeypatch.setattr(publication, "ROOT", racine)
     for nom, chemin in lieux.items():
         monkeypatch.setattr(publication, nom, chemin)

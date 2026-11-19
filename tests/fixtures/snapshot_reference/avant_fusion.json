@@ -1,0 +1,11 @@
+{
+  "commune": {
+    "siren": "219900017",
+    "nom": "Testonville"
+  },
+  "predecesseurs": [],
+  "absorbees": {
+    "ofgl": [],
+    "budget": []
+  }
+}

@@ -79,6 +79,20 @@ MOJIBAKE = re.compile(
 # Clés interdites où qu'elles apparaissent dans un objet publié.
 FORBIDDEN_KEYS = {"personnes_citees", "birth_date", "date_naissance", "adresse_personnelle",
                   "birth_year", "annee_naissance"}
+# Nuance politique attribuée par le préfet : article 9 du RGPD, hors 9.2.e
+# (avis DPO du 17/11/2026). Refusée dans les seuls fichiers des élections, pas
+# en clé interdite partout : recherche_texte.json a pour clés les mots des
+# actes, et « nuance » est un mot courant ; un acte qui l'emploie aurait fait
+# refuser toute la publication (relecture de #304).
+NUANCE = "nuance"
+
+
+def check_nuance(data, rep, loc):
+    listes = data.get("listes") if isinstance(data, dict) else None
+    for liste in listes if isinstance(listes, list) else []:
+        if isinstance(liste, dict) and NUANCE in liste:
+            rep.error("nuance politique publiée", f"{loc}: liste {liste.get('libelle')!r}")
+            return
 
 # ── Ce que le TEXTE publié ne doit pas dire ──────────────────────────────────
 # Jusqu'au 06/10/2026 ce contrôleur ne lisait aucun contenu : des clés, des
@@ -103,6 +117,15 @@ TEXTES_INTERDITS = (
     ("domicile publié", re.compile(
         r"\b(?:domicili[ée]e?s?|demeurant|r[ée]sidant)\b[^.;\[\"<]{0,60}?"
         rf"\b\d{{1,4}}\s*(?:bis|ter)?\s*,?\s*{_VOIE}\b", re.I)),
+    # Sans voie : une civilité, un verbe de domicile, puis une commune suivie de
+    # son code postal — « Madame X, son épouse, demeurant au moment de la
+    # transaction à Testonville (99001} » est sorti en clair le 26/10/2026. La
+    # civilité écarte le siège d'une personne morale (« l'association
+    # domiciliée à Testonville (99001) »).
+    ("domicile publié", re.compile(
+        r"(?:\bM\.|\bMM\.|\bMmes?\b|\bMonsieur\b|\bMadame\b)[^.;\[\"<]{0,90}?"
+        r"\b(?i:domicili[ée]e?s?|demeurant|r[ée]sidant)\b[^.;\[\"<]{0,60}?"
+        r"\b(?:à|au|en)\s+[A-ZÀ-Þ][^.;\[\"<(]{0,40}?[({]\s*\d{2}\s?\d{3}\s*[)}\]]")),
 )
 # Clés à signaler (non bloquant) si elles portent une valeur.
 SUSPECT_KEYS = {"email", "mail", "telephone", "phone", "tel"}
@@ -344,9 +367,11 @@ def check_file(fp, rep, base):
     if fp.name == "__data.json":
         # Sérialisation SvelteKit `devalue` : clés→indices, illisible structurellement.
         # Le contenu vient du snapshot déjà contrôlé ; on se limite à un signal texte.
-        for token in ('"hypothesis"', '"unverified"', '"retracted"'):
+        for token in ('"hypothesis"', '"probable"', '"unverified"', '"retracted"'):
             if token in raw:
-                rep.warn("token de confidence privée dans un __data.json", f"{loc}: {token}")
+                rep.error("token de confidence privée dans un __data.json", f"{loc}: {token}")
+        if fp.parent.name == "elections" and f'"{NUANCE}"' in raw:
+            rep.error("nuance politique publiée", f"{loc}: clé '{NUANCE}'")
         return
     try:
         data = json.loads(raw)
@@ -355,6 +380,8 @@ def check_file(fp, rep, base):
         return
     if fp.name == "territoire.json":
         data = sans_site_de_la_mairie(data)
+    if fp.name == "elections.json":
+        check_nuance(data, rep, loc)
     walk(data, fp, rep, loc)
     if fp.name == "events.json":
         check_events_file(data, rep, loc)
@@ -627,6 +654,23 @@ def check_personnes(base, rep):
                       f"entities.json: id={e.get('id')} {e.get('name')!r}")
 
 
+def check_popolo(base, rep):
+    """`popolo.json` est la vue des mandats : chaque personne y a le sien.
+
+    Une personne sans `membership` y passe pour un élu sans fonction ; elle
+    paraît ailleurs à un autre titre (un gérant inscrit à SIRENE), pas ici.
+    """
+    persons = _lire(base, "popolo.json", "persons")
+    memberships = _lire(base, "popolo.json", "memberships")
+    if persons is None or memberships is None:
+        return
+    mandatees = {m.get("person_id") for m in memberships}
+    for p in persons:
+        if p.get("id") not in mandatees:
+            rep.error("personne sans mandat dans popolo.json",
+                      f"popolo.json: {p.get('id')} {p.get('name')!r}")
+
+
 def check_conflits(base, rep):
     """Une « situation à vérifier » ne cite que ce qui est publié par ailleurs.
 
@@ -664,6 +708,230 @@ def check_conflits(base, rep):
             rep.error("déport citant un acte non publié",
                       f"conflits.json: {qui} — acte {deport.get('event_id')} "
                       "absent de events.json")
+
+
+# Une civilité suivie d'un nom en capitales, écrite ici et non importée de
+# `scripts/snapshot/textes.py` : le contrôle ne doit pas partager les angles
+# morts du filtre qu'il contrôle.
+_CIVILITE_NOM = re.compile(
+    r"(?<![\w])(?:Monsieur|Madame|Mademoiselle|MM\.|M\.|Mmes?|Mlle)\s+"
+    r"(?:et\s+(?:Madame|Monsieur|Mme|M\.)\s+)?((?:[A-ZÀ-Ÿ][\w'’\-]*\s+){0,3}[A-ZÀ-Ÿ]{2,}[\w'’\-]*)")
+# Recopiés de `_ACTE_DE_MANDAT` et `_ACTE_ENVERS_UN_PARTICULIER` (textes.py),
+# pas importés. Plus étroits, ils refuseraient un titre que le filtre a gardé à
+# bon droit : les deux fichiers se modifient ensemble, un essai les compare.
+_TITRE_DE_MANDAT = re.compile(
+    r"d[ée]signation|[ée]lection|\b[ée]lue?s?\b|\bd[ée]l[ée]gu[ée]e?s?\b"
+    r"|d[ée]l[ée]gations?\s+(?:de|du|des|au|aux|à)\b|indemnit[ée]s?\s+de\s+fonction"
+    r"|installation\s+du\s+conseil|\bd[ée]mission|\bprocuration|secr[ée]taire\s+de\s+s[ée]ance"
+    r"|\badjointe?s?\b|\bsuppl[ée]ante?s?\b", re.I)
+_TITRE_ENVERS_UN_PARTICULIER = re.compile(
+    r"\baides?\b|\bsubvention|\bprime\b|fa[çc]ade|\bvente\b|\bcession\b|\bacquisition\b"
+    r"|\bbail\b|\bloyer|\bterrain\b|\bparcelle|\bpermis\b|\bsecours\b|\bremise\b", re.I)
+_CIVILITES_MOTS = {"et", "m", "mm", "mme", "mmes", "mlle", "monsieur", "madame", "mademoiselle"}
+
+
+def check_titres_nominatifs(base, rep):
+    """Le titre d'un acte ne nomme qu'une personne publiée (règle du 27/10/2026).
+
+    Ailleurs, le titre désigne la personne par son rôle : « un particulier »,
+    « un agent ». Une personne est publiée si elle a sa fiche (`entities.json`)
+    ou un mandat (`popolo.json`). Sur un patronyme seul, partagé avec une
+    personne publiée, le doute profite au titre : c'est peut-être elle.
+
+    Un patronyme seul que rien de publié ne porte n'est qu'un avertissement :
+    le filtre nomme aussi qui a SIÉGÉ sous un mandat clos, que ni les fiches ni
+    `popolo.json` ne gardent (relevé sur l'aperçu de Brassac, 27/10/2026), et un
+    patronyme seul n'identifie pas assez pour bloquer une publication.
+    """
+    actes = _lire(base, "events.json", "events")
+    if not actes:
+        return
+    noms = [p.get("name") for p in (_lire(base, "entities.json", "entities") or [])
+            if p.get("type") == "person"]
+    noms += [p.get("name") for p in (_lire(base, "popolo.json", "persons") or [])]
+    publies = {_nom_cle(n) for n in noms if n}
+    mots_publies = {m for n in publies for m in n.split()}
+    for e in actes:
+        # L'agenda annonce : son titre nomme qui la source veut faire connaître,
+        # et le builder le laisse tel quel (14/11/2026). Le type est écrit ici,
+        # pas importé du builder.
+        if e.get("type") == "local_event":
+            continue
+        for m in _CIVILITE_NOM.finditer(e.get("title") or ""):
+            # « M. ET Mme NOM » : la civilité et le « et » ne sont pas le nom.
+            mots = set(_nom_cle(m.group(1)).split()) - _CIVILITES_MOTS
+            if any(set(n.split()) <= mots or mots <= set(n.split())
+                   for n in publies if len(n.split()) >= 2) and len(mots) >= 2:
+                continue
+            # Un patronyme seul partagé avec une personne publiée n'est elle
+            # que dans un titre qui parle d'un mandat, et jamais pour un couple
+            # (14/11/2026 : « M. ET MME NOM », bénéficiaires d'une aide, étaient
+            # servis dans le titre parce qu'un élu portait ce nom).
+            couple = bool(re.search(r"(?i)\bet\s+(?:mme|madame|m\.|monsieur)", m.group(0)))
+            if (len(mots) == 1 and mots <= mots_publies and not couple
+                    and _TITRE_DE_MANDAT.search(e.get("title") or "")
+                    and not _TITRE_ENVERS_UN_PARTICULIER.search(e.get("title") or "")):
+                continue
+            if len(mots) == 1 and mots <= mots_publies:
+                rep.error("titre d'acte nommant un homonyme possible d'une personne publiée",
+                          f"events.json: id={e.get('id')}")
+                continue
+            (rep.warn if len(mots) == 1 else rep.error)(
+                "titre d'acte nommant une personne non publiée",
+                f"events.json: id={e.get('id')} — {m.group(0)!r}")
+
+
+# Écrits ici et non importés de `scripts/snapshot/recherche.py` : le contrôle
+# ne doit pas partager les angles morts de l'index qu'il contrôle.
+_MOT_DU_TEXTE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿŒœÆæ]+")
+_APRES_CIVILITE = re.compile(
+    r"(?<![A-Za-zÀ-ÿ])(?:monsieur|madame|mademoiselle|messieurs|mesdames|mm\.|m\.|mmes?"
+    r"|mlle|me|ma[iî]tre|dr|docteur|consorts|veuve|famille|[ée]poux|[ée]pouse)\.?\s+"
+    r"(?=(\S+)(?:\s+(\S+))?)", re.IGNORECASE)
+
+
+def _cle_index(mot):
+    """La clé sous laquelle l'index range un mot — recopié, pas importé."""
+    import unicodedata
+    s = mot.lower().replace("œ", "oe").replace("æ", "ae")
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+    return s[:-1] if len(s) > 3 and s[-1] in "sx" else s
+
+
+def check_index_du_texte(base, rep):
+    """`recherche_texte.json` ne rend aucune personne retrouvable (13/11/2026).
+
+    Le texte d'un acte garde les noms qu'il cite ; l'index de ses mots ne doit
+    en porter aucun. Pour chaque acte, un mot de l'index ne doit apparaître
+    dans son texte ni avec une majuscule, ni derrière une civilité : c'est la
+    seule forme sous laquelle un nom s'écrit. Et l'index ne cite qu'un acte
+    dont le texte est publié.
+    """
+    fp = base / "recherche_texte.json"
+    if not fp.exists():
+        return
+    try:
+        mots = json.loads(fp.read_text(encoding="utf-8")).get("mots") or {}
+    except (ValueError, OSError):
+        rep.error("index du texte illisible", "recherche_texte.json")
+        return
+    par_acte = {}
+    for mot, ids in mots.items():
+        for i in ids:
+            par_acte.setdefault(i, set()).add(mot)
+    for i, cles in sorted(par_acte.items()):
+        extrait = base / "extrait" / f"{i}.json"
+        if not extrait.exists():
+            rep.error("index du texte citant un acte sans texte publié",
+                      f"recherche_texte.json: acte {i}")
+            continue
+        texte = json.loads(extrait.read_text(encoding="utf-8")).get("texte") or ""
+        suspects = {_cle_index(m) for m in _MOT_DU_TEXTE.findall(texte) if m != m.lower()}
+        for m in _APRES_CIVILITE.finditer(texte):
+            for groupe in m.groups():
+                suspects.update(_cle_index(x) for x in _MOT_DU_TEXTE.findall(groupe or ""))
+        fautifs = sorted(cles & suspects)
+        if fautifs:
+            rep.error("index du texte portant un mot écrit comme un nom dans l'acte",
+                      f"recherche_texte.json: acte {i} — {len(fautifs)} mot(s)")
+    index = _lire(base, "recherche_index.json", "index") or []
+    for e in index:
+        if e.get("i") is not None and not (base / "extrait" / f"{e['i']}.json").exists():
+            rep.error("résultat de recherche renvoyant à un texte non publié",
+                      f"recherche_index.json: i={e['i']}")
+
+
+# ── Le texte des actes : ce qui touche une personne (14/11/2026) ─────────────
+# Sept extraits d'aides à la rénovation de façades servaient le numéro et la rue
+# du bien aidé, presque toujours le domicile du demandeur, alors que les
+# mentions légales le disaient masqué. Deux voisinages, écrits ici : un texte
+# qui parle d'une aide à une façade ne porte aucun numéro suivi d'un mot de
+# voie ; et le texte d'un acte qui porte sur la situation d'une personne
+# (créance effacée, sanction, secours) n'est pas publié du tout.
+# « Façade » ou « ravalement » suffit, où que ce soit dans le texte : exiger
+# « aide » dans la même phrase donnait à ce contrôle l'angle mort du filtre
+# (relecture sécurité du 14/11/2026).
+_AIDE_FACADE = re.compile(r"fa[çc]ades?|\bravalement", re.I)
+# La route classée est exclue comme dans le filet du filtre : sans cela ce
+# contrôle refusait un extrait que le filtre publie à bon droit, et arrêtait la
+# passe de nuit (« 2 route départementale à aménager », relecture du 14/11).
+_NUMERO_ET_VOIE = re.compile(
+    rf"(?<![\w.,/])\d{{1,4}}\s*(?:bis|ter)?\s*,?\s+{_VOIE}\b"
+    r"(?!\.?\s+(?:d[ée]partementale|nationale|communale|foresti[èe]re)\b)", re.I)
+# Ce que le filtre retient TOUJOURS, et cela seulement : un mot qu'il ne retient
+# que si une personne est nommée (licenciement, bail) bloquerait ici la
+# publication d'un règlement.
+_TEXTE_DE_VIE_PRIVEE = re.compile(
+    r"admissions?\s+en\s+non[- ]valeurs?|cr[ée]ances?\s+[ée]teintes?|\bcuratelle\b"
+    r"|sanction\s+disciplinaire|conseil\s+de\s+discipline|bail\s+d['’]habitation"
+    r"|plac[ée]e?s?\s+en\s+cong[ée]", re.I)
+
+
+def check_textes_des_actes(base, rep):
+    """Aucun extrait ne sert l'adresse d'un bien aidé, ni le texte d'un acte
+    qui porte sur la situation d'une personne."""
+    dossier = base / "extrait"
+    if not dossier.is_dir():
+        return
+    for fp in sorted(dossier.glob("*.json")):
+        try:
+            texte = json.loads(fp.read_text(encoding="utf-8")).get("texte") or ""
+        except (ValueError, OSError):
+            rep.error("extrait illisible", f"extrait/{fp.name}")
+            continue
+        if _AIDE_FACADE.search(texte) and _NUMERO_ET_VOIE.search(texte):
+            rep.error("adresse d'un bien aidé publiée dans le texte d'un acte",
+                      f"extrait/{fp.name}")
+        if _TEXTE_DE_VIE_PRIVEE.search(texte):
+            rep.error("texte publié d'un acte qui porte sur la situation d'une personne",
+                      f"extrait/{fp.name}")
+
+
+# Recopiés de `collectors/decisions.py`, pas importés : ce contrôle doit
+# refuser une sortie même si le classement du collecteur dérive.
+_DECISIONS = ("decision_delegation", "decision_delegation_cc")
+_DECISIONS_COMPTEES = {"preemption_dia", "preemption_deleguee", "concession_funeraire",
+                       "louage_particulier", "aide_individuelle", "justice", "personnel",
+                       "nominative", "parcelle", "non_classee"}
+_PARCELLE = re.compile(r"parcelle|cadastr|section\s+[A-Z]{1,2}\b"
+                       r"|(?<!timent )(?<!classe )(?<!classes )(?<!bloc )(?<!lot )"
+                       r"\b(?!R[DN]\b|DM\b|C[EMP]\d|M\d{2}\b)[A-Z]{1,2}\s?(?:n[°o]\s?)?\d{1,4}\b"
+                       r"(?![\s\u00a0.]\d{3}|\s*(?:€|euros?\b)|[-/])")
+# Ce qui désigne une personne dans un titre publié, relu sans le collecteur.
+_TITRE_DE_PERSONNE = re.compile(
+    r"\b(M|MM|Mmes?|Mlle|Mr|Dr|Me|MME|MLLE)\.?\s"
+    r"|\b(?i:docteur|monsieur|madame|mademoiselle|ma[iî]tre|famille|consorts|veuve"
+    r"|un particulier|une particuli[eè]re|un agent|une personne)\b"
+    r"|\b(EARL|GAEC|SCEA|EIRL|EURL)\b")
+
+
+def check_decisions_par_delegation(base, rep):
+    """Une décision par délégation sort en titre seul ; une catégorie comptée
+    ne sort pas ; aucun titre ne désigne une personne ou une parcelle ; une
+    préemption sort sans sa pièce ni son numéro (15/11/2026)."""
+    fp = base / "events.json"
+    if not fp.exists():
+        return
+    try:
+        events = json.loads(fp.read_text(encoding="utf-8")).get("events") or []
+    except (ValueError, OSError):
+        return
+    for e in events:
+        if e.get("type") not in _DECISIONS:
+            continue
+        loc = f"events.json#{e.get('id')}"
+        if (e.get("categorie_delegation") or "") in _DECISIONS_COMPTEES:
+            rep.error("décision d'une catégorie comptée publiée une à une", loc)
+        if e.get("extrait") or (base / "extrait" / f"{e.get('id')}.json").exists():
+            rep.error("texte publié d'une décision par délégation", loc)
+        titre = e.get("title") or ""
+        if _PARCELLE.search(titre):
+            rep.error("décision publiée qui donne une parcelle", loc)
+        if _TITRE_DE_PERSONNE.search(titre):
+            rep.error("décision publiée qui désigne une personne", loc)
+        if e.get("categorie_delegation") == "preemption_exercee" and (
+                e.get("source_url") or e.get("pdf_url") or e.get("numero_acte")):
+            rep.error("préemption publiée avec sa pièce ou son numéro", loc)
 
 
 def _nom_cle(nom):
@@ -713,6 +981,44 @@ def check_sens_flux(base, rep):
         rep.error(
             "sens de flux contraire aux noms de ses extrémités",
             f"{fp.name}: {len(ids)} flux attendus « {attendu} » — ex. {ids[:5]}")
+
+
+def check_renvoi_des_flux(base, rep):
+    """Un montant lu dans un compte rendu (`origine='verbatim'`) remonte à sa pièce.
+
+    Revue d'architecture du 07/11/2026, C1 : `flows.json` ne portait que des
+    étiquettes (« CR CM année »), et une contestation ne se tranchait qu'en
+    fouillant les PV à la main. Un flux `verbatim` doit porter `acte_id` (un
+    acte publié dans `events.json`) ou `document` (une URL externe). Un
+    `acte_id` qui ne désigne aucun acte publié est un renvoi mort.
+
+    Relu ici sans rien importer du builder : ce qui a manqué une fois ne se
+    contrôle pas par lui-même.
+
+    Le flux sans renvoi AVERTIT, il ne bloque pas : le 07/11, Lasalle en
+    comptait entre 1 et 4 (sonde, k < 5 masqué) parmi 463 flux verbatim, et
+    refuser la passe entière pour eux aurait figé tout le site. Le renvoi mort,
+    lui, ne peut naître que d'un défaut du builder : il bloque.
+    """
+    flows = _lire(base, "flows.json", "flows")
+    if not flows:
+        return
+    actes = {e.get("id") for e in _lire(base, "events.json", "events") or []}
+    sans, morts = [], []
+    for f in flows:
+        acte, doc = f.get("acte_id"), f.get("document")
+        if acte is not None and acte not in actes:
+            morts.append(f.get("id"))
+        if f.get("origine") == "verbatim" and acte is None and not (
+                isinstance(doc, str) and doc.startswith(("https://", "http://"))):
+            sans.append(f.get("id"))
+    if sans:
+        rep.warn("flux lu dans un compte rendu sans renvoi à sa pièce",
+                  f"flows.json: {len(sans)} flux verbatim sans acte_id ni document "
+                  f"— ex. {sans[:5]}")
+    if morts:
+        rep.error("flux qui renvoie à un acte non publié",
+                  f"flows.json: {len(morts)} acte_id absents d'events.json — ex. {morts[:5]}")
 
 
 # ── Le manifeste : la construction est-elle allée au bout ? ──────────────────
@@ -773,6 +1079,62 @@ def check_manifeste(base, rep):
                      f"{rel}: laissé par une construction précédente ?")
 
 
+# Les clés qui désigneraient une cantine ou une installation : elles servent au
+# rapprochement en base, aucune ne sort (avis DPO du 29/10/2026).
+CLES_INTERDITES_DATA_GOUV = {"siret", "id", "cantine_id", "cuisine_centrale_siret",
+                             "code_eic", "nominstallation", "applicant_id"}
+SIRET_NU = re.compile(r"\b\d{14}\b")
+
+
+def check_sources_data_gouv(base, rep):
+    """Cantines, électricité, parc social : ce qui sort, relu sans le code d'export.
+
+    Un second chemin, qui ne réutilise rien de `sources_data_gouv.py` : aucune
+    clé d'identification, aucun SIRET, l'énergie d'une filière de moins de
+    trois installations masquée, aucune répartition sous trois logements.
+    """
+    def cles(noeud):
+        if isinstance(noeud, dict):
+            yield from noeud
+            for v in noeud.values():
+                yield from cles(v)
+        elif isinstance(noeud, list):
+            for v in noeud:
+                yield from cles(v)
+
+    def bloc(nom, cle):
+        fp = base / nom
+        if not fp.is_file():
+            return None
+        try:
+            data = json.loads(fp.read_text())
+        except json.JSONDecodeError:
+            return None
+        return data.get(cle) if isinstance(data, dict) else None
+
+    for nom, cle in (("territoire.json", "cantines"), ("environnement.json", "electricite"),
+                     ("territoire.json", "rpls")):
+        b = bloc(nom, cle)
+        if not b:
+            continue
+        interdites = sorted(set(cles(b)) & CLES_INTERDITES_DATA_GOUV)
+        if interdites:
+            rep.error("clé d'identification dans un bloc data.gouv", f"{nom} · {cle} : {interdites}")
+        if SIRET_NU.search(json.dumps(b)):
+            rep.error("SIRET dans un bloc data.gouv", f"{nom} · {cle}")
+    cantines = bloc("territoire.json", "cantines")
+    if cantines and set((cantines.get("privees") or {})) - {"nombre"}:
+        rep.error("cantines privées décrites au-delà de leur nombre", "territoire.json · cantines")
+    elec = bloc("environnement.json", "electricite")
+    for f in (elec or {}).get("filieres") or []:
+        if (f.get("installations") or 0) < 3 and f.get("energie_injectee_kwh") is not None:
+            rep.error("énergie d'une filière de moins de trois installations",
+                      f"environnement.json · {f.get('filiere')}")
+    rpls = bloc("territoire.json", "rpls")
+    if rpls and (rpls.get("total") or 0) < 3 and rpls.get("repartitions"):
+        rep.error("répartition du parc social sous trois logements", "territoire.json · rpls")
+
+
 def check_dir(base, rep):
     for fp in sorted(base.rglob("*")):
         if not fp.is_file():
@@ -801,9 +1163,16 @@ def check_dir(base, rep):
     check_fiches_orphelines(base, rep)
     check_renvois_sortants(base, rep)
     check_sens_flux(base, rep)
+    check_renvoi_des_flux(base, rep)
     check_personnes(base, rep)
+    check_titres_nominatifs(base, rep)
+    check_index_du_texte(base, rep)
+    check_textes_des_actes(base, rep)
+    check_decisions_par_delegation(base, rep)
+    check_popolo(base, rep)
     check_conflits(base, rep)
     check_manifeste(base, rep)
+    check_sources_data_gouv(base, rep)
 
 
 def main(argv):

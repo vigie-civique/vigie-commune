@@ -38,6 +38,7 @@ import json
 import urllib.parse
 import urllib.request
 
+from . import mesure
 from .archive import archive_fetch
 from .config import COMMUNES_ADRESSE, COMMUNES_INSEE_ADRESSE, HEADERS
 from .db import get_conn
@@ -64,6 +65,17 @@ COLONNES = [
 RESSOURCES = {
     "Liste des autorisations d'urbanisme créant des logements": "logements",
     "Liste des autorisations d'urbanisme créant des locaux non résidentiels": "locaux",
+}
+
+# Les colonnes de COLONNES que le SDES ne publie PAS dans un fichier donné,
+# relevées sur DIDO le 06/11/2026 : le fichier des locaux ne compte pas de
+# logements. Toute AUTRE colonne absente est une dérive de la source : le relevé
+# s'arrête au lieu d'importer des lignes amputées sans le dire
+# (chantier « sentinelle de forme des sources »).
+ABSENTES_PREVUES = {
+    "logements": frozenset(),
+    "locaux": frozenset({"NB_LGT_TOT_CREES", "NB_LGT_DEMOLIS",
+                         "RES_PRINCIP_OU_SECOND", "RES_TOURISME", "I_PISCINE"}),
 }
 
 # `availableValues` du datafile : ces libellés sont documentés par le SDES.
@@ -154,8 +166,8 @@ def datafile_columns(rid: str) -> list[str]:
     """Colonnes réellement présentes dans le datafile.
 
     Indispensable : les deux fichiers n'ont pas le même schéma (celui des locaux
-    non résidentiels n'a pas `NB_LGT_TOT_CREES` ni `RES_PRINCIP_OU_SECOND`), et
-    DIDO renvoie un **400 sans préciser la colonne fautive**. On demande donc
+    non résidentiels n'a aucune des colonnes de logement, cf. ABSENTES_PREVUES),
+    et DIDO renvoie un **400 sans préciser la colonne fautive**. On demande donc
     l'intersection de ce qu'on veut et de ce qui existe.
     """
     req = urllib.request.Request(f"{DIDO}/{rid}", headers=HEADERS)
@@ -164,13 +176,22 @@ def datafile_columns(rid: str) -> list[str]:
     return [c["name"] for c in meta.get("columns", []) if c.get("name")]
 
 
-def fetch_rows(rid: str, insee_list: list[str]) -> list[dict]:
-    """Lignes Sitadel du périmètre, filtrées côté serveur par DIDO."""
+def fetch_rows(rid: str, insee_list: list[str], categorie: str) -> list[dict]:
+    """Lignes Sitadel du périmètre, filtrées côté serveur par DIDO.
+
+    S'arrête si une colonne attendue manque hors ABSENTES_PREVUES : avant le
+    06/11/2026, l'absence était seulement imprimée et la requête partait quand
+    même, si bien qu'un renommage au SDES aurait vidé une colonne en silence.
+    """
     dispo = set(datafile_columns(rid))
     colonnes = [c for c in COLONNES if c in dispo]
-    manquantes = [c for c in COLONNES if c not in dispo]
-    if manquantes:
-        print(f"    (colonnes absentes de ce fichier : {', '.join(manquantes)})")
+    imprevues = [c for c in COLONNES
+                 if c not in dispo and c not in ABSENTES_PREVUES.get(categorie, ())]
+    if imprevues:
+        raise RuntimeError(
+            f"colonne(s) disparue(s) du fichier {categorie} ({rid}) : "
+            f"{', '.join(imprevues)}. Le SDES a changé son schéma : relire "
+            f"{DIDO}/{rid}, puis corriger COLONNES ou ABSENTES_PREVUES")
     url = f"{DIDO}/{rid}/csv?" + urllib.parse.urlencode(
         {"COMM": "in:" + ",".join(insee_list), "columns": ",".join(colonnes)})
     req = urllib.request.Request(url, headers=HEADERS)
@@ -185,8 +206,12 @@ def fetch_rows(rid: str, insee_list: list[str]) -> list[dict]:
     # dans la base, dans la recherche plein texte et dans les exports.
     lignes = csv.DictReader(io.StringIO(raw.decode("utf-8", "replace")),
                             delimiter=";")
-    return [{k: reparer_encodage(v) if isinstance(v, str) else v
-             for k, v in ligne.items()} for ligne in lignes]
+    rendu = [{k: reparer_encodage(v) if isinstance(v, str) else v
+              for k, v in ligne.items()} for ligne in lignes]
+    # Tout l'historique du périmètre, relu à chaque passe. Le risque qui reste
+    # après la garde des colonnes : un 200 qui ne porte que l'en-tête.
+    mesure.lu(f"sitadel-{categorie}", len(rendu), lignes.fieldnames, complete=True)
+    return rendu
 
 
 def _num(v):
@@ -333,13 +358,16 @@ def run(insee_list: list[str] | None = None) -> dict:
     ensure_table(conn)
     cibles = insee_list or COMMUNES_INSEE_ADRESSE
     total = {}
+    echecs = []
     try:
         for titre, categorie in RESSOURCES.items():
             try:
                 rid, last_modified = resolve_datafile(titre)
-                rows = fetch_rows(rid, cibles)
+                rows = fetch_rows(rid, cibles, categorie)
             except Exception as e:
-                print(f"  [sitadel] {categorie} : erreur — {e}")
+                # Format lu par le service local du portail (DETAIL / RESUME).
+                print(f"  [sitadel] {categorie} : échec → {type(e).__name__}: {e}")
+                echecs.append(categorie)
                 continue
             res = import_rows(conn, categorie, rows)
             res["publication"] = last_modified
@@ -354,6 +382,8 @@ def run(insee_list: list[str] | None = None) -> dict:
         total["cadastre_croise"] = len(croises)
     finally:
         conn.close()
+    if echecs:
+        raise RuntimeError(f"relevés en échec : {', '.join(echecs)}")
     return total
 
 

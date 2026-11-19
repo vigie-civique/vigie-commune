@@ -11,12 +11,16 @@
   // base : le collecteur `saisies` le rejoue à chaque collecte, donc une
   // reconstruction complète de la base ne l'efface pas.
   import { api } from '#lib/api.js'
+  import { goto } from '$app/navigation'
+  import { pageStore } from '#lib/etat-app'
+  const page = pageStore()
   import { currentUser } from '#lib/stores/auth.js'
   import { auMoins } from '#lib/roles.js'
+  import { libelleType, libelleChoix, choixFiabilite, phraseErreur } from '#lib/libelles.js'
 
   let contrat = {}          // {objet: {champ*: [genre, aide]}}
   let confiances = []
-  // Saisir « confirmed », c'est publier : réservé au validateur.
+  // Saisir une donnée « confirmée », c'est la publier : réservé au validateur.
   $: tranche = auMoins($currentUser, 'validator')
   $: confiancesPermises = tranche ? confiances : confiances.filter(c => c !== 'confirmed')
   $: if (!tranche && confidence === 'confirmed') confidence = 'probable'
@@ -25,7 +29,25 @@
   let confidence = 'confirmed'
   let erreur = ''
   let succes = ''
+  let avertissement = ''
   let envoi = false
+
+  // ─── Une fiche : celle qu'on rejoindrait ───────────────────────────────────
+  // Une variante d'écriture (« LES AMIS DU FOUR ») rejoint la fiche existante
+  // au lieu d'en créer une : on le dit AVANT d'enregistrer, et l'on demande
+  // un second clic (audit du 15/11/2026).
+  // « Nouvelle fiche » (menu, liste des fiches) mène ici avec `?objet=entite` ;
+  // suivi aussi quand on y revient depuis cette même page.
+  let objetDemande = null
+  $: demande = $page.url.searchParams.get('objet')
+  $: if (demande && contrat[demande] && demande !== objetDemande) {
+    objetDemande = demande; objet = demande; reinitialiser()
+  }
+
+  let rejoint = null        // { id, name, type, commune, verdict } ou null
+  $: cleRejoint = objet === 'entite'
+    ? JSON.stringify([valeurs.type, valeurs.name, valeurs.commune, valeurs.siren]) : ''
+  $: { cleRejoint; rejoint = null }
 
   // ─── Source ────────────────────────────────────────────────────────────────
   // Obligatoire. Les procès-verbaux 2017-2019 de la commune ont disparu du site
@@ -81,18 +103,34 @@
                  title: propositions.source.titre }
       }
     } catch (e) {
-      erreur = e.message
+      erreur = phraseErreur(e)
     } finally {
       iaEnCours = false
     }
   }
 
+  // `montant_dans_citation` vaut null quand il n'y a pas de montant à contrôler.
+  const fondee = (p) => !!p.citation_verifiee && p.montant_dans_citation !== false
+  // Chaque autre champ rendu doit aussi se lire dans la citation (audit du
+  // 06/11/2026 : un PV piégé obtenait « confirmé » avec une année inventée).
+  const recoupee = (p) => fondee(p) && p.champs_recoupes === true
+  // Le sens d'un flux, la date d'un acte : non recoupés, ils ne retiennent pas
+  // en `probable` mais se signalent (décision du 07/11/2026).
+  const aVerifier = (p) => (p.champs_a_verifier || []).length
+    ? ` · ${p.champs_a_verifier.join(', ')} à vérifier` : ''
+  const marque = (p) => !p.citation_verifiee ? '✗ citation introuvable'
+    : p.montant_dans_citation === false ? '✗ montant absent de la citation'
+    : !recoupee(p) ? `✓ citation · à relire : ${(p.champs_non_recoupes || []).join(', ')}`
+    : `✓${aVerifier(p)}`
+  const CONTROLES = ['citation', 'citation_verifiee', 'montant_dans_citation',
+                     'champs_recoupes', 'champs_non_recoupes', 'champs_a_verifier']
+
   // Reprendre une proposition = remplir le formulaire, pas enregistrer. Le
   // dernier geste reste humain, y compris quand la citation est vérifiée.
+  // Seuls les champs que le gabarit demande au modèle sont repris.
   function reprendre(p) {
-    const v = { ...p }
-    delete v.citation
-    delete v.citation_verifiee
+    const v = Object.fromEntries((propositions?.champs || [])
+      .filter(k => p[k] !== undefined && p[k] !== null).map(k => [k, p[k]]))
     if (objet === 'flux' && v.tiers_nom) {
       // Le modèle donne un nom, jamais un type : « Association Nevesque » existe
       // dans cette base en entreprise ET en association. On lance la recherche
@@ -109,9 +147,12 @@
           locale: !!propositions.locale }
       : null
     // Une ligne reprise d'un modèle n'est pas une ligne lue par un humain :
-    // elle part en `probable` tant que personne n'a rouvert la source.
-    confidence = p.citation_verifiee ? 'confirmed' : 'probable'
-    succes = 'Proposition reprise — à relire avant d\'enregistrer.'
+    // elle part en `probable` tant que personne n'a rouvert la source. Une
+    // phrase retrouvée ne suffit pas : le montant doit y être écrit (banc du
+    // 31/10/2026, des montants pris ailleurs passaient pour vérifiés), ni
+    // les autres champs.
+    confidence = recoupee(p) ? 'confirmed' : 'probable'
+    succes = 'Proposition reprise — à relire avant d\'enregistrer.' + aVerifier(p)
   }
 
   $: champsDuType = Object.entries(contrat[objet] || {})
@@ -129,7 +170,7 @@
       iaDispo = await api.iaConfig()
       if (iaDispo.configuree) chargerActes()
     } catch (e) {
-      erreur = e.message
+      erreur = phraseErreur(e)
     }
   }
 
@@ -156,7 +197,7 @@
         ? 'Ce document était déjà archivé — il est réutilisé, pas dupliqué.'
         : 'Document archivé.'
     } catch (e) {
-      erreur = e.message
+      erreur = phraseErreur(e)
     } finally {
       fichierEnCours = false
       event.target.value = ''
@@ -196,31 +237,55 @@
   }
 
   async function enregistrer() {
-    envoi = true; erreur = ''; succes = ''
+    envoi = true; erreur = ''; succes = ''; avertissement = ''
     try {
+      if (objet === 'entite' && !rejoint && valeurs.type && (valeurs.name || '').trim()) {
+        const r = await api.saisieEntiteExistante(valeurs)
+        if (r.fiche) { rejoint = r.fiche; return }
+      }
       const source = { citation }
       if (docChoisi) source.raw_document_id = docChoisi.id
       else source.sans_document_motif = sansDocumentMotif
       if (iaTrace) source.ia = iaTrace
       const r = await api.saisieCreer(objet, valeurs, source, confidence)
-      succes = `${libelleObjet} enregistré — ${r.import?.ecrites ?? 0} ligne(s) écrite(s) en base.`
+      if (r.entity_id) {
+        // La fiche créée (ou complétée) : on y va, c'est là qu'on la remplit.
+        rejoint = null
+        // Le SIREN d'un contributeur n'est pas écrit : la fiche le dira à l'arrivée.
+        if (r.entite?.siren_a_confirmer) {
+          try {
+            sessionStorage.setItem('atelier_avis_fiche', `Fiche créée. Le SIREN ${valeurs.siren} `
+              + "est gardé dans votre saisie mais pas encore sur la fiche : un validateur doit le "
+              + "confirmer, en saisissant de nouveau la fiche avec ce SIREN.")
+          } catch {}
+        }
+        await goto(`/atelier/entite/${r.entity_id}`)
+        return
+      }
+      succes = `Saisie enregistrée (${libelleObjet.toLowerCase()}) : ${r.import?.ecrites ?? 0} ligne(s) écrite(s).`
+      // Flux enregistré, mais son lien sur la fiche du tiers refusé par un
+      // validateur : le dire, sinon on croit le lien posé.
+      if (r.lien && r.lien.ecrit === false) avertissement = r.lien.message
       reinitialiser()
       await chargerSaisies()
     } catch (e) {
-      erreur = e.message
+      erreur = phraseErreur(e)
     } finally {
       envoi = false
     }
   }
 
-  async function retirer(id) {
+  async function retirer(s) {
     erreur = ''
     try {
-      await api.saisieRetirer(id)
+      await api.saisieRetirer(s.id)
       await chargerSaisies()
-      succes = 'Saisie retirée — la ligne a disparu de la base.'
+      // Une saisie de fiche a créé une fiche : la retirer ne la supprime pas.
+      succes = s.objet === 'entite'
+        ? 'Saisie retirée de la liste. La fiche qu\'elle avait créée existe toujours.'
+        : 'Saisie retirée : les lignes qu\'elle avait écrites ont disparu.'
     } catch (e) {
-      erreur = e.message
+      erreur = phraseErreur(e)
     }
   }
 
@@ -238,14 +303,15 @@
     <p class="sub">
       Ce qu'aucun collecteur ne peut atteindre : un budget voté, une dotation
       notifiée, une subvention lue dans un compte rendu. La saisie n'écrase
-      jamais une ligne existante — elle en ajoute une, marquée « atelier », et
-      part dans <code>config/saisies.json</code> pour être rejouée à chaque
-      collecte.
+      jamais une ligne existante : elle en ajoute une, marquée « saisie à la
+      main ». Elle est conservée à part : une mise à jour des données ne
+      l'efface pas.
     </p>
   </header>
 
   {#if erreur}<div class="err">{erreur}</div>{/if}
   {#if succes}<div class="ok">{succes}</div>{/if}
+  {#if avertissement}<div class="err" role="status">{avertissement}</div>{/if}
 
   <div class="layout">
     <section class="form">
@@ -312,6 +378,9 @@
                 {#if propositions.citations_introuvables}{' '}
                   · <strong class="ko-c">{propositions.citations_introuvables} introuvable(s)</strong>
                 {' '}{/if}
+                {#if propositions.montants_absents}{' '}
+                  · <strong class="ko-c">{propositions.montants_absents} montant(s) absent(s) de la citation</strong>
+                {' '}{/if}
                 {#if propositions.reponses_illisibles}{' '}
                   · {propositions.reponses_illisibles} réponse(s) illisible(s)
                 {' '}{/if}
@@ -323,14 +392,14 @@
               {/if}
               <ul class="propositions">
                 {#each propositions.propositions as p}
-                  <li class:doute={!p.citation_verifiee}>
+                  <li class:doute={!recoupee(p)}>
                     <div class="prop-tete">
-                      <span class="marque">{p.citation_verifiee ? '✓' : '✗ citation introuvable'}</span>
+                      <span class="marque">{marque(p)}</span>
                       <button class="mini" on:click={() => reprendre(p)}>reprendre</button>
                     </div>
                     <p class="prop-corps">
                       {#each Object.entries(p) as [k, v]}
-                        {#if !['citation', 'citation_verifiee'].includes(k)}{' '}
+                        {#if !CONTROLES.includes(k)}{' '}
                           <span><b>{k}</b> {v}</span>
                         {' '}{/if}
                       {/each}
@@ -354,13 +423,13 @@
 
           {#if genre === 'entite'}
             <div class="entite">
-              <input type="text" placeholder="chercher dans la base…"
+              <input type="text" placeholder="Chercher dans la base…" aria-label="Chercher une fiche dans la base"
                      bind:value={rechercheEntite[champ]}
                      on:input={() => chercherEntite(champ)} />
               {#if valeurs[champ]?.id}
-                <p class="hint choisi">↳ entité existante #{valeurs[champ].id}</p>
+                <p class="hint choisi">↳ fiche existante n° {valeurs[champ].id}</p>
               {:else if valeurs[champ]?.nom}
-                <p class="hint choisi">↳ à créer : {valeurs[champ].nom} ({valeurs[champ].type})</p>
+                <p class="hint choisi">↳ fiche à créer : {valeurs[champ].nom} ({libelleType(valeurs[champ].type)})</p>
               {/if}
               {#if valeurs[champ]?.type === 'person'}
                 <!-- Les aides aux particuliers (façades, ravalement) nomment des
@@ -379,7 +448,7 @@
                 <ul class="suggestions">
                   {#each suggestions[champ] as s}
                     <li><button on:click={() => choisirEntite(champ, s)}>
-                      {s.name} <em>{s.type}</em>
+                      {s.name} <em>{libelleType(s.type)}</em>
                     </button></li>
                   {/each}
                 </ul>
@@ -387,7 +456,7 @@
                 <p class="hint">
                   Absente de la base ? La créer comme :
                   {#each ['association', 'business', 'person', 'service'] as t}
-                    <button class="mini" on:click={() => declarerEntite(champ, t)}>{t}</button>
+                    <button class="mini" on:click={() => declarerEntite(champ, t)}>{libelleType(t)}</button>
                   {/each}
                 </p>
               {/if}
@@ -395,9 +464,9 @@
 
           {:else if genre.startsWith('choix:')}{' '}
             <select bind:value={valeurs[champ]}>
-              <option value="">— non renseigné</option>
+              <option value="">Choisir…</option>
               {#each genre.slice(6).split(',') as opt}
-                <option value={opt}>{opt}</option>
+                <option value={opt}>{libelleChoix(opt)}</option>
               {/each}
             </select>
 
@@ -418,13 +487,13 @@
       <div class="field source" class:manque={!sourceOk}>
         <span>Source <em class="req">obligatoire</em></span>
         <p class="hint">
-          Une saisie sans document n'est pas défendable : les PV 2017-2019 de la
-          commune ont disparu du site de la mairie, et seule une copie locale les
-          rend encore opposables.
+          Une saisie sans document n'est pas défendable : une page web peut
+          disparaître, une copie archivée reste. Si l'acte n'existe plus en
+          ligne, dites-le plus bas.
         </p>
 
         <div class="doc-recherche">
-          <input type="text" placeholder="chercher un document archivé…"
+          <input type="text" placeholder="Chercher un document archivé…" aria-label="Chercher un document archivé"
                  bind:value={rechercheDoc} on:input={chercherDocs} />
           <label class="depot">
             {fichierEnCours ? 'Dépôt…' : 'Déposer un fichier'}
@@ -451,9 +520,9 @@
             {/each}
           </ul>
           <label class="soupape">
-            <span>Aucun document possible ? Dire pourquoi — ce motif sera publié avec la ligne.</span>
+            <span>Aucun document possible ? Dites pourquoi : ce motif sera publié avec la ligne.</span>
             <input type="text" bind:value={sansDocumentMotif}
-                   placeholder="ex. registre consulté en mairie, non communiqué" />
+                   placeholder="Par exemple : registre consulté en mairie, non communiqué" />
           </label>
         {' '}{/if}
 
@@ -466,17 +535,35 @@
       <label class="field">
         <span>Fiabilité</span>
         <select bind:value={confidence}>
-          {#each confiancesPermises as c}<option value={c}>{c}</option>{/each}
+          {#each choixFiabilite(confiancesPermises) as c}<option value={c.cle}>{c.libelle}</option>{/each}
         </select>
         <p class="hint">
-          <code>confirmed</code> est publié sur le site. <code>probable</code> reste
-          dans l'atelier — pour un chiffre dont on doute encore.
+          « Confirmée » est publiée sur le site. « Probable » reste dans
+          l'atelier, pour un chiffre dont on doute encore.
         </p>
       </label>
 
+      {#if rejoint}
+        <div class="rejoint" role="alert">
+          <p>
+            Ce nom rejoint une fiche qui existe déjà :
+            <a href="/atelier/entite/{rejoint.id}">{rejoint.name}</a>
+            ({libelleType(rejoint.type)}{rejoint.commune ? `, ${rejoint.commune}` : ''}){#if rejoint.verdict === 'ecarte'}, <strong>écartée du site</strong>{/if}.
+            Enregistrer ne créera pas de nouvelle fiche. Seuls les champs encore
+            vides de la fiche existante seront remplis ; rien de ce qui est déjà
+            renseigné ne change.
+          </p>
+          <p class="hint">Si c'est une autre structure, changez le nom ou la commune.</p>
+        </div>
+      {/if}
       <button class="save" on:click={enregistrer} disabled={envoi || !sourceOk}>
-        {envoi ? 'Enregistrement…' : `Enregistrer ce ${libelleObjet.toLowerCase()}`}
+        {envoi ? 'Enregistrement…'
+          : objet !== 'entite' ? 'Enregistrer la saisie'
+          : rejoint ? `Compléter la fiche « ${rejoint.name} »` : 'Créer la fiche'}
       </button>
+      <!-- Répétée sous le bouton : en haut de page, sur téléphone, on ne la
+           voyait pas après avoir cliqué. -->
+      {#if erreur}<div class="err" role="alert">{erreur}</div>{/if}
       {#if !sourceOk}
         <p class="hint bloque">Choisir un document, en déposer un, ou expliquer son absence.</p>
       {/if}
@@ -493,7 +580,7 @@
             <li>
               <div class="ligne">
                 <strong>{(contrat[s.objet] || {})._libelle || s.objet}</strong>
-                <button class="mini danger" on:click={() => retirer(s.id)}>retirer</button>
+                <button class="mini danger" on:click={() => retirer(s)}>retirer</button>
               </div>
               <p class="detail">
                 {#each Object.entries(s.valeurs || {}).slice(0, 3) as [k, v]}
@@ -524,6 +611,9 @@
   code { background: var(--fond); padding: 0 .25rem; border-radius: 3px; font-size: .9em; }
 
   .err { background: var(--danger-bordure); color: var(--danger-texte); padding: .5rem .75rem; border-radius: 6px; margin-bottom: .75rem; font-size: .85rem; }
+  .rejoint { border: 1px solid var(--alerte-bordure); background: var(--alerte-doux); color: var(--alerte-texte);
+             padding: .5rem .75rem; border-radius: 6px; margin: .5rem 0; font-size: .85rem; }
+  .rejoint a { color: inherit; text-decoration: underline; }
   .ok  { background: var(--succes-bordure); color: var(--succes-texte); padding: .5rem .75rem; border-radius: 6px; margin-bottom: .75rem; font-size: .85rem; }
 
   .layout { display: grid; grid-template-columns: 1fr 320px; gap: 1.25rem; align-items: start; }

@@ -38,7 +38,7 @@ def etape_ecrire_couches(out, public_layers) -> None:
 
 
 def etape_ecrire_finances(out, budget_annuel, budget_annexe, budget_vote, ofgl_data,
-                          dvf_data, marches_data, approbations_data) -> None:
+                          dvf_data, marches_data, approbations_data, avant_fusion_data) -> None:
     write_json(out / "budget.json", {"annuel": budget_annuel, "annexe": budget_annexe})
     write_json(out / "budget_vote.json", {"budget_vote": budget_vote, "total": len(budget_vote)})
     write_json(out / "ofgl.json", {"ofgl": ofgl_data, "total": len(ofgl_data)})
@@ -46,3 +46,5 @@ def etape_ecrire_finances(out, budget_annuel, budget_annexe, budget_vote, ofgl_d
     write_json(out / "marches.json", {"marches": marches_data, "total": len(marches_data)})
     write_json(out / "approbations.json",
                {"approbations": approbations_data, "total": len(approbations_data)})
+    # Prédécesseurs de la commune, et séries des communes absorbées À PART.
+    write_json(out / "avant_fusion.json", avant_fusion_data)
