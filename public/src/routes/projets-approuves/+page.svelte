@@ -123,7 +123,7 @@
   .note a { color: var(--ardoise-fonce); }
 
   .tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; margin-bottom: 1.75rem; max-width: 560px; }
-  .tile { background: #fff; border: 1px solid var(--trait); border-top: 3px solid var(--ardoise); border-radius: 8px;
+  .tile { background: var(--carte); border: 1px solid var(--trait); border-top: 3px solid var(--ardoise); border-radius: 8px;
           padding: .8rem .9rem; display: flex; flex-direction: column; gap: .15rem; }
   .tlabel { font-size: .72rem; color: var(--gris); font-weight: 600; text-transform: uppercase; letter-spacing: .02em; }
   .tval { font-size: 1.45rem; font-weight: 700; }

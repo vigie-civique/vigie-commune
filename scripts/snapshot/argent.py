@@ -13,7 +13,6 @@ from statistics import median
 
 from collectors.etat_flux import etat_du_flux
 from scripts.snapshot.revue import appliquer_revue
-from scripts.snapshot.actes import PORTEE_PAR_PERIMETRE
 from scripts.snapshot.socle import RULES, rows, table_exists
 from scripts.snapshot.textes import champ_publiable
 
@@ -23,7 +22,59 @@ from scripts.snapshot.textes import champ_publiable
 DVF_SEUIL_MEDIANE = 5
 
 
-def agreger_dvf(mutations: list[dict]) -> dict:
+def _mutations_dvf(lignes: list[dict]) -> list[dict]:
+    """Regroupe les lignes DVF par mutation — la vente, telle que l'acte la porte.
+
+    DVF écrit une ligne par local et par nature de culture de chaque parcelle :
+    une maison vendue avec son garage, son jardin et un bois en fait quatre,
+    toutes au prix de l'acte entier. Le site comptait ces lignes et les appelait
+    des ventes : 339 à Lasalle sur 2021-2025 pour 141 mutations, 112 pour 34 en
+    2025 (relevé du 14/11/2026, recompté sur le fichier de la DGFiP).
+
+    L'identifiant est `id_mutation`. Une ligne entrée avant que la colonne
+    existe n'en a pas : elle se range par date, prix et nature de mutation, que
+    toutes les lignes d'un même acte partagent — repli exact sur Lasalle
+    (141 pour 141), qui confondrait deux ventes du même jour au même prix.
+    """
+    groupes: dict = {}
+    for l in lignes:
+        cle = l.get("id_mutation") or (l["date"], l["price"], l.get("nature_mutation"))
+        groupes.setdefault(cle, []).append(l)
+    mutations = []
+    for groupe in groupes.values():
+        natures = [(l["nature_bien"] or "").lower() for l in groupe]
+
+        def a(motif):
+            return any(motif in n for n in natures)
+
+        # UNE catégorie par mutation, la plus bâtie d'abord : la composition
+        # retombe ainsi sur le total, ce qu'un compte par nature ne ferait pas.
+        categorie = ("maison" if a("maison") else "appartement" if a("appartement")
+                     else "local" if a("local")
+                     else "dependance" if a("dépendance") or a("dependance")
+                     else "non_bati")
+        # Les logements distincts : la même maison revient sur chaque ligne de
+        # culture de sa parcelle, avec la même surface.
+        logements = {(l.get("cadastre_ref"), (l["nature_bien"] or "").lower(), l.get("surface_bati"))
+                     for l in groupe
+                     if ("maison" in (l["nature_bien"] or "").lower()
+                         or "appartement" in (l["nature_bien"] or "").lower())
+                     and l.get("surface_bati")}
+        prix = next((l["price"] for l in groupe if l["price"]), None)
+        # Le prix au m² ne se calcule que sur une vente d'UN logement, rapporté à
+        # sa surface BÂTIE. Il était calculé par ligne, sur la surface du terrain
+        # quand il y en avait un : 978 €/m² publiés à Lasalle, pour 1 483 ainsi.
+        # Le prix d'un acte qui porte deux logements ne se partage pas entre eux.
+        m2 = None
+        if prix and len(logements) == 1:
+            m2 = prix / next(iter(logements))[2]
+        mutations.append({"annee": (groupe[0]["date"] or "")[:4], "categorie": categorie,
+                          "prix": prix, "m2": m2,
+                          "natures": {l["nature_bien"] or "-" for l in groupe}})
+    return mutations
+
+
+def agreger_dvf(lignes: list[dict]) -> dict:
     """DVF ne sort qu'en agrégats : par année, par nature de bien, et en synthèse.
 
     Le snapshot publiait chaque mutation — date, parcelle, prix, coordonnées —
@@ -34,47 +85,47 @@ def agreger_dvf(mutations: list[dict]) -> dict:
     suffisent à retrouver le vendeur (audit du 17/10/2026). La ligne reste en
     base, pour l'atelier ; le site n'en reçoit que des comptes et des médianes,
     et une médiane sur moins de `DVF_SEUIL_MEDIANE` ventes n'est pas publiée.
-    """
-    def nature(t, motif):
-        return motif in (t["nature_bien"] or "").lower()
 
-    def bati(t):
-        return nature(t, "maison") or nature(t, "appartement")
+    L'unité de compte est la MUTATION (`_mutations_dvf`), jamais la ligne.
+    """
+    mutations = _mutations_dvf(lignes)
 
     def med(valeurs):
         valeurs = [v for v in valeurs if v]
         return round(median(valeurs)) if len(valeurs) >= DVF_SEUIL_MEDIANE else None
 
-    annees = sorted({(t["date"] or "")[:4] for t in mutations} - {""})
+    def combien(categorie):
+        return sum(1 for m in mutations if m["categorie"] == categorie)
+
+    annees = sorted({m["annee"] for m in mutations} - {""})
     par_annee = []
     for annee in annees:
-        dans = [t for t in mutations if (t["date"] or "").startswith(annee)]
-        m2 = [t["price_per_m2"] for t in dans if bati(t) and t["price_per_m2"]]
+        dans = [m for m in mutations if m["annee"] == annee]
+        m2 = [m["m2"] for m in dans if m["m2"]]
         par_annee.append({"annee": int(annee), "mutations": len(dans),
                           "ventes_bati": len(m2), "mediane_m2": med(m2)})
 
-    maisons = [t for t in mutations if nature(t, "maison")]
-    appartements = [t for t in mutations if nature(t, "appartement")]
-    dependances = [t for t in mutations if nature(t, "dépendance") or nature(t, "dependance")]
-    locaux = [t for t in mutations if nature(t, "local")]
+    # Une mutation compte dans chaque nature qu'elle porte : ces comptes-là ne
+    # s'additionnent pas, et la page le dit.
+    par_nature = Counter(n for m in mutations for n in m["natures"])
     return {
         "seuil_mediane": DVF_SEUIL_MEDIANE,
         "synthese": {
             "mutations": len(mutations),
+            "lignes": len(lignes),
             "debut": int(annees[0]) if annees else None,
             "fin": int(annees[-1]) if annees else None,
-            "maisons": len(maisons),
-            "appartements": len(appartements),
-            "dependances": len(dependances),
-            "locaux": len(locaux),
-            "non_bati": len(mutations) - len(maisons) - len(appartements)
-                        - len(dependances) - len(locaux),
-            "mediane_prix_maison": med(t["price"] for t in maisons),
-            "mediane_m2_bati": med(t["price_per_m2"] for t in mutations if bati(t)),
+            "maisons": combien("maison"),
+            "appartements": combien("appartement"),
+            "dependances": combien("dependance"),
+            "locaux": combien("local"),
+            "non_bati": combien("non_bati"),
+            "mediane_prix_maison": med(m["prix"] for m in mutations
+                                       if m["categorie"] == "maison"),
+            "mediane_m2_bati": med(m["m2"] for m in mutations),
         },
         "par_annee": par_annee,
-        "par_nature": [{"nature": n, "mutations": k} for n, k in
-                       Counter(t["nature_bien"] or "-" for t in mutations).most_common()],
+        "par_nature": [{"nature": n, "mutations": k} for n, k in par_nature.most_common()],
     }
 
 
@@ -254,16 +305,34 @@ def acheteurs_par_siren(conn) -> dict[str, int]:
     se retrouvent par le nom, comme partout ailleurs dans le snapshot (aucun
     identifiant de ligne écrit en dur).
     """
-    from collectors.config import COMMUNE_SIREN, EPCI_SIREN
+    from collectors.config import COMMUNE_SIRENS, EPCI_SIREN
     from collectors.marches_publics import siren_de
     sortie = {}
     commune = _commune_entity_id(conn)
-    if commune and siren_de(COMMUNE_SIREN):
-        sortie[siren_de(COMMUNE_SIREN)] = commune
+    for siren in COMMUNE_SIRENS:
+        if commune and siren_de(siren):
+            sortie[siren_de(siren)] = commune
     epci = _epci_entity_id(conn)
     if epci and siren_de(EPCI_SIREN):
         sortie[siren_de(EPCI_SIREN)] = epci
     return sortie
+
+
+def portee_marche(acheteur_id, commune_id, epci_id) -> str:
+    """La portée d'un marché : QUI l'a passé, pas où siège l'acheteur.
+
+    Elle se lisait sur le périmètre de la fiche (C1 → commune, C2 →
+    intercommunalité). Mais C2 dit « une commune du territoire de l'EPCI »,
+    pas « l'EPCI » : à Saillans, 14 marchés de la commune de Vercheny et 3 du
+    département étaient publiés comme marchés de l'intercommunalité, et 3 du
+    syndicat de la rivière Drôme (siège à Saillans, C1) comme marchés de la
+    commune (relevé du 28/10/2026). Tout autre acheteur relève du territoire.
+    """
+    if acheteur_id is not None and acheteur_id == commune_id:
+        return "commune"
+    if acheteur_id is not None and acheteur_id == epci_id:
+        return "intercommunalite"
+    return "territoire"
 
 
 def rattacher_acheteurs(marches: list[dict], par_siren: dict[str, int]) -> int:
@@ -318,11 +387,42 @@ def delier_renvois_morts(marches: list[dict], public_ids: set[int]) -> int:
     return morts
 
 
+def renvoyer_aux_pieces(flows: list[dict], public_event_ids: set,
+                        pieces_des_fragments: dict | None = None) -> int:
+    """Le renvoi de chaque flux vers ce qui l'atteste : `acte_id` quand l'acte
+    est publié, `document` quand la pièce a une URL externe. Rend le nombre de
+    flux sans aucun renvoi.
+
+    Revue d'architecture du 07/11/2026, C1 : la requête ne lisait ni
+    `event_id` ni `raw_document_id`, et `flows.json` ne portait que des
+    étiquettes (« CR CM année ») — le front ne pouvait pas lier ce que les
+    données ne portaient pas. Les identifiants internes ne sortent pas : un
+    acte non publié n'a pas de page, une pièce déposée (`url` NULL) non plus.
+    """
+    sans = 0
+    for f in flows:
+        event_id = f.pop("event_id", None)
+        f.pop("raw_document_id", None)
+        url = f.pop("document_url", None)
+        f["acte_id"] = event_id if event_id in public_event_ids else None
+        # Lu dans un fragment de procès-verbal qui ne sort plus (`fragments_de_pv`) :
+        # le flux renvoie au procès-verbal lui-même, qui l'atteste.
+        if f["acte_id"] is None and not url:
+            url = (pieces_des_fragments or {}).get(event_id)
+        f["document"] = url if isinstance(url, str) and url.startswith(
+            ("https://", "http://")) else None
+        if f["acte_id"] is None and f["document"] is None:
+            sans += 1
+    return sans
+
+
 def etape_flux(conn, revue, entity_rows, public_person_ids, public_ids,
-               ecartees_du_perimetre, redige, exclusions) -> dict:
+               ecartees_du_perimetre, redige, exclusions, public_events,
+               pieces_des_fragments=None, actes_de_rubrique=frozenset()) -> dict:
     flow_rows = rows(conn, """
         SELECT ff.id, ff.type, ff.year, ff.amount, ff.description,
-               ff.source, ff.confidence,
+               ff.source, ff.confidence, ff.origine,
+               ff.event_id, ff.raw_document_id, rd.url AS document_url,
                COALESCE(ff.type_norm, ff.type) AS type_norm,
                COALESCE(ff.perimetre, 'detail') AS perimetre,
                COALESCE(ff.statut, 'realise') AS statut,
@@ -331,6 +431,7 @@ def etape_flux(conn, revue, entity_rows, public_person_ids, public_ids,
         FROM financial_flows ff
         LEFT JOIN entities f ON f.id = ff.from_id
         LEFT JOIN entities t ON t.id = ff.to_id
+        LEFT JOIN raw_documents rd ON rd.id = ff.raw_document_id
         ORDER BY ff.year DESC, ff.amount DESC
     """)
     # La revue passe AVANT le filtre de confiance : c'est précisément son
@@ -345,6 +446,15 @@ def etape_flux(conn, revue, entity_rows, public_person_ids, public_ids,
             continue
         revus.append(flow)
     flow_rows = revus
+
+    # Un flux lu dans la rubrique d'un procès-verbal où l'exécutif rend compte
+    # de ses décisions par délégation : c'est une décision du maire ou du
+    # président, qui n'est pas publiée depuis un PV (Julien, 14 et 15/11/2026),
+    # ni par son titre ni par son montant (relecture vigie-securite du 15/11).
+    if actes_de_rubrique:
+        avant = len(flow_rows)
+        flow_rows = [f for f in flow_rows if f.get("event_id") not in actes_de_rubrique]
+        exclusions["flows"]["lu_dans_une_rubrique_de_decisions"] = avant - len(flow_rows)
 
     public_flows = [
         flow for flow in flow_rows
@@ -446,24 +556,104 @@ def etape_flux(conn, revue, entity_rows, public_person_ids, public_ids,
         f["etat"] = etat_du_flux(f.get("type"), f.get("source"), f.get("statut"))
     flows_par_etat = dict(Counter(f["etat"] for f in public_flows))
 
+    # Le renvoi à la pièce, une fois la sélection faite (C1, revue du 07/11).
+    # Ce n'est pas une exclusion : le compte se lit dans `flows.json`, et
+    # `verify_snapshot` refuse un flux `verbatim` sans renvoi.
+    renvoyer_aux_pieces(public_flows, {e.get("id") for e in public_events},
+                        pieces_des_fragments)
+
     # Également calculés, jamais publiés : `flux_delies_hors_perimetre`,
     # `flows_par_sens`, `flows_par_statut`. Seul l'état sort, dans `stats.json`.
     return {"flow_rows": flow_rows, "public_flows": public_flows,
             "flows_par_etat": flows_par_etat}
 
 
+def _siren_col(conn, table: str) -> str:
+    """`siren` si la table l'a (colonne du 02/11/2026), sinon un NULL nommé."""
+    return ("siren" if table_exists(conn, table) and "siren" in {
+        r["name"] for r in rows(conn, f"PRAGMA table_info({table})")} else "NULL AS siren")
+
+
+def marquer_avant_fusion(lignes: list[dict], avant: dict[str, str]) -> int:
+    """Une ligne lue sous le SIREN d'une ancienne commune porte `avant_fusion`
+    (son nom) et son `siren` ; les autres perdent la colonne, qui ne sert qu'à
+    ce marquage. Sans lui, un exercice de l'ancienne commune sortait sous le
+    nom actuel (relevé de Vallouise-Pelvoux, 01/11/2026). Rend le nombre de
+    lignes marquées."""
+    marquees = 0
+    for ligne in lignes:
+        siren = ligne.pop("siren", None)
+        if siren and siren in avant:
+            ligne["avant_fusion"] = avant[siren]
+            ligne["siren"] = siren
+            marquees += 1
+    return marquees
+
+
+def marquer_marches_avant_fusion(marches: list[dict], avant: dict[str, str]) -> int:
+    """`avant_fusion` (nom de l'ancienne commune) sur un marché passé sous un
+    SIREN d'avant la fusion. L'ancienne commune au même code reste de la
+    commune, marquée ; une absorbée d'un autre code n'a pas de fiche : portée
+    « territoire », marquée aussi, jamais comptée avec la commune.
+
+    À appeler sur les lignes telles que lues, AVANT `rattacher_acheteurs` qui
+    retire `acheteur_siren`. Rend le nombre de marchés marqués."""
+    from collectors.marches_publics import siren_de
+    marques = 0
+    for m in marches:
+        nom = avant.get(siren_de(m.get("acheteur_siren") or ""))
+        if nom:
+            m["avant_fusion"] = nom
+            marques += 1
+    return marques
+
+
+def avant_fusion(conn) -> dict:
+    """`avant_fusion.json` : les prédécesseurs de la commune, et les séries des
+    communes absorbées d'un autre code, À PART — elles ne s'additionnent
+    jamais à celle de la commune (tranché le 02/11/2026)."""
+    from collectors.config import (COMMUNE_NAME, COMMUNE_SIREN, COMMUNE_SIRENS_ANCIENS,
+                                   COMMUNES_ABSORBEES)
+    predecesseurs = [{"siren": s, "nom": COMMUNE_NAME, "sorte": "meme_code"}
+                     for s in COMMUNE_SIRENS_ANCIENS]
+    predecesseurs += [{"siren": s, "nom": d["nom"], "insee": d["insee"], "sorte": "absorbee"}
+                      for s, d in COMMUNES_ABSORBEES.items()]
+    sirens = tuple(COMMUNES_ABSORBEES)
+    marques = ",".join("?" * len(sirens))
+
+    def serie(table: str, colonnes: str, ordre: str) -> list[dict]:
+        if not sirens or not table_exists(conn, table):
+            return []
+        return rows(conn, f"SELECT siren, {colonnes} FROM {table} WHERE siren IN ({marques})"
+                          f" ORDER BY siren, {ordre}", sirens)
+
+    return {
+        "commune": {"siren": COMMUNE_SIREN, "nom": COMMUNE_NAME},
+        "predecesseurs": predecesseurs,
+        "absorbees": {
+            "ofgl": serie("ofgl_agregats_absorbees",
+                          "year, agregat, montant, euros_par_habitant, population",
+                          "year DESC, agregat"),
+            "budget": serie("budget_annuel_absorbees",
+                            "year, categorie, compte, libelle, montant, source",
+                            "year DESC, categorie, montant DESC"),
+        },
+    }
+
+
 def etape_finances(conn, revue, public_ids, public_entities, perimetre_par_entite,
                    noms_publics, exclusions) -> dict:
+    from collectors.config import SIRENS_AVANT_FUSION
     # ── Données financières & foncières officielles (open data) ───────────
     # DGFiP, OFGL, DECP : faits publics par nature → export complet. DVF : agrégats
     # seulement, cf. `agreger_dvf`.
-    budget_annuel = rows(conn, """
-        SELECT year, categorie, compte, libelle, montant, source
+    budget_annuel = rows(conn, f"""
+        SELECT year, categorie, compte, libelle, montant, source, {_siren_col(conn, "budget_annuel")}
         FROM budget_annuel ORDER BY year DESC, categorie, montant DESC
     """)
-    budget_annexe = rows(conn, """
+    budget_annexe = rows(conn, f"""
         SELECT ba.year, ba.section, ba.sens, ba.libelle, ba.montant, ba.source,
-               ba.entity_id, e.name AS entity_name
+               ba.entity_id, e.name AS entity_name, {"ba.siren" if _siren_col(conn, "budget_annexe") == "siren" else "NULL AS siren"}
         FROM budget_annexe ba LEFT JOIN entities e ON e.id = ba.entity_id
         ORDER BY ba.year DESC, ba.section
     """)
@@ -477,11 +667,13 @@ def etape_finances(conn, revue, public_ids, public_entities, perimetre_par_entit
         cautions = ("cautions" if "cautions" in {r["name"] for r in rows(
             conn, "PRAGMA table_info(budget_annexe_balance)")} else "NULL AS cautions")
         for b in rows(conn, f"""
-            SELECT year, budget, entity_id, encours_dette, {cautions}, solde_fonctionnement, source
+            SELECT year, budget, entity_id, encours_dette, {cautions}, solde_fonctionnement, source,
+                   {_siren_col(conn, "budget_annexe_balance")}
             FROM budget_annexe_balance ORDER BY year DESC, budget
         """):
             commun = {"year": b["year"], "source": b["source"], "entity_name": b["budget"],
-                      "entity_id": b["entity_id"] if b["entity_id"] in public_ids else None}
+                      "entity_id": b["entity_id"] if b["entity_id"] in public_ids else None,
+                      "siren": b["siren"]}
             if b["budget"] in poursuites:
                 commun["poursuivi_sous"] = poursuites[b["budget"]]
             # Emprunts et cautionnements reçus (compte 165) : le périmètre de
@@ -495,10 +687,12 @@ def etape_finances(conn, revue, public_ids, public_entities, perimetre_par_entit
                 budget_annexe.append({**commun, "section": "fonctionnement", "sens": "solde",
                                       "libelle": "Produits − charges de l'exercice (balance DGFiP)",
                                       "montant": b["solde_fonctionnement"]})
-    ofgl_data = rows(conn, """
-        SELECT year, agregat, montant, euros_par_habitant, population
+    ofgl_data = rows(conn, f"""
+        SELECT year, agregat, montant, euros_par_habitant, population, {_siren_col(conn, "ofgl_agregats")}
         FROM ofgl_agregats ORDER BY year DESC, agregat
     """)
+    for lignes in (budget_annuel, budget_annexe, ofgl_data):
+        marquer_avant_fusion(lignes, SIRENS_AVANT_FUSION)
     # Budgets primitifs VOTÉS (prévisionnel) extraits des CR — comble le trou
     # après OFGL (>2024). Fait public (délibération) → export complet.
     budget_vote = rows(conn, """
@@ -508,7 +702,7 @@ def etape_finances(conn, revue, public_ids, public_entities, perimetre_par_entit
     for b in budget_vote:
         b["note"] = champ_publiable(b["note"], None, noms_publics)
     dvf_data = agreger_dvf(rows(conn, """
-        SELECT date, nature_bien, price, price_per_m2 FROM dvf_transactions
+        SELECT * FROM dvf_transactions
     """))
     # Le filtre de confiance manquait ici, alors qu'il s'applique partout
     # ailleurs : la table publiait TOUT. Un marché dont l'acheteur n'a pas
@@ -530,6 +724,9 @@ def etape_finances(conn, revue, public_ids, public_entities, perimetre_par_entit
                lieu_exec, source, source_url{confiance_mp}
         FROM marches_publics {filtre_mp} ORDER BY date_notif DESC, montant DESC
     """)
+    # AVANT `rattacher_acheteurs`, qui retire `acheteur_siren` : marqué après,
+    # aucun marché ne l'était (constaté le 02/11/2026 sur Saillans en ligne).
+    marquer_marches_avant_fusion(marches_data, SIRENS_AVANT_FUSION)
     rattacher_acheteurs(marches_data, acheteurs_par_siren(conn))
     for m in marches_data:
         if m.get("montant_base") is None:
@@ -556,9 +753,9 @@ def etape_finances(conn, revue, public_ids, public_entities, perimetre_par_entit
     # communauté de communes n'est pas un marché de la commune, même quand
     # il est exécuté sur son territoire — et sans ce champ, la page des
     # marchés les additionnait sans le dire.
+    commune_id, epci_id = _commune_entity_id(conn), _epci_entity_id(conn)
     for m in marches_data:
-        m["portee"] = PORTEE_PAR_PERIMETRE.get(
-            perimetre_par_entite.get(m.get("acheteur_id")) or "") or "territoire"
+        m["portee"] = portee_marche(m.get("acheteur_id"), commune_id, epci_id)
 
     # Plans de financement votés (participations aux opérations du syndicat
     # d'électrification). Exportés à part des marchés : aucune entreprise
@@ -575,6 +772,7 @@ def etape_finances(conn, revue, public_ids, public_entities, perimetre_par_entit
             a[champ] = champ_publiable(a[champ], a["date"], noms_publics)
 
     return {
+        "avant_fusion_data": avant_fusion(conn),
         "budget_annuel": budget_annuel,
         "budget_annexe": budget_annexe,
         "ofgl_data": ofgl_data,

@@ -33,12 +33,22 @@ voté, une dotation notifiée, une subvention lue dans un compte rendu. Il est
 **facultatif** et ne se met pas en ligne à la légère : voir « Les deux moitiés »
 plus bas.
 
-Ce que l'atelier a le droit de réécrire dépend de l'**origine** de la ligne. Une
-donnée déjà structurée par une administration (API, CSV) ne se rectifie pas à la
+Ce que l'atelier a le droit de réécrire dépend de l'**origine** de la ligne (flux,
+marchés, actes, budgets, dotations). Une donnée déjà structurée par une administration (API, CSV) ne se rectifie pas à la
 main : le montant est celui qu'elle publie. Une donnée lue dans un PDF ou une
 page web, si — le chiffre y est notre lecture d'une phrase. Une ligne
 institutionnelle peut en revanche toujours être écartée de la publication.
 `collectors/origine.py` porte la règle, l'API la fait respecter.
+
+Pour les **fiches** (entités), la règle est autre et plus étroite : elle ne vaut que pour
+une fiche d'origine **explicitement** institutionnelle. Sur celle-ci, changer le
+nom, le SIREN ou l'année de naissance demande le rôle validateur **et** un motif
+(champ `motif` de la requête), journalisé avec le changement ; un contributeur
+reçoit un 403 qui dit le rôle requis. Les autres champs de la fiche (adresse,
+contacts, notes…) restent éditables. Une fiche d'origine non classée (NULL) n'est
+pas concernée : devant l'inconnu la règle des lignes de données protège, celle
+des fiches laisse écrire, sans quoi la moitié d'une instance serait verrouillée
+(3 025 fiches non classées à Lasalle au 15/11/2026).
 
 Le filtrage n'est pas un détail : c'est le cœur du dispositif. Il écarte les
 personnes physiques sans rôle civique public, les pistes de travail non
@@ -367,9 +377,11 @@ elles l'API démarre mais refuse toute connexion, et l'erreur n'est pas parlante
 cp deploy/env.exemple .env
 chmod 600 .env
 openssl rand -hex 32                      # coller la valeur après « JWT_SECRET= »
-#    ADMIN_KEY peut rester VIDE : c'est une clé de service qui contourne le
-#    verrou JWT, et une clé absente ne donne aucun accès. ALLOWED_ORIGINS ne
-#    sert qu'à un atelier en ligne ; en local, laissez-la vide.
+#    ADMIN_KEY peut rester VIDE : c'est une clé de service, admise depuis la
+#    machine elle-même, qui vaut le rôle admin sur la publication et sur le
+#    tri des relations candidates — et sur rien d'autre : les lectures de
+#    l'atelier exigent un compte. Une clé absente ne donne aucun accès.
+#    ALLOWED_ORIGINS ne sert qu'à un atelier en ligne ; en local, laissez-la vide.
 
 # 2. Le premier compte, administrateur. Le mot de passe est demandé au clavier,
 #    il n'apparaît nulle part.
@@ -610,11 +622,16 @@ sur les données publiées ni sur le contenu éditorial :
   Voir le README généré à côté des données, et `config/publication_rules.json`
   → `outputs` ;
 - la **base de travail** (`db/`) n'est pas distribuée du tout : elle contient
-  ce que le filtre écarte.
+  ce que le filtre écarte ;
+- la **liste de mots courants** (`scripts/snapshot/lexique/mots_courants.txt`),
+  qui borne l'index du texte des actes, est dérivée de Morphalou 3.1 (ATILF) et
+  reste sous **LGPL-LR** : sa `NOTICE` et le texte de la licence sont à côté
+  d'elle.
 
-Une licence ouverte ne dispense pas du RGPD. Les personnes physiques ne figurent
-sur le site qu'au titre d'une fonction publique, d'un mandat électif ou d'une
-responsabilité inscrite dans un registre public. Un droit de réponse est ouvert,
+Une licence ouverte ne dispense pas du RGPD. Les cas où une personne physique est
+nommée, et la façon dont elle est désignée ailleurs, sont fixés dans
+[`SECURITY.md`](SECURITY.md) et repris sur la page « Mentions légales » de chaque
+site : les deux textes se modifient ensemble. Un droit de réponse est ouvert,
 et toute rectification est appliquée puis signalée comme telle — la donnée
 collectée étant conservée à côté de la rectification, jamais remplacée — sauf
 effacement dû, auquel cas elle est retirée.

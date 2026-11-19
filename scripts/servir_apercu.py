@@ -34,6 +34,11 @@ pose un cookie puis renvoie vers la même adresse sans paramètre : les liens
 internes du site, absolus, continuent de marcher. Un seul port pour tout
 l'atelier, et chacun voit son aperçu.
 
+Derrière nginx (`--compte-par-entete`, ou VIGIE_APERCU_COMPTE_PAR_ENTETE=1), le
+compte vient de l'en-tête `X-Vigie-Compte`, que nginx pose d'après la session
+de l'atelier : ni le cookie ni `?apercu=` ne choisissent plus rien
+(deploy/nginx-atelier.conf, « Aperçu du site public »).
+
 Usage
 -----
     python3 scripts/servir_apercu.py <répertoire> [--port 5180]
@@ -44,11 +49,12 @@ from __future__ import annotations
 import argparse
 import functools
 import http.server
+import os
 import socketserver
 import sys
 from http.cookies import SimpleCookie
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -115,31 +121,61 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 COOKIE = "vigie_apercu"
+#: Posé par nginx d'après la session de l'atelier (`auth_request`, api_auth.py
+#: « L'aperçu du site, derrière les comptes ») ; le visiteur ne l'écrit pas.
+EN_TETE_COMPTE = "X-Vigie-Compte"
+MARQUE_PASSAGE = "__vigie_passage"
 
 
 class HandlerParCompte(Handler):
-    """Choisit le build servi d'après le compte : `?apercu=` puis cookie."""
+    """Choisit le build servi d'après le compte.
+
+    Derrière nginx (`par_entete`), le compte vient de l'en-tête que nginx pose
+    d'après la session : le cookie `vigie_apercu` et `?apercu=`, que le
+    visiteur écrit à sa guise, ne choisissent plus rien — avec eux, n'importe
+    quel compte voyait l'aperçu de n'importe quel autre. Sur un poste local,
+    sans nginx, `?apercu=` puis le cookie, comme avant.
+    """
 
     racine: Path = Path(".")
+    par_entete: bool = False
 
     def _choisir(self) -> bool:
         morceaux = urlsplit(self.path)
-        demande = parse_qs(morceaux.query).get("apercu", [""])[0]
+        parametres = parse_qs(morceaux.query)
+        demande = parametres.get("apercu", [""])[0]
+        # La marque de l'entrée de l'aperçu (api_auth.py, MARQUE_PASSAGE) : le
+        # témoin est revenu, elle a servi ; on la retire de l'adresse.
+        # Une seule barre en tête : `//ailleurs.example?apercu=1` rendait un
+        # `Location: //ailleurs.example`, donc une redirection hors du site.
+        # Seuls nos deux paramètres partent ; ceux du site restent.
+        reste = [(k, v) for k, v in parse_qsl(morceaux.query, keep_blank_values=True)
+                 if k not in ("apercu", MARQUE_PASSAGE)]
+        sans_les_notres = "/" + morceaux.path.lstrip("/") + (f"?{urlencode(reste)}" if reste else "")
+        if MARQUE_PASSAGE in parametres and not demande:
+            self.send_response(303)
+            self.send_header("Location", sans_les_notres)
+            self.end_headers()
+            return False
         if demande:
             if not demande.isdigit():
                 self.send_error(400)
                 return False
             self.send_response(303)
-            self.send_header("Set-Cookie", f"{COOKIE}={demande}; Path=/; SameSite=Lax")
-            # Une seule barre en tête : `//ailleurs.example?apercu=1` rendait un
-            # `Location: //ailleurs.example`, donc une redirection hors du site.
-            self.send_header("Location", "/" + morceaux.path.lstrip("/"))
+            # Derrière nginx, le paramètre des liens de l'atelier est retiré de
+            # l'adresse, sans rien poser : le compte est déjà dit par l'en-tête.
+            if not self.par_entete:
+                self.send_header("Set-Cookie", f"{COOKIE}={demande}; Path=/; SameSite=Lax")
+            self.send_header("Location", sans_les_notres)
             self.end_headers()
             return False
-        cookie = SimpleCookie(self.headers.get("Cookie", ""))
-        compte = cookie[COOKIE].value if COOKIE in cookie else ""
+        if self.par_entete:
+            compte = (self.headers.get(EN_TETE_COMPTE) or "").strip()
+        else:
+            cookie = SimpleCookie(self.headers.get("Cookie", ""))
+            compte = cookie[COOKIE].value if COOKIE in cookie else ""
         site = self.racine / compte / "site"
-        if not compte.isdigit() or not (site / "index.html").is_file():
+        if not (compte.isascii() and compte.isdigit()) or not (site / "index.html").is_file():
             corps = ("<!doctype html><meta charset=utf-8><title>Aperçu</title>"
                      "<p style='font:16px system-ui;margin:2rem'>Aucun aperçu à montrer. "
                      "Ouvrez votre aperçu depuis la page Publication de l'atelier.</p>"
@@ -175,10 +211,18 @@ def main(argv=None) -> int:
     ap.add_argument("--port", type=int, default=5180)
     ap.add_argument("--par-compte", action="store_true",
                     help="servir <répertoire>/<compte>/site selon le compte du visiteur")
+    # L'atelier lance ce serveur sans cette option (scripts/publication.py) :
+    # l'unité systemd d'un atelier en ligne la donne par l'environnement.
+    ap.add_argument("--compte-par-entete", action="store_true",
+                    default=os.environ.get("VIGIE_APERCU_COMPTE_PAR_ENTETE") == "1",
+                    help=f"avec --par-compte : le compte vient de l'en-tête {EN_TETE_COMPTE} "
+                         "posé par nginx, jamais du visiteur (atelier en ligne). "
+                         "Défaut : VIGIE_APERCU_COMPTE_PAR_ENTETE=1")
     args = ap.parse_args(argv)
 
     if args.par_compte:
         HandlerParCompte.racine = args.repertoire.resolve()
+        HandlerParCompte.par_entete = args.compte_par_entete
         handler = functools.partial(HandlerParCompte, directory=str(args.repertoire.resolve()))
         with Serveur(("127.0.0.1", args.port), handler) as httpd:
             print(f"Aperçus par compte servis sur http://localhost:{args.port} "

@@ -2,6 +2,7 @@
   import { COMMUNE, COMMUNE_A, COMMUNE_DE, EPCI, SITE_NOM } from '#lib/instance.js'
   import Icon from '#lib/components/Icon.svelte'
   import Niveau from '#lib/components/Niveau.svelte'
+  import { evolutionPage, INDICATEUR_DEP, ANNEE_RUPTURE } from './rupture.js'
 
   // « De combien sont mes impôts locaux, et comment on se situe ? » est la
   // première question d'un habitant. La base avait le budget et les comparatifs
@@ -36,13 +37,15 @@
 
   const pct = (v) => v == null ? '-' : `${v.toFixed(2)} %`
   // Évolution du taux communal de foncier bâti sur la période disponible.
+  // En 2021 la part du département est passée à la commune : l'écart à travers
+  // cette année se compte hors transfert (cf. rupture.js), jamais en brut.
   const evolution = (commune) => {
-    if (!annees.length) return null
-    const a = val(commune, 'TFB_VOTE', annees[0])
-    const b = val(commune, 'TFB_VOTE', annees[annees.length - 1])
-    if (a == null || b == null || a === 0) return null
-    return ((b - a) / a) * 100
+    const serie = annees
+      .map((an) => ({ x: an, y: val(commune, 'TFB_VOTE', an) }))
+      .filter((p) => p.y != null)
+    return evolutionPage(serie, val(commune, INDICATEUR_DEP, ANNEE_RUPTURE - 1))
   }
+  $: franchit = annees.length > 1 && annees[0] < ANNEE_RUPTURE && annees[annees.length - 1] >= ANNEE_RUPTURE
 </script>
 
 <svelte:head>
@@ -65,7 +68,7 @@
   {:else}
     <p class="source">
       Exercice {annee} · source : direction générale des finances publiques
-      (fichiers de fiscalité directe locale) · données {annees[0]}–{annees[annees.length - 1]}
+      (fichiers de fiscalité directe locale{#if annees[0] < ANNEE_RUPTURE}{' '} ; pour les années d'avant {ANNEE_RUPTURE}, comptes individuels des communes et des départements{/if}) · données {annees[0]}–{annees[annees.length - 1]}
     </p>
 
     {#each LIGNES as ligne}
@@ -86,16 +89,18 @@
             {#each communes as c}
               {@const v = ligne.vote ? val(c, ligne.vote) : null}
               {@const g = val(c, ligne.global)}
-              {@const ev = ligne.vote === 'TFB_VOTE' ? evolution(c) : null}
+              {@const evc = ligne.vote === 'TFB_VOTE' ? evolution(c) : null}
+              {@const ev = evc?.pct ?? null}
+              {@const nc = evc?.rupture === 'non-chiffree'}
               <tr class:phare={c === COMMUNE}>
                 <td>{c}</td>
                 {#if ligne.vote}<td class="num">{pct(v)}</td>{/if}
                 <td class="num">{pct(g)}</td>
                 {#if ligne.vote}
                   <td class="num">
-                    {#if ev == null}-
+                    {#if ev == null}{nc ? 'non chiffré' : '-'}
                     {' '}{:else}<span class:hausse={ev > 0.5} class:stable={Math.abs(ev) <= 0.5}
-                      >{ev > 0 ? '+' : ''}{ev.toFixed(1)} %</span>{/if}
+                      >{ev > 0 ? '+' : ''}{ev.toFixed(1)} %</span>{#if evc.debut !== annees[0]}{' '} <small>dès {evc.debut}</small>{/if}{/if}
                   </td>
                 {/if}
               </tr>
@@ -103,6 +108,14 @@
           </tbody>
         </table>
       </div>
+      {#if ligne.vote === 'TFB_VOTE' && franchit}
+        <p class="aide rupture">
+          En {ANNEE_RUPTURE}, la part de taxe foncière du département est passée à la commune :
+          le taux voté par la commune a monté d'autant, sans que le taux cumulé commune et département change.
+          L'évolution ci-dessus ne compte pas ce transfert{#if communes.some((c) => evolution(c).rupture === 'non-chiffree')}{' '} ;
+          « non chiffré » signale une commune pour laquelle le taux transféré n'est pas recoupé (part du département en {ANNEE_RUPTURE - 1} absente ou non retenue) : le saut de {ANNEE_RUPTURE} n'y est pas chiffré{/if}.
+        </p>
+      {/if}
       {#if ligne.global === 'TEOM' && teom}
         {@const f = teom.france}
         {@const dep = teom.departement}
@@ -161,7 +174,7 @@
   .etat { color: var(--gris); }
 
   .tableau { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: .9rem; background: #fff;
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; background: var(--carte);
           border: 1px solid var(--trait); border-radius: 10px; }
   th, td { padding: .55rem .7rem; text-align: left; border-bottom: 1px solid var(--ardoise-pale); }
   th { font-size: .78rem; color: var(--gris); font-weight: 600; background: var(--papier); }

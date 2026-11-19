@@ -34,6 +34,7 @@ import sqlite3
 
 import requests
 
+from . import mesure
 from .archive import archive_fetch
 from .config import DB_PATH, HEADERS   # la base est nommée dans la config
 from .db import (beneficiaire_local, beneficiaires_locaux, pivot_ids,
@@ -59,7 +60,11 @@ def _telecharger(session: requests.Session) -> list[dict]:
                   content_type=r.headers.get("Content-Type"),
                   http_status=r.status_code)
     texte = r.content.decode("utf-8-sig", errors="replace")
-    return list(csv.DictReader(io.StringIO(texte), delimiter=";"))
+    lecteur = csv.DictReader(io.StringIO(texte), delimiter=";")
+    lignes = list(lecteur)
+    # L'export intégral, avant le filtre du périmètre.
+    mesure.lu("occitanie-region", len(lignes), lecteur.fieldnames, complete=True)
+    return lignes
 
 
 def _montant(valeur: str) -> int | None:
@@ -130,7 +135,7 @@ def importer(conn, lignes: list[dict], dry_run: bool = False) -> dict:
 
 
 def run(dry_run: bool = False):
-    session = requests.Session()
+    session = mesure.suivre(requests.Session())
     session.headers.update(HEADERS)
 
     print("\n[1] Export des subventions du conseil régional Occitanie…")

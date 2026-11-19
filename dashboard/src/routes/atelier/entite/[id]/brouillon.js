@@ -12,7 +12,9 @@ export const cleLocale = () => ++compteur
 export function brouillonVide() {
   return {
     verdict:   null,
-    relations: { ajouts: [], modifs: {}, suppr: [] },
+    // `motifs` : {id: pourquoi} de chaque lien à supprimer (exigé pour un lien
+    // venu d'un collecteur : le supprimer le refuse aux collectes suivantes).
+    relations: { ajouts: [], modifs: {}, suppr: [], motifs: {} },
     contacts:  { ajouts: [], suppr: [] },
     sites:     { ajouts: [], statuts: {}, suppr: [] },
     notes:     { ajouts: [], modifs: {}, suppr: [] },

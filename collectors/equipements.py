@@ -48,10 +48,13 @@ import argparse
 import csv
 import io
 import json
+import re
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 
+from . import mesure
 from .archive import HEADERS, fetch_json
 from .config import (COMMUNES, EPCI_NOM, EPCI_SIREN, NATIONAL_STORE,
                      REQUEST_DELAY, communes_du_step)
@@ -157,10 +160,37 @@ def classer(dims: dict) -> tuple[str, str]:
     return "total", "_T"
 
 
-def _observations(dataset: str, geo: str, maxi: int = 6000) -> list[dict]:
-    url = f"{MELODI}/data/{dataset}?GEO={geo}&maxResult={maxi}"
-    data = fetch_json(url, source=SOURCE, timeout=90)
-    return data.get("observations") or []
+# Melodi rend plusieurs territoires en une requête (`GEO` répété) : une requête
+# par lot de communes au lieu d'une par commune, sous un quota de 30 par minute
+# (31/10/2026). Une commune pèse au plus ~254 lignes (Paris, Marseille, Lyon) :
+# vingt tiennent sous le plafond.
+LOT = 20
+MAX_RESULTATS = 10000
+# `GEO` revient préfixé du millésime de la géographie : `2025-COM-30140`.
+GEO_COMMUNE = re.compile(r"COM-(\d[\dAB]\d{3})$")
+
+
+def _observations(dataset: str, geos: list[str], maxi: int = MAX_RESULTATS) -> list[dict]:
+    requete = [("GEO", g) for g in geos] + [("maxResult", maxi)]
+    url = f"{MELODI}/data/{dataset}?{urllib.parse.urlencode(requete)}"
+    obs = fetch_json(url, source=SOURCE, timeout=90).get("observations") or []
+    # Au plafond, Melodi coupe sans annoncer de page suivante (mesuré le
+    # 31/10/2026 : 100 lignes rendues sur 252, `paging` sans `next`).
+    if len(obs) >= maxi:
+        raise RuntimeError(f"{dataset} : {len(obs)} lignes, plafond atteint — réponse tronquée")
+    # Les lots de communes d'un même jeu s'additionnent.
+    mesure.lu(f"melodi-{dataset}", len(obs), mesure.forme_de(obs), complete=True)
+    return obs
+
+
+def observations_par_commune(codes: list[str]) -> dict[str, list[dict]]:
+    """L'état `DS_BPE` d'un lot de communes, en une requête, rangé par commune."""
+    par_commune: dict[str, list[dict]] = {}
+    for o in _observations("DS_BPE", [f"COM-{c}" for c in codes]):
+        geo = GEO_COMMUNE.search(str((o.get("dimensions") or {}).get("GEO", "")))
+        if geo:
+            par_commune.setdefault(geo.group(1), []).append(o)
+    return par_commune
 
 
 def _valeur(obs: dict):
@@ -205,9 +235,13 @@ def _ecrire(conn, geo_type: str, geo_code: str, geo_nom: str, annee: str,
         (geo_type, geo_code, geo_nom, annee, niveau, code, libelle, nombre))
 
 
-def import_commune(insee: str, commune_nom: str, libelles: dict) -> int:
-    """L'état des équipements de la commune, au dernier millésime publié."""
-    obs = _observations("DS_BPE", f"COM-{insee}")
+def import_commune(insee: str, commune_nom: str, libelles: dict,
+                   obs: list[dict] | None = None) -> int:
+    """L'état des équipements de la commune, au dernier millésime publié.
+
+    ``obs`` : ses observations, déjà tirées avec celles de son lot."""
+    if obs is None:
+        obs = observations_par_commune([insee]).get(insee, [])
     if not obs:
         print(f"  [equipements] {commune_nom} — aucune observation")
         return 0
@@ -237,7 +271,7 @@ def import_evolution(libelles: dict) -> int:
     if not EPCI_SIREN:
         print("  [equipements] pas d'intercommunalité déclarée : pas d'évolution")
         return 0
-    obs = _observations("DS_BPE_EVOLUTION", f"EPCI-{EPCI_SIREN}")
+    obs = _observations("DS_BPE_EVOLUTION", [f"EPCI-{EPCI_SIREN}"])
     if not obs:
         print(f"  [equipements] évolution — rien pour l'EPCI {EPCI_SIREN}")
         return 0
@@ -265,14 +299,21 @@ def run(insee: str | None = None) -> int:
     libelles = nomenclatures()
     cibles = [insee] if insee else communes_du_step("equipements")
     total = 0
-    for i, code in enumerate(cibles):
-        nom = COMMUNES.get(code, {}).get("nom", code)
-        try:
-            total += import_commune(code, nom, libelles)
-        except Exception as e:                      # noqa: BLE001
-            print(f"  [equipements] {nom} — ÉCHEC : {e}")
-        if i < len(cibles) - 1:
+    lots = [cibles[i:i + LOT] for i in range(0, len(cibles), LOT)]
+    for i, lot in enumerate(lots):
+        if i:
             time.sleep(REQUEST_DELAY)
+        try:
+            par_commune = observations_par_commune(lot)
+        except Exception as e:                      # noqa: BLE001
+            print(f"  [equipements] {', '.join(lot)} — ÉCHEC : {e}")
+            continue
+        for code in lot:
+            nom = COMMUNES.get(code, {}).get("nom", code)
+            try:
+                total += import_commune(code, nom, libelles, par_commune.get(code, []))
+            except Exception as e:                  # noqa: BLE001
+                print(f"  [equipements] {nom} — ÉCHEC : {e}")
     try:
         total += import_evolution(libelles)
     except Exception as e:                          # noqa: BLE001

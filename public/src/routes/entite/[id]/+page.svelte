@@ -1,5 +1,5 @@
 <script>
-  import { COMMUNE, SITE_NOM } from '#lib/instance.js'
+  import { SITE_NOM } from '#lib/instance.js'
   import { onMount } from 'svelte'
   import { TYPE_LABELS, euros } from '#lib/data.js'
   import { enumerer } from '#lib/couverture.js'
@@ -23,13 +23,16 @@
   $: nonReleves = (data.financeurs || []).filter((f) => !f.releve)
   const minuscule = (f) => f.libelle[0].toLowerCase() + f.libelle.slice(1)
 
-  // Comptes d'un syndicat auquel l'intercommunalité adhère (balances DGFiP).
+  // Comptes d'un syndicat auquel l'intercommunalité adhère, ou de
+  // l'intercommunalité elle-même (balances DGFiP ; `de` dit laquelle).
   // Le dernier exercice publié, budget par budget — jamais additionnés — et,
   // en dessous, la tendance des recettes de fonctionnement. Un poste absent de
   // la balance n'est pas affiché : zéro et « aucun compte » ne disent pas la
   // même chose.
   $: comptes = data.comptes_syndicat || []
   $: dernierExercice = comptes[0]
+  $: deLEpci = dernierExercice?.de === 'epci'
+  $: titreComptes = deLEpci ? 'Comptes de l’intercommunalité' : 'Comptes du syndicat'
   const POSTES_SYNDICAT = [
     ['recettes_fonctionnement', 'Recettes de fonctionnement'],
     ['contributions_membres', '… dont contributions des membres'],
@@ -37,6 +40,7 @@
     ['depenses_fonctionnement', 'Dépenses de fonctionnement'],
     ['personnel', '… dont personnel'],
     ['subventions_versees', '… dont subventions versées'],
+    ['subventions_personnes_privees', '… dont aux associations et autres personnes de droit privé'],
     ['depenses_investissement', 'Dépenses d’équipement'],
     ['subventions_equipement_versees', 'Subventions d’équipement versées'],
     ['encours_dette', 'Encours de la dette au 31/12'],
@@ -46,6 +50,18 @@
     ['subventions_departement', 'Département'], ['subventions_europe', 'Union européenne'],
     ['subventions_autres', 'Autres (dont agences de l’eau)'],
   ]
+  // Hérités de la fiche syndicat, deux libellés y deviennent faux : chez un
+  // EPCI, 7475 vient d'AUTRES groupements, qui ne sont pas ses membres, et
+  // rien dans sa balance ne met une agence de l'eau sous « autres » (relecture
+  // de la PR #115, 24/10/2026).
+  const LIBELLES_EPCI = {
+    contributions_membres: '… dont participations des communes membres et d’autres groupements',
+    subventions_autres: 'Autres financeurs',
+  }
+  const libelles = (liste, epci) =>
+    liste.map(([cle, libelle]) => [cle, (epci && LIBELLES_EPCI[cle]) || libelle])
+  $: postesComptes = libelles(POSTES_SYNDICAT, deLEpci)
+  $: financeursComptes = libelles(FINANCEURS, deLEpci)
   // La tendance ne suit que le budget principal — le plus gros de chaque
   // exercice — pour ne pas mêler deux budgets sur une même ligne.
   $: tendance = comptes.slice().reverse().map((c) => {
@@ -210,6 +226,17 @@
     individuelle: 'Entreprise individuelle',
     patrimoniale: 'Société de patrimoine (activité immobilière déclarée)',
   }
+  // Le type de protection Mérimée, en clair : « classé MH » ne dit rien à un
+  // habitant (avis vigie-ux du 02/11/2026). Une valeur inconnue ne s'affiche
+  // pas brute.
+  const PROTECTIONS = {
+    'classé mh': 'Classé monument historique',
+    'inscrit mh': "Inscrit à l'inventaire des monuments historiques",
+    'classé mh partiellement': 'Classé monument historique en partie',
+    'inscrit mh partiellement': "Inscrit à l'inventaire des monuments historiques en partie",
+  }
+  const protectionEnClair = (p) =>
+    PROTECTIONS[(p || '').trim().toLowerCase()] || 'Monument historique (type de protection non précisé)'
   const ANNEE = new Date().getFullYear()
   $: an = (d) => (d || '').toString().slice(0, 4)
   $: etat = !entity ? null
@@ -262,7 +289,10 @@
 <!-- Maintenant que la page est prérendue, ces balises servent enfin à quelque
      chose : c'est ce qu'un moteur de recherche et un partage de lien affichent. -->
 <svelte:head>
-  <title>{entity?.name || 'Fiche'} - {entity?.commune || '{COMMUNE}'} | {SITE_NOM}</title>
+  <!-- Sans commune, pas de commune : un syndicat ou un PETR n'est pas « à »
+       la commune de l'instance. Le repli était le nom du gabarit, entre accolades
+       et entre guillemets (paramétrage du site), servi tel quel. -->
+  <title>{entity?.name || 'Fiche'}{entity?.commune ? ` - ${entity.commune}` : ''} | {SITE_NOM}</title>
   <meta name="description" content={
     `${entity?.name || ''} : ${TYPE_LABELS[entity?.type] || ''}`
     + (entity?.commune ? ` à ${entity.commune}` : '')
@@ -323,7 +353,18 @@
           {#if entity.nature}<dt>Nature</dt><dd>{NATURES[entity.nature] || entity.nature}</dd>{/if}
           {#if entity.naf_label}<dt>Activité</dt><dd>{entity.naf_label}</dd>{/if}
           {#if entity.siren}<dt>SIREN</dt><dd>{entity.siren}</dd>{/if}
-          {#if entity.osm_category}<dt>Catégorie</dt><dd>{entity.osm_category} {entity.osm_value || ''}</dd>{/if}
+          {#if entity.osm_category && entity.osm_value !== 'monument_historique'}<dt>Catégorie</dt><dd>{entity.osm_category} {entity.osm_value || ''}</dd>{/if}
+          {#if entity.monuments_historiques?.length}
+            <dt>Protection</dt>
+            <dd>
+              {#each entity.monuments_historiques as mh}
+                <span class="mh">{protectionEnClair(mh.protection)}.{' '}
+                  <a href={mh.notice} target="_blank" rel="noopener">Voir la notice officielle (réf. {mh.reference})<span class="visually-hidden"> sur la plateforme ouverte du patrimoine, nouvelle fenêtre</span></a></span>
+              {/each}
+              <span class="mh-source">Classé : protection la plus forte ; inscrit : second niveau.
+                Source : base Mérimée, ministère de la Culture.</span>
+            </dd>
+          {/if}
           {#if entity.urls && entity.urls.length}
             <dt>Liens</dt>
             <dd>{#each entity.urls as u}<a href={u.url || u} target="_blank" rel="noopener">{u.label || u.domain || u}<span class="visually-hidden"> (nouvelle fenêtre)</span></a><br>{/each}</dd>
@@ -387,32 +428,54 @@
         {/if}
 
         {#if dernierExercice}
-          <h2>Comptes du syndicat <span class="count">{dernierExercice.year}</span></h2>
+          <h2>{titreComptes} <span class="count">{dernierExercice.year}</span></h2>
           <p class="note">
             Balances comptables publiées par la DGFiP : opérations réelles de
-            l’exercice, hors écritures d’ordre (amortissements, cessions). Les
-            contributions des membres sont celles de <em>tous</em> les membres
-            du syndicat, pas la seule part de la commune ou de son
-            intercommunalité.{#if dernierExercice.budgets.length > 1}{' '}
-            Ce syndicat tient {dernierExercice.budgets.length} budgets&nbsp;: ils
+            l’exercice, hors écritures d’ordre (amortissements, cessions,
+            variations de stocks). Un poste négatif, qui ne dit qu’une
+            annulation ou un reclassement, n’est pas affiché.{' '}
+            {#if deLEpci}{' '}
+              Les recettes sont nettes des atténuations de produits
+              (reversements de fiscalité, dont le prélèvement au FNGIR). Les subventions aux
+              associations sont un total mandaté dans l’exercice : la balance
+              ne nomme aucun bénéficiaire. Celles que nous avons pu nommer
+              viennent des délibérations, qui disent ce qui est <em>voté</em>,
+              et pas pour chaque année&nbsp;: elles sont sur la page
+              <a href="/finances">Flux financiers</a>, et ne se comparent pas
+              à ce total.
+            {' '}{:else}{' '}
+              Les contributions des membres sont celles de <em>tous</em> les membres
+              du syndicat, pas la seule part de la commune ou de son
+              intercommunalité.
+            {' '}{/if}{#if dernierExercice.budgets.length > 1}{' '}
+            Il tient {dernierExercice.budgets.length} budgets&nbsp;: ils
             sont présentés séparément, un budget pouvant reverser à l’autre.{/if}
           </p>
           {#each dernierExercice.budgets as b}
             {#if dernierExercice.budgets.length > 1}<h3 class="budget">{b.libelle}</h3>{/if}
             <table>
-              <caption class="visually-hidden">Comptes du syndicat {dernierExercice.year}{#if dernierExercice.budgets.length > 1}&nbsp;: {b.libelle}{/if}</caption>
+              <caption class="visually-hidden">{titreComptes} {dernierExercice.year}{#if dernierExercice.budgets.length > 1}&nbsp;: {b.libelle}{/if}</caption>
               <tbody>
-                {#each POSTES_SYNDICAT as [cle, libelle]}
-                  {#if b.postes[cle] != null}
+                <!-- Un poste de flux négatif n'est pas un montant : c'est une
+                     annulation ou un reclassement d'un exercice antérieur
+                     (relevé du 24/10/2026 sur la CC et ses syndicats). -->
+                {#each postesComptes as [cle, libelle]}
+                  {#if b.postes[cle] != null && b.postes[cle] >= 0}
                     <tr class:sous={libelle.startsWith('…')}>
                       <td>{libelle}</td><td class="r">{euros(b.postes[cle])}</td>
                     </tr>
                   {/if}
                 {/each}
-                {#if FINANCEURS.some(([cle]) => b.postes[cle])}
+                {#if b.postes.encours_dette_non_lisible != null}
+                  <tr>
+                    <td>Encours de la dette au 31/12</td>
+                    <td class="r">non lisible&nbsp;: des emprunts remboursés que la balance ne porte pas</td>
+                  </tr>
+                {/if}
+                {#if financeursComptes.some(([cle]) => b.postes[cle] > 0)}
                   <tr><td colspan="2" class="soustitre">Subventions reçues (fonctionnement et équipement)</td></tr>
-                  {#each FINANCEURS as [cle, libelle]}
-                    {#if b.postes[cle]}
+                  {#each financeursComptes as [cle, libelle]}
+                    {#if b.postes[cle] > 0}
                       <tr class="sous"><td>{libelle}</td><td class="r">{euros(b.postes[cle])}</td></tr>
                     {/if}
                   {/each}
@@ -574,7 +637,7 @@
   header { margin: 1rem 0; }
   h1 { margin: .3rem 0 0; color: var(--encre); }
   .alias { color: var(--gris); margin: .2rem 0 0; }
-  .badge { font-size: .75rem; padding: .15rem .6rem; border-radius: 99px; color: #fff; background: var(--gris); }
+  .badge { font-size: .75rem; padding: .15rem .6rem; border-radius: 99px; color: var(--papier); background: var(--gris); }
   .badge.service { background: var(--ardoise); } .badge.association { background: var(--recette); }
   .badge.business { background: var(--ambre); } .badge.place { background: var(--ardoise); } .badge.person { background: var(--depense); }
 
@@ -641,4 +704,6 @@
     .events li { grid-template-columns: 1fr; gap: .15rem; }
     .events .emeta { text-align: left; }
   }
+  .mh { display: block; }
+  .mh-source { display: block; margin-top: .2rem; font-size: .85em; color: var(--gris); }
 </style>

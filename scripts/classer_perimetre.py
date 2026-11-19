@@ -41,7 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from collectors.config import (COMMUNE_NAME, COMMUNES, COMMUNES_DELEGUEES,
+from collectors.config import (COMMUNE_NAME, COMMUNES, ANCIENNES_COMMUNES,
                                EPCI_NOM, RELATIONS_ADHESION)
 from collectors.db import get_conn
 from scripts.snapshot.relations import sort_du_type
@@ -72,7 +72,7 @@ SUPRA = tuple(_norm(m) + (" " if m.endswith(" ") else "") for m in SUPRA)
 
 _C1 = {_norm(COMMUNE_NAME)}
 _C2_COMMUNES = {_norm(c["nom"]) for c in COMMUNES.values()} - _C1
-_C2_COMMUNES |= {_norm(c["nom"]) for c in COMMUNES_DELEGUEES.values()}
+_C2_COMMUNES |= {_norm(c["nom"]) for c in ANCIENNES_COMMUNES.values()}
 _EPCI = _norm(EPCI_NOM)
 # Le nom de l'EPCI sans son préfixe de forme juridique : les sources écrivent
 # « CC Untel », « Communauté de communes Untel » ou « CC UNTEL » pour la même

@@ -1,15 +1,13 @@
 <script>
   import { SITE_NOM } from '#lib/instance.js'
   import { enumerer } from '#lib/couverture.js'
+  import { dateFr } from '#lib/dates.js'
   // Rendu au build par +page.server.js.
   export let data
   $: seances = data.seances || []
   $: relues = seances.filter((s) => s.en_clair).length
   $: annees = [...new Set(seances.map((s) => s.date.slice(0, 4)))].sort().reverse()
-  const fmt = (d) => {
-    try { return new Date(d + 'T00:00:00').toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) }
-    catch { return d }
-  }
+  const fmt = (d) => dateFr(d, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
   const compte = (n) => (n > 0 ? `${n} délibération${n > 1 ? 's' : ''} publiée${n > 1 ? 's' : ''}`
                                 : 'aucune délibération lue dans les pièces')
 </script>
@@ -25,8 +23,8 @@
   <p class="chapeau">
     Chaque séance a sa page&nbsp;: ses délibérations, et les pièces qui les
     attestent. Une séance <b>mise en clair</b> a en plus trois feuilles A4,
-    ce qui était annoncé, ce qui a été décidé, et ce que les documents publics
-    ont de faux ou d'incomplet, rédigées à partir des procès-verbaux,
+    ce qui était annoncé, ce qui a été décidé, et les écarts ou manques relevés
+    dans les documents publics, rédigées à partir des procès-verbaux,
     vérifiées automatiquement et relues par une personne.
   </p>
 
@@ -56,7 +54,7 @@
             <a href="/conseils/{s.id}"><time datetime={s.date}>{fmt(s.date)}</time>{#if s.en_clair}{' '} : {s.en_clair.titre}{/if}</a>
             <span class="quand">
               {compte(s.nb_actes)} ·
-              {#if s.en_clair}<b class="clair">mise en clair</b>, relue le {s.en_clair.relu_le}
+              {#if s.en_clair}<b class="clair">mise en clair</b>, relue le {dateFr(s.en_clair.relu_le)}
               {' '}{:else}pas encore mise en clair{/if}
             </span>
           </li>

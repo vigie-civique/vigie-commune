@@ -198,3 +198,21 @@ def test_un_fichier_retire_du_registre_quitte_le_repertoire(tmp_path):
 
     assert retirer_fichiers_non_declares(tmp_path) == ["event_links.json"]
     assert sorted(f.name for f in tmp_path.iterdir()) == ["events.json", "version.json"]
+
+
+def test_la_revision_se_lit_dans_un_depot_d_un_autre_proprietaire(monkeypatch, tmp_path):
+    """Sur le VPS, le dépôt appartient à root et la publication tourne sous un
+    autre compte : sans `safe.directory`, git refuse le dépôt et le manifeste
+    servi portait `revision_moteur: null` (28/10/2026)."""
+    import subprocess
+    from scripts.snapshot import manifeste
+
+    appels = []
+
+    def faux_run(cmd, **kw):
+        appels.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
+
+    monkeypatch.setattr(manifeste.subprocess, "run", faux_run)
+    assert manifeste.revision_du_moteur(tmp_path) == ("abc123", True)
+    assert all(c[:3] == ["git", "-c", f"safe.directory={tmp_path}"] for c in appels)

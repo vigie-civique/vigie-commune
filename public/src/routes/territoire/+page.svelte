@@ -41,6 +41,25 @@
   $: lovacMax = Math.max(...lovacSerie.map(m => typeof m.vacants === 'number' ? m.vacants : 0), 11)
   $: ruptureDe = Object.fromEntries((lovac?.ruptures || []).map(r => [r.millesime, r.raison]))
   const estNombre = (v) => typeof v === 'number'
+  $: loyers = data.loyers
+  $: rpls = data.rpls
+  $: enaf = data.enaf
+  $: cantines = data.cantines
+  const BIENS = {
+    appartement: 'Appartement', appartement_1_2_pieces: 'Appartement, 1 ou 2 pièces',
+    appartement_3_pieces_et_plus: 'Appartement, 3 pièces et plus', maison: 'Maison',
+  }
+  const DIMENSIONS_RPLS = {
+    pieces: 'Nombre de pièces', surface: 'Surface habitable',
+    financement: 'Financement d’origine', dpe: 'Étiquette énergétique',
+    construction: 'Décennie de construction',
+  }
+  // « 2025-01 » → « 1er janvier 2025 »
+  const auPremierJanvier = (m) => `1er janvier ${String(m).slice(0, 4)}`
+  const euros = (v) => v == null ? '-' : v.toFixed(2).replace('.', ',')
+  const ha = (m2) => m2 == null ? '-' : (m2 / 10000).toLocaleString('fr-FR', { maximumFractionDigits: 2 })
+  const partEnPct = (v) => v == null ? '-' : `${Math.round(v * 100)} %`
+  $: enafMax = Math.max(...(enaf?.serie || []).map(s => s.total || 0), 1)
   const vac = (v) => v === 's' ? 's' : nb(v)
   $: accueil = enfance?.accueil
   // Une élémentaire et une maternelle portent souvent le même nom : c'est alors
@@ -104,6 +123,7 @@
   // série de population : n'importe laquelle de ses sections suffit.
   $: aQuelqueChose = pop.length || logements.length || ageTotal > 0
                      || voisines.length > 1 || revenu || superficie || actifs
+                     || loyers || rpls || enaf
 
   // Le titre et le commentaire de la section « population » suivent la COURBE
   // de cette commune-ci. Écrits en dur, ils annonçaient « une population revenue
@@ -433,6 +453,92 @@
     <SourcesLimites bloc="territoire.vacance" millesime="millésimes {lovacSerie[0].millesime} à {lovacDernier.millesime}" />
     {/if}
 
+    <!-- ── Loyers d'annonce ─────────────────────────────────────────── -->
+    {#if loyers}
+    <h2 id="loyers">Logement : ce que coûte une location</h2>
+    {#each loyers.biens.filter(b => b.type_bien === 'maison' || b.type_bien === 'appartement') as b}
+      <Niveau type="fait" source="{loyers.mention}, carte des loyers {loyers.millesime}" href={loyers.page_jeu}>
+        {BIENS[b.type_bien]}&nbsp;: un loyer d'annonce estimé à <b>{euros(b.loyer_m2)}&nbsp;€ par m²</b>
+        et par mois, charges comprises (intervalle de prédiction&nbsp;: {euros(b.bas_m2)} à {euros(b.haut_m2)}&nbsp;€).
+        {#if b.echelle === 'maille'}Faute d'annonces en nombre suffisant dans la commune
+          ({nb(b.annonces_commune)}), l'estimation porte sur un groupe de communes
+          voisines ({nb(b.annonces_maille)} annonces).{/if}
+      </Niveau>
+    {/each}
+    <table>
+      <caption class="visually-hidden">Loyers d’annonce estimés</caption>
+      <thead><tr><th scope="col">Bien</th><th scope="col" class="r">€/m² charges comprises</th>
+        <th scope="col" class="r">intervalle de prédiction</th><th scope="col" class="r">annonces dans la commune</th></tr></thead>
+      <tbody>
+        {#each loyers.biens as b}
+          <tr><td>{BIENS[b.type_bien] || b.type_bien}</td><td class="r">{euros(b.loyer_m2)}</td>
+            <td class="r">{euros(b.bas_m2)} à {euros(b.haut_m2)}</td><td class="r">{nb(b.annonces_commune)}</td></tr>
+        {/each}
+      </tbody>
+    </table>
+    <p class="note">{loyers.mention}.</p>
+    <SourcesLimites bloc="territoire.loyers" millesime={String(loyers.millesime)} />
+    {/if}
+
+    <!-- ── Logements sociaux ────────────────────────────────────────── -->
+    {#if rpls}
+    <h2 id="logements-sociaux">Logement : le parc social</h2>
+    <Niveau type="fait" source="SDES, répertoire RPLS au {auPremierJanvier(rpls.millesime)}" href={rpls.page_jeu}>
+      {#if rpls.total}Au {auPremierJanvier(rpls.millesime)}, les bailleurs sociaux déclarent
+        <b>{nb(rpls.total)} logement{rpls.total > 1 ? 's' : ''}</b> {COMMUNE_A}.
+      {' '}{:else}Au {auPremierJanvier(rpls.millesime)}, aucun bailleur social ne déclare de logement
+        {COMMUNE_A}. Les bailleurs sociaux sont tenus d'y déclarer leurs logements&nbsp;: ce
+        zéro est un constat, pas une absence de donnée.{/if}
+    </Niveau>
+    {#if rpls.repartitions_masquees}
+      <p class="note">Avec moins de trois logements, leur répartition par taille, financement
+        ou étiquette n'est pas donnée : elle décrirait un logement que chacun sait situer.</p>
+    {/if}
+    {#if Object.keys(rpls.repartitions).length}
+      <div class="rpls">
+        {#each Object.entries(DIMENSIONS_RPLS).filter(([d]) => rpls.repartitions[d]) as [d, libelle]}
+          <table>
+            <caption>{libelle}</caption>
+            <tbody>
+              {#each rpls.repartitions[d] as r}
+                <tr><th scope="row">{r.modalite}</th><td class="r">{nb(r.logements)}</td></tr>
+              {/each}
+            </tbody>
+          </table>
+        {/each}
+      </div>
+    {/if}
+    <SourcesLimites bloc="territoire.rpls" millesime="au {auPremierJanvier(rpls.millesime)}" />
+    {/if}
+
+    <!-- ── Consommation d'espaces ───────────────────────────────────── -->
+    {#if enaf}
+    <h2 id="sols">Les terres consommées par l'urbanisation</h2>
+    <Niveau type="calcul" base="les surfaces naturelles, agricoles et forestières devenues bâties ou aménagées, mesurées par le Cerema, année par année">
+      Du 1er janvier 2011 au 1er janvier {enaf.millesime}, <b>{ha(enaf.decennie_2011_2021_m2 + enaf.depuis_2021_m2)} hectares</b>
+      d'espaces naturels, agricoles et forestiers ont été consommés {COMMUNE_A}&nbsp;:
+      {ha(enaf.decennie_2011_2021_m2)}&nbsp;ha de 2011 à 2021, et {ha(enaf.depuis_2021_m2)}&nbsp;ha depuis.
+    </Niveau>
+    <table class="enaf">
+      <caption class="visually-hidden">Consommation d’espaces par année</caption>
+      <thead><tr><th scope="col">Année</th><th scope="col" class="r">hectares</th><th scope="col" class="r">dont habitat</th><th scope="col">&nbsp;</th></tr></thead>
+      <tbody>
+        {#each enaf.serie as s}
+          <tr><td>{s.annee}</td><td class="r">{ha(s.total)}</td><td class="r">{ha(s.habitat)}</td>
+            <td><span class="barre" style="width:{(s.total || 0) / enafMax * 100}%"></span></td></tr>
+        {/each}
+      </tbody>
+    </table>
+    <p class="note">
+      La loi Climat et résilience de 2021 fixe pour objectif national de diviser par deux,
+      de 2021 à 2031, la consommation d'espaces de la décennie 2011-2021. L'objectif se
+      décline par région, puis par document d'urbanisme : le chiffre de la commune ne
+      se compare pas seul à la moitié de sa propre décennie. Chaque ligne va du
+      1<sup>er</sup> janvier de l'année au 1<sup>er</sup> janvier suivant.
+    </p>
+    <SourcesLimites bloc="territoire.enaf" millesime="du 1er janvier 2011 au 1er janvier {enaf.millesime}" />
+    {/if}
+
     <!-- ── Âges ─────────────────────────────────────────────────────── -->
     {#if ageTotal > 0}
       <h2>Structure par âge ({anneeAge})</h2>
@@ -557,6 +663,57 @@
       </p>
       <SourcesLimites bloc="territoire.accueil" millesime={String(a.annee)} />
     {/if}
+  {/if}
+
+  {#if cantines}
+    <h2 id="cantines">Les cantines et ce qu'elles servent</h2>
+    {#each cantines.cantines as c}
+      {@const d = c.declarations.at(-1)}
+      {@const enAttente = c.annees_declarees.length && cantines.derniere_campagne_publiee != null
+        && c.annees_declarees.every(a => a > cantines.derniere_campagne_publiee)}
+      <Niveau type="fait" source="ma cantine, ministère de l'Agriculture" href={cantines.page_registre}>
+        {#if /^(mairie|commune)\b/i.test(c.nom)}Cantine inscrite sous le nom « {c.nom} »{:else}<b>{c.nom}</b>{/if}{#if c.secteurs}{' '}({c.secteurs.toLowerCase()}){/if}{#if c.repas_an},
+        {nb(c.repas_an)} repas par an{/if}.
+        {#if d}
+          {#if d.part_durable == null || d.part_bio == null}Pour ses achats de {d.annee}, elle a
+            télédéclaré sans montant d'achats.
+          {' '}{:else}Pour ses achats de {d.annee}, elle déclare <b>{partEnPct(d.part_durable)}</b> de produits
+            durables et de qualité, dont <b>{partEnPct(d.part_bio)} de bio</b>{#if d.comparable_aux_seuils},
+            pour des seuils légaux de {partEnPct(cantines.seuils.durable)} et {partEnPct(cantines.seuils.bio)}{/if}.{/if}
+        {:else if enAttente}Le registre la dit déclarée pour {c.annees_declarees.join(', ')} ; les résultats
+          de cette campagne ne sont pas encore publiés.
+        {' '}{:else if c.annees_declarees.length}Le registre la dit déclarée pour {c.annees_declarees.join(', ')} ;
+          ses taux ne figurent pas sous son nom dans les fichiers publiés (une cuisine
+          centrale peut avoir déclaré pour elle).
+        {' '}{:else}Le registre n'indique aucune télédéclaration de sa part sur les données 2021 à 2025.{#if c.livree}{' '}Ses
+          repas viennent d'une cuisine centrale, qui peut déclarer pour elle.{/if}{/if}
+      </Niveau>
+    {/each}
+    {#each cantines.autres_declarations as d}
+      <Niveau type="fait" source="ma cantine, télédéclaration des achats de {d.annee}" href={cantines.page_teledeclarations}>
+        <b>{d.nom}</b>{#if d.satellites}{' '}(cuisine centrale, pour {nb(d.satellites)} cantine{d.satellites > 1 ? 's' : ''} livrée{d.satellites > 1 ? 's' : ''}){/if}
+        {#if d.part_durable == null || d.part_bio == null}a télédéclaré ses achats de {d.annee} sans montant.
+        {' '}{:else}déclare pour ses achats de {d.annee} <b>{partEnPct(d.part_durable)}</b> de produits durables,
+          dont <b>{partEnPct(d.part_bio)} de bio</b>.{/if}
+      </Niveau>
+    {/each}
+    {#if cantines.privees.nombre}
+      <p class="note">{#if cantines.privees.nombre > 1}{nb(cantines.privees.nombre)} cantines privées sont
+        inscrites au registre ; elles ne sont pas nommées ici.{:else}Une cantine privée est inscrite au
+        registre ; elle n'est pas nommée ici.{/if}</p>
+    {/if}
+    <p class="note">
+      La loi EGalim (code rural, art. L230-5-1) demande aux restaurants collectifs publics
+      depuis le 1er janvier {cantines.seuils.depuis}, et à toute la restauration collective
+      depuis le 1er janvier 2024, au moins {partEnPct(cantines.seuils.durable)} en valeur de
+      produits durables et de qualité, dont {partEnPct(cantines.seuils.bio)} de bio ou en
+      conversion. Depuis 2024, les viandes et poissons servis doivent l'être à 60&nbsp;% au
+      moins&nbsp;; depuis le 20 août 2026, bio et produits sous signe de qualité doivent peser
+      30&nbsp;% au moins. Les fichiers publiés ne permettent de comparer une cantine qu'aux
+      seuils de {partEnPct(cantines.seuils.durable)} et {partEnPct(cantines.seuils.bio)}. Une cuisine centrale déclare pour les cantines qu'elle livre&nbsp;: leurs
+      chiffres sont les siens.
+    </p>
+    <SourcesLimites bloc="territoire.cantines" />
   {/if}
 
   {#if equipements.etat?.length}
@@ -831,6 +988,9 @@
 </section>
 
 <style>
+  .barre { display: inline-block; height: .6rem; background: var(--ardoise); border-radius: 2px; }
+  .rpls { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: .4rem 1.2rem; }
+  .rpls caption { text-align: left; font-weight: 600; padding: .4rem 0 .1rem; }
   .lecture {
     margin: .5rem 0 1.5rem; padding: .7rem .9rem;
     border-left: 3px solid var(--ambre); background: var(--ambre-pale);

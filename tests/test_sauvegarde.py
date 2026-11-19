@@ -59,6 +59,28 @@ def test_la_sauvegarde_porte_ce_qui_est_dans_le_journal(base_en_wal, tmp_path):
     assert not copie.with_name(copie.name + ".partiel").exists()
 
 
+def test_l_index_de_sens_ne_part_pas_dans_la_copie(tmp_path):
+    """Il se recalcule depuis la base : la copie garde la table, vide."""
+    chemin = tmp_path / "base.db"
+    conn = sqlite3.connect(chemin)
+    conn.execute("CREATE TABLE actes (id INTEGER PRIMARY KEY, titre TEXT)")
+    conn.execute("CREATE TABLE embeddings (id INTEGER PRIMARY KEY, vector BLOB)")
+    conn.executemany("INSERT INTO actes(titre) VALUES (?)", [("acte",)] * 10)
+    conn.executemany("INSERT INTO embeddings(vector) VALUES (?)", [(b"\0" * 3072,)] * 500)
+    conn.commit()
+    conn.close()
+    copie = sauvegarder(chemin, tmp_path / "copie.db")
+    c = sqlite3.connect(copie)
+    assert c.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0] == 0
+    assert c.execute("SELECT COUNT(*) FROM actes").fetchone()[0] == 10
+    c.close()
+    assert copie.stat().st_size < chemin.stat().st_size / 4
+    s = sqlite3.connect(chemin)
+    assert s.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0] == 500
+    s.close()
+    assert verifier(copie) == []
+
+
 def test_une_copie_abimee_est_refusee(base_en_wal, tmp_path):
     copie = sauvegarder(base_en_wal, tmp_path / "copie.db")
     octets = bytearray(copie.read_bytes())

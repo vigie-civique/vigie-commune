@@ -13,5 +13,7 @@
   "catnat": [],
   "eau_controle": null,
   "dechets": null,
-  "incendie": null
+  "incendie": null,
+  "vigieau": null,
+  "electricite": null
 }

@@ -304,6 +304,62 @@ def test_un_elu_reste_publiable(bps):
     assert publiee is not None
 
 
+
+def _relier(base, de, vers, type_, confiance="confirmed"):
+    base.execute("INSERT INTO relations (from_id, to_id, relation_type, confidence)"
+                 " VALUES (?,?,?,?)", (de, vers, type_, confiance))
+    base.commit()
+
+
+def test_sieger_en_commission_ne_rend_pas_publique(base, entite):
+    """Avis DPO du 14/11/2026 : un membre de commission n'est nommé qu'au titre
+    de son mandat. Un habitant lu dans un PV ou sur la page d'une commission
+    extramunicipale n'a ni fiche, ni nom en clair dans les textes, même quand
+    l'atelier a confirmé son siège."""
+    from scripts.snapshot.personnes import etape_personnes_publiques
+    commission = entite("Commission extramunicipale d'épreuve", type_="service")
+    habitant = entite("Camille Habitante", type_="person")
+    _relier(base, habitant, commission, "membre_commission")
+    _relier(base, entite("Dominique Voisine", type_="person"), commission,
+            "membre_commission", confiance="probable")
+
+    sortie = etape_personnes_publiques(base, "[]")
+
+    assert habitant not in sortie["public_person_ids"]
+    assert not {"CAMILLE HABITANTE", "DOMINIQUE VOISINE"} & sortie["noms_publics"]
+
+
+def test_les_regles_d_une_instance_ne_rouvrent_pas_la_commission(tmp_path):
+    """Les `publication_rules.json` des instances ne suivent pas le dépôt :
+    `membre_commission` y figure encore dans la liste civique. Le chargement
+    l'en retire, pour tout lecteur de `RULES`."""
+    import json
+    from scripts.snapshot.socle import load_rules
+    regles = json.loads(
+        (ROOT / "config" / "publication_rules.exemple.json").read_text(encoding="utf-8"))
+    regles["people"]["publish_only_with_relation_types"].append("membre_commission")
+    chemin = tmp_path / "publication_rules.json"
+    chemin.write_text(json.dumps(regles), encoding="utf-8")
+    roles = load_rules(chemin)["people"]["publish_only_with_relation_types"]
+    assert "membre_commission" not in roles
+    assert "élu_cm" in roles
+
+
+def test_un_elu_membre_de_commission_reste_publie(base, entite):
+    """Le contre-test : c'est le mandat qui ouvre la fiche, la commission ne la
+    ferme pas."""
+    from scripts.snapshot.personnes import etape_personnes_publiques
+    mairie = entite("Mairie d'épreuve", type_="service")
+    commission = entite("Commission des finances d'épreuve", type_="service")
+    elue = entite("Sacha Conseillère", type_="person")
+    _relier(base, elue, mairie, "élu_cm", confiance="verified")
+    _relier(base, elue, commission, "membre_commission")
+
+    sortie = etape_personnes_publiques(base, "[]")
+
+    assert elue in sortie["public_person_ids"]
+    assert "SACHA CONSEILLÈRE" in sortie["noms_publics"]
+
 # ── L'allowlist des sources ──────────────────────────────────────────────────
 
 def test_toute_source_de_marche_est_publiable():
@@ -514,6 +570,36 @@ def test_un_acte_cite_ses_particuliers_mais_masque_naissance_et_domicile(bps):
         assert masque(intact) == intact
 
 
+def test_le_titre_dun_acte_designe_un_particulier_par_son_role(bps):
+    """⚖️ Règle du 27/10/2026 : le TITRE d'un acte ne nomme qu'une personne
+    publique. Un particulier y devient « un particulier », un agent « un agent » ;
+    la décision, le montant et le reste du titre demeurent. Un titre réduit à un
+    nom n'est pas un acte."""
+    from collections import Counter
+    publics = {"JORDAN ZANIMET", "ZANIMET JORDAN"}
+    titre = lambda t: bps.titre_d_acte(t, "2026-04-20", publics, Counter())
+
+    assert titre("Aide façade — M. Maxime QUILIGNAC, 300 €") == ("Aide façade — un particulier, 300 €", None)
+    assert (titre("Avis conforme changement de destination PC 030 140 25 H0005 de Mme CALORLY Noa")
+            == ("Avis conforme changement de destination [numéro retiré] d'un particulier", None))
+    assert (titre("Avenant à la mise à disposition de Mme Noa CALORLY")
+            == ("Avenant à la mise à disposition d'un agent", None))
+    assert titre("Vente d'un terrain à M. et Mme VORLANDIN") == ("Vente d'un terrain à un particulier", None)
+    # Une personne publique reste nommée, et sur un doute aussi.
+    for intact in ("Désignation de M. Jordan ZANIMET au SIVOM",
+                   "Délégation à M. ZANIMET",
+                   "Indemnités de Monsieur le Maire",
+                   "Motion présentée par Madame la Présidente"):
+        assert titre(intact) == (intact, None)
+    # Ce qui n'est pas un titre d'acte.
+    assert titre("| M. Maxime QUILIGNAC") == (None, "titre_fragment")
+    assert titre("M. Maxime QUILIGNAC") == (None, "titre_reduit_a_un_nom")
+    assert titre("AR CONTROLE DE LEGALITE 030-213001407") == (None, "titre_fragment")
+    # Le domicile est masqué dans un titre comme dans un texte.
+    assert titre("Aide à M. VORLANDIN, demeurant au 12 Grand Rue à Testville")[0] == \
+        "Aide à un particulier, demeurant [domicile masqué]"
+
+
 def test_une_adresse_sans_verbe_et_un_portable_nominatif_sont_masques(bps):
     """Relevé le 12/10/2026 sur les extraits publiés d'une instance : des aides
     façade écrivent « Mme FENAUDIN Lou, 14 rue des Tilleuls à Fictiville » — sans
@@ -596,6 +682,172 @@ def test_les_formes_elargies_masquent_sans_refuser_ni_deborder(bps):
         assert publiable(intact) == (intact, None)
 
 
+def test_ladresse_du_bien_aide_est_masquee_le_reste_du_texte_reste(bps):
+    """🔴 Audit du 14/11/2026 : « pour le 220 route vieille », « façades du 18 rue
+    de la Fontfictive » sortaient en clair, sans verbe de domicile ni civilité
+    devant. Le nom, la décision et le montant restent (arbitrage du 14/11)."""
+    from collections import Counter
+    publiable = lambda t: bps.texte_publiable(t, "2025-01-20", set(), Counter())
+
+    assert publiable(
+        "demande de M. et Mme Lou SALOMBE, qui sollicitent une aide à la rénovation de façades "
+        "pour le 220 route vieille dont le montant pourrait s'élever à 479 €, en vertu de la "
+        "délibération du 10/04/2019.\n- DECIDE d'octroyer la somme de 479 € dans le cadre de "
+        "l'aide à la rénovation des façades du 220 route vieille, aide régie par délibération du "
+        "10 avril 2019.\n- DIT que cette somme sera inscrite à l'article 65741 du Budget Primitif 2025") == (
+        "demande de M. et Mme Lou SALOMBE, qui sollicitent une aide à la rénovation de façades "
+        "pour le [adresse masquée] dont le montant pourrait s'élever à 479 €, en vertu de la "
+        "délibération du 10/04/2019.\n- DECIDE d'octroyer la somme de 479 € dans le cadre de "
+        "l'aide à la rénovation des façades du [adresse masquée], aide régie par délibération du "
+        "10 avril 2019.\n- DIT que cette somme sera inscrite à l'article 65741 du Budget Primitif 2025", None)
+    # L'océrisation coupe l'adresse ; un mois en capitale n'est pas une voie.
+    assert publiable(
+        "aide financière du 15 Novembre 2023 pour la rénovation de la façade de Mme Lou SALOMBE, "
+        "18 rue de la\nFontfictive.\nfacture de 1 560 € HT") == (
+        "aide financière du 15 Novembre 2023 pour la rénovation de la façade de Mme Lou SALOMBE, "
+        "[adresse masquée].\nfacture de 1 560 € HT", None)
+    # Le déclencheur ne dépend ni du mot « aide », ni de la phrase, ni de la ligne
+    # (relecture sécurité du 14/11) ; et l'adresse s'écrit de bien des façons.
+    for phrase, interdits in (
+        ("Subvention pour le ravalement de l'immeuble du 12 rue des Lilas, propriété de M. Paul DUPONT", ["12 rue", "Lilas"]),
+        ("Subvention de 2 000 € à M. Paul DUPONT pour la réfection de la toiture du 12 rue des Lilas", ["12 rue", "Lilas"]),
+        ("Opération façades : participation communale de 1 500 € pour le 12 rue des Lilas", ["12 rue", "Lilas"]),
+        ("Attribution d'une aide\npour la façade du 12 rue des Lilas", ["12 rue", "Lilas"]),
+        ("Aide communale. M. Paul DUPONT a déposé un dossier pour sa façade, 12 rue des Lilas", ["12 rue", "Lilas"]),
+        ("façade du 12 bd des Lilas", ["12 bd", "Lilas"]),
+        ("façade du 12 av. Jean Jaurès", ["12 av", "Jaurès"]),
+        ("façade du 12B rue des Lilas", ["12B", "Lilas"]),
+        ("façade de l'immeuble sis au n°12 de la rue des Lilas", ["n°12", "Lilas"]),
+        ("façade de l'immeuble rue des Lilas n° 12", ["Lilas"]),
+        ("façade de la maison de M. Paul DUPONT au lieu-dit Les Fontanilles", ["Fontanilles"]),
+        ("façade de l'immeuble cadastré section AB n° 123", ["AB n° 123"]),
+        ("façade du 12 rue de l'Abbaye", ["12 rue", "Abbaye"]),
+        ("façade du 3 rue du 8 Mai 1945, propriété de M. Paul DUPONT", ["3 rue", "8 Mai"]),
+    ):
+        sortie, refus = publiable(phrase)
+        assert refus or not [f for f in interdits if f in sortie], sortie
+    # Ce qui n'est pas une adresse ne bouge pas, même dans un texte de façade.
+    assert publiable("aide à la rénovation des façades du 7 chemin des Essais dont le montant est de 300 €") == (
+        "aide à la rénovation des façades du [adresse masquée] dont le montant est de 300 €", None)
+    # 🔴 Le masque ne touche jamais au nombre qui suit : un montant cité reste juste.
+    assert publiable("Façade de l'immeuble cadastré section AB n° 123, 1 500 € accordés")[0] == \
+        "Façade de l'immeuble cadastré [adresse masquée], 1 500 € accordés"
+    for avant, apres in (
+        ("Façade : DUPONT Paul – 9 rue des Essais 1 200 €", "Façade : DUPONT Paul – [adresse masquée] 1 200 €"),
+        ("Façade : 4 impasse Fictive 2 500 €", "Façade : [adresse masquée] 2 500 €"),
+        ("Façade : 12 rue de la Gare du 12 mars 2024", "Façade : [adresse masquée] du 12 mars 2024"),
+        ("Façade du 3 rue du 19 Mars 1962 pour 1 500 €", "Façade du [adresse masquée] pour 1 500 €"),
+    ):
+        assert publiable(avant) == (apres, None), avant
+    for intact in ("Façades : travaux rue de la Gare, 3 lots attribués",
+                   "Façades : réfection du chemin de Ronde, 15 voix pour",
+                   "Aide aux façades. Aménagement de la 2 route départementale 999",
+                   "Aide façade plafonnée au 30 Pour cent du montant, soit 1 500 Euros, votée par 12 voix",
+                   "Opération façades et assainissement du hameau de Valfictif : 12 000 € HT",
+                   "Aide façade : séance du 12 Conseil municipal, le 15 Novembre 2023, article 65741"):
+        assert publiable(intact) == (intact, None)
+    # Hors d'une aide au bien, l'adresse d'une parcelle ou d'un bâtiment reste.
+    for intact in ("Monsieur le Maire propose d'acquérir la parcelle située 12 rue Haute",
+                   "Travaux de toiture de l'école, 3 place de la Mairie, pour 12 000 € HT"):
+        assert publiable(intact) == (intact, None)
+
+
+def test_un_acte_sur_la_situation_dune_personne_ne_publie_pas_son_texte(bps):
+    """Arbitrage du 14/11/2026 : créance effacée, secours, logement d'habitation,
+    mesure individuelle d'un agent, litige avec un particulier. Le titre, le
+    montant et le lien restent ; le texte ne sort pas."""
+    motif = lambda titre, texte, publics=frozenset(): bps.motif_sans_extrait(titre, texte, set(publics))
+
+    # Toujours : une liste de débiteurs n'a pas de civilité.
+    assert motif("Admission en non-valeur", "titres irrécouvrables : SALOMBE Lou 45,00 €") == \
+        "sans_extrait_creance_ou_impaye"
+    assert motif("Aide", "Mme Lou SALOMBE, placée sous curatelle renforcée") == "sans_extrait_personne_protegee"
+    # 🔴 Seconde relecture sécurité du 14/11 : un nom écrit sans civilité ne
+    # déclenchait plus rien, et ces textes sortaient avec le nom.
+    for texte in ("DUPONT Paul, adjoint technique, est placé en congé de longue maladie.",
+                  "Sanction disciplinaire : Paul Dupont, agent de maîtrise, exclusion temporaire de 3 jours.",
+                  "Bail d'habitation du logement de la poste consenti à Paul Dupont.",
+                  "Expulsion de Paul Dupont du logement communal.",
+                  "Aide sociale facultative : DUPONT Paul 150 € ; SALOMBE Lou 200 €.",
+                  "Situation de M. DUPONT Paul\n" + "Le conseil rappelle le cadre applicable. " * 12
+                  + "Il prononce le licenciement pour inaptitude."):
+        assert motif("Point", texte), texte
+    assert motif("Stage", "convention entre le centre de formation, le tuteur et la structure d'accueil") is None
+    assert motif("Parc", "un établissement public sous tutelle du ministère chargé de l'Écologie") is None
+    # Dès qu'une personne qui n'est pas publique y est nommée.
+    for titre, texte, attendu in (
+        ("Secours", "DECIDE d'accorder un secours exceptionnel de 200 € à Mme Lou SALOMBE", "aide_sociale"),
+        ("Aide", "Une aide financière exceptionnelle de 500 € est accordée à M. Paul DUPONT, "
+                 "dont la situation familiale est difficile", "aide_sociale"),
+        ("Cantine", "Impayés de cantine : la famille Dupontel doit 450 €", "creance_ou_impaye"),
+        ("Eau", "Dégrèvement de la facture d'eau de M. Paul DUPONT suite à une fuite", "creance_ou_impaye"),
+        ("Bail", "bail d'habitation consenti à Mme Lou SALOMBE pour 450 € par mois", "logement_d_habitation"),
+        ("Logement", "M. Paul DUPONT, occupant du logement communal, présente un retard de loyers",
+         "creance_ou_impaye"),
+        ("Bail", "signer un bail avec Mme Lou SALOMBE pour l'appartement au-dessus de la poste",
+         "logement_d_habitation"),
+        ("Personnel", "prononce une sanction disciplinaire à l'encontre de M. Paul DUPONT",
+         "mesure_individuelle_agent"),
+        ("Personnel", "Mise en disponibilité de Mme Lou SALOMBE", "mesure_individuelle_agent"),
+        ("Personnel", "Reclassement de M. Paul DUPONT pour raison de santé, avis du comité médical",
+         "mesure_individuelle_agent"),
+        ("Autorisation d'ester en justice", "dans le litige qui oppose la commune à M. Paul DUPONT",
+         "litige_avec_un_particulier"),
+        ("Contentieux", "Le Tribunal administratif a été saisi par M. Paul DUPONT",
+         "litige_avec_un_particulier"),
+        ("Recours", "Recours gracieux de Mme Lou SALOMBE contre le permis", "litige_avec_un_particulier"),
+    ):
+        assert motif(titre, texte) == f"sans_extrait_{attendu}", texte
+    # Ce qui ne vise personne se lit : un règlement, une subvention au CCAS, la
+    # protection de l'élu, un litige avec une société ; et la mention des voies
+    # de recours, au pied de presque chaque délibération, n'est pas un litige.
+    for titre, texte, publics in (
+        ("Règlement intérieur", "Le licenciement et la rupture conventionnelle suivent la procédure", ()),
+        ("RIFSEEP", "Le régime est maintenu pendant un congé de longue maladie", ()),
+        ("Subvention", "Subvention au CCAS pour l'aide sociale facultative : 5 000 €", ()),
+        ("Délégations", "Révocation de la délégation de signature accordée au 2e adjoint", ()),
+        ("Protection fonctionnelle", "accordée à M. Jordan ZANIMET, maire", ("JORDAN ZANIMET",)),
+        ("Marché", "Remise gracieuse des pénalités à l'entreprise Routex SARL", ()),
+        ("Autorisation d'ester en justice", "dans le litige qui oppose la commune à la société X", ()),
+        ("Délégations", "M. Jordan ZANIMET, maire, peut ester en justice", ("JORDAN ZANIMET",)),
+        ("Tarifs", "peut faire l'objet d'un recours pour excès de pouvoir devant le Tribunal "
+                   "Administratif. Demande de M. Paul DUPONT.", ()),
+        ("Tarifs de la cantine", "Les tarifs 2026 sont fixés à 3,50 € le repas", ()),
+    ):
+        assert motif(titre, texte, publics) is None, texte
+
+
+def test_dans_un_titre_le_doute_profite_au_role(bps):
+    """🔴 « AIDE A LA RENOVATION DES FACADES – M. ET MME NOM » sortait dans le
+    titre, la recherche et les fichiers : un élu portait ce patronyme, et le
+    doute gardait le nom. Il profite désormais au rôle (avis DPO du 14/11/2026),
+    sauf dans un titre qui parle d'un mandat."""
+    from collections import Counter
+    publics = {"JORDAN ZANIMET"}
+    titre = lambda t: bps.titre_d_acte(t, "2025-01-20", set(publics), Counter())[0]
+
+    assert "ZANIMET" not in titre("AIDE A LA RENOVATION DES FACADES – M. ET MME ZANIMET")
+    assert "ZANIMET" not in titre("Aide à la rénovation des façades de M. ZANIMET, 479 €")
+    assert titre("Délégation de signature à M. ZANIMET") == "Délégation de signature à M. ZANIMET"
+    # Un mot courant ne fait pas un mandat (relecture sécurité du 14/11).
+    for fuite in ("Aide aux façades sur avis de la commission – M. ZANIMET",
+                  "Aide à l'installation d'un chauffe-eau solaire – M. ZANIMET",
+                  "Permis de construire de M. ZANIMET, titulaire",
+                  "Vente d'un terrain à M. ZANIMET, représentant l'indivision",
+                  "Subvention façade – M. ZANIMET (dossier présenté par le maire)"):
+        assert "ZANIMET" not in titre(fuite), fuite
+    # Les autres façons d'écrire une personne devant son nom.
+    for forme in ("Aide façade – Mr DUPONTEL", "Aide façade – Mr. Dupontel", "Aide façade – Melle MARTINOT",
+                  "Aide façade – Vve MARTINOT", "Aide façade – MONSIEUR MARTINOT", "Aide façade – M.MARTINOT",
+                  "Vente d'un terrain aux Consorts MARTINOT", "Vente d'un terrain aux époux Martinot",
+                  "Vente d'un terrain à M. et Mme Martinot", "Aide façade de Monsieur Martinot Paul"):
+        sortie = titre(forme)
+        assert sortie is None or "MARTINOT" not in sortie.upper() and "DUPONTEL" not in sortie.upper(), forme
+    assert titre("Indemnités de Monsieur le Maire") == "Indemnités de Monsieur le Maire"
+    assert titre("Indemnités de Madame La Présidente") == "Indemnités de Madame La Présidente"
+    assert titre("Subvention façade de M. Jordan ZANIMET, 479 €") == "Subvention façade de M. Jordan ZANIMET, 479 €"
+
+
 def test_un_point_de_lordre_du_jour_ne_nomme_pas_un_particulier(bps, base, entite):
     """🔴 L'ordre du jour d'une convocation publiait « Demande de M. X » en clair :
     il ne passait que par le masque des naissances et des domiciles, alors que
@@ -639,3 +891,72 @@ def test_ce_qui_na_pas_pu_etre_masque_ne_sort_pas(bps):
     from collections import Counter
     texte = "élus : Date de naissance Adresse CP Ville\n" + "Madame Andréa PELANDIN 4, Allée des Merles\n" * 120
     assert bps.texte_publiable(texte, "2019-02-01", set(), Counter()) == (None, "donnee_personnelle_non_masquee")
+
+
+def _ligne(ident, titre, document, numero=None, date="2026-05-28", type_="deliberation"):
+    import json
+    return {"id": ident, "type": type_, "date": date, "title": titre,
+            "source_url": "https://exemple.fr/" + document,
+            "metadata": json.dumps({"numero_acte": numero} if numero else {})}
+
+
+def test_le_recueil_fait_foi_sur_les_fragments_du_proces_verbal():
+    """Le conseil du 28/05/2026 : 28 actes au recueil, 35 fragments tirés du
+    procès-verbal, dont des lignes de tableau avec le vote du voisin."""
+    from scripts.snapshot.actes import fragments_de_pv
+    lignes = [_ligne(1, "SUBVENTION 2026 — USPOP", "recueil.pdf", "260513"),
+              _ligne(2, "Attribuer à l'Amicale Fictive une subvention de 500 €", "recueil.pdf"),
+              _ligne(3, "TRANSMISSION", "pv.pdf"),
+              _ligne(4, "DUPONT Paul", "pv.pdf"),
+              # Une séance connue par son seul procès-verbal n'est pas touchée.
+              _ligne(5, "DOTATION 2026 – C.C.A.S", "pv-fevrier.pdf", date="2026-02-05"),
+              # Ni l'intercommunalité : ses doublons attendent une relecture.
+              _ligne(6, "FONDS DE CONCOURS", "pv-cc.pdf", "12", type_="deliberation_cc"),
+              _ligne(7, "TABLEAU DES EFFECTIFS", "recueil-cc.pdf", type_="deliberation_cc")]
+    assert fragments_de_pv(lignes) == {3: "https://exemple.fr/pv.pdf", 4: "https://exemple.fr/pv.pdf"}
+
+
+def test_un_flux_lu_dans_un_fragment_renvoie_au_proces_verbal():
+    from scripts.snapshot.argent import renvoyer_aux_pieces
+    flux = [{"id": 1, "event_id": 40, "raw_document_id": None, "document_url": None},
+            {"id": 2, "event_id": 41, "raw_document_id": None, "document_url": None}]
+    sans = renvoyer_aux_pieces(flux, {41}, {40: "https://exemple.fr/pv.pdf"})
+    assert sans == 0
+    assert flux[0] == {"id": 1, "acte_id": None, "document": "https://exemple.fr/pv.pdf"}
+    assert flux[1] == {"id": 2, "acte_id": 41, "document": None}
+
+
+def test_un_acte_sans_numero_du_recueil_lui_meme_reste():
+    """Le cachet illisible d'un acte du recueil lui laisse une clé par titre :
+    il vient du document qui fait foi, il sort."""
+    from scripts.snapshot.actes import fragments_de_pv
+    assert fragments_de_pv([_ligne(1, "TARIFS 2026", "recueil.pdf", "260601"),
+                            _ligne(2, "CREATION D'EMPLOI", "recueil.pdf")]) == {}
+
+
+def test_un_acte_numerote_sans_document_ne_fait_pas_un_recueil():
+    """Relecture sécurité du 14/11/2026 : `None` entrait dans les documents
+    numérotés, et tous les actes par titre de la séance étaient écartés."""
+    from scripts.snapshot.actes import fragments_de_pv
+    numerote = {**_ligne(1, "TARIFS 2026", "x", "260601"), "source_url": None}
+    assert fragments_de_pv([numerote, _ligne(2, "CREATION D'EMPLOI", "pv.pdf")]) == {}
+
+
+def test_un_fragment_sans_piece_reste():
+    from scripts.snapshot.actes import fragments_de_pv
+    sans_piece = {**_ligne(2, "DUPONT Paul", "x"), "source_url": "file:///srv/pv.pdf"}
+    assert fragments_de_pv([_ligne(1, "TARIFS 2026", "recueil.pdf", "260601"), sans_piece]) == {}
+
+
+def test_l_agenda_ne_passe_pas_par_le_filtre_des_titres_d_actes():
+    """« Sur les traces de Monsieur Castor » était devenu « … d'un particulier »."""
+    from collections import Counter
+    from scripts.snapshot.actes import titre_de_l_evenement
+    masquages = Counter()
+    titre = "Sur les traces de Monsieur Castor"
+    assert titre_de_l_evenement("local_event", titre, "2026-06-01", set(), masquages) == (titre, None)
+    assert not masquages
+    # Le même mot dans un titre d'ACTE reste désigné par son rôle.
+    acte, refus = titre_de_l_evenement("deliberation", "Vente d'un terrain à Monsieur Castor",
+                                       "2026-06-01", set(), Counter())
+    assert refus is None and "Castor" not in acte

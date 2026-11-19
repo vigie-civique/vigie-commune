@@ -1,7 +1,7 @@
 import adapter from '@sveltejs/adapter-static'
 import { sveltekit } from '@sveltejs/kit/vite'
 import { defineConfig } from 'vite'
-import { createReadStream, cpSync, existsSync, statSync } from 'node:fs'
+import { createReadStream, cpSync, existsSync, rmSync, statSync } from 'node:fs'
 import { join, normalize, resolve, sep } from 'node:path'
 
 // L'aperçu de l'atelier construit le site sur le BROUILLON (`VIGIE_DATA_DIR`),
@@ -13,6 +13,7 @@ import { join, normalize, resolve, sep } from 'node:path'
 // l'aperçu après le build. Un build de production n'a pas `VIGIE_DATA_DIR` :
 // rien n'y change, et tout lien mort y reste bloquant.
 const BROUILLON = process.env.VIGIE_DATA_DIR
+const HORS_LIGNE = Boolean(process.env.VIGIE_HORS_LIGNE)
 
 function dansLeBrouillon(path) {
   if (!BROUILLON || !path.startsWith('/data/')) return false
@@ -58,14 +59,53 @@ function donneesBrouillon() {
         createReadStream(cible).pipe(res)
       })
     },
+  }
+}
 
-    // Aperçu figé : un `npm run build` avec la variable produit un site dont les
-    // pages ET les fichiers `/data/` viennent du brouillon. Sans ça, le build
-    // embarquerait `static/data`, c'est-à-dire le snapshot publié.
-    closeBundle() {
-      if (!racine || !existsSync(racine)) return
-      const sortie = join(process.cwd(), process.env.VIGIE_BUILD_DIR || 'build', 'data')
-      cpSync(racine, sortie, { recursive: true, force: true })
+/**
+ * Aperçu figé : un `pnpm run build` avec la variable produit un site dont les
+ * pages ET les fichiers `/data/` viennent du brouillon. Sans ça, le build
+ * embarquerait `static/data`, c'est-à-dire le snapshot publié.
+ *
+ * La copie se fait APRÈS l'adaptateur, qui réécrit tout le répertoire de sortie :
+ * faite au `closeBundle` d'un plugin, elle était effacée par lui (28/10/2026).
+ * Le `data/` publié que l'adaptateur vient d'y recopier depuis `static/` est
+ * retiré d'abord : sinon l'aperçu mêlerait les deux snapshots.
+ *
+ * `resolve` et non `join` : l'atelier passe un chemin ABSOLU (publication.py,
+ * depuis le 17/09/2026), que `join` recollait sous `public/`.
+ */
+function avecDonneesBrouillon(base) {
+  if (!BROUILLON) return base
+  const racine = resolve(BROUILLON)
+  return {
+    ...base,
+    async adapt(builder) {
+      await base.adapt(builder)
+      if (!existsSync(racine)) return
+      const sortie = resolve(process.cwd(), process.env.VIGIE_BUILD_DIR || 'build', 'data')
+      rmSync(sortie, { recursive: true, force: true })
+      cpSync(racine, sortie, { recursive: true })
+    },
+  }
+}
+
+/**
+ * Le dossier remis (`VIGIE_HORS_LIGNE=1`) doit marcher par un double-clic, sans
+ * lanceur ni serveur : cf. scripts/pour_le_double_clic.mjs. APRÈS l'adaptateur,
+ * pour la même raison que le brouillon ci-dessus : il réécrit tout le
+ * répertoire de sortie.
+ */
+function pourLeDoubleClic(base) {
+  if (!HORS_LIGNE) return base
+  return {
+    ...base,
+    async adapt(builder) {
+      await base.adapt(builder)
+      const { rendreLisibleAuDoubleClic } = await import('./scripts/pour_le_double_clic.mjs')
+      await rendreLisibleAuDoubleClic(
+        resolve(process.cwd(), process.env.VIGIE_BUILD_DIR || 'build'),
+        resolve(process.cwd(), 'src'))
     },
   }
 }
@@ -77,13 +117,13 @@ export default defineConfig({
     sveltekit({
       // `VIGIE_BUILD_DIR` sert à construire un aperçu figé sans écraser le
       // build de production ; non définie, rien ne change.
-      adapter: adapter({
+      adapter: pourLeDoubleClic(avecDonneesBrouillon(adapter({
         pages:      process.env.VIGIE_BUILD_DIR || 'build',
         assets:     process.env.VIGIE_BUILD_DIR || 'build',
         fallback:   '404.html',
         precompress: false,
         strict:     false,
-      }),
+      }))),
 
       // Détection des nouvelles versions du site. Sans ce réglage, un onglet
       // resté ouvert garde le JavaScript de la version qu'il a chargée : à la
@@ -92,7 +132,9 @@ export default defineConfig({
       // la navigation interne échoue en silence, et le lecteur croit le site
       // cassé. Le client interroge `_app/version.json` toutes les cinq
       // minutes ; le layout force un vrai chargement au clic suivant.
-      version: { pollInterval: 300000 },
+      // Le dossier remis est daté et ne change jamais : il n'interroge rien (au
+      // double-clic, la requête échouerait toutes les cinq minutes).
+      version: { pollInterval: HORS_LIGNE ? 0 : 300000 },
 
       prerender: {
         handleHttpError: ({ path, message }) => {
@@ -112,6 +154,10 @@ export default defineConfig({
   //
   // Variable absente, la constante vaut `false` : tout build de production et
   // toute la CI produisent exactement ce qu'ils produisaient.
+  // Dossier remis : aucun `<link rel="modulepreload">`. Ouvert au double-clic,
+  // le navigateur refuse chacun (origine « null ») ; tout le JavaScript y est de
+  // toute façon dans un seul script (scripts/pour_le_double_clic.mjs).
+  build: HORS_LIGNE ? { modulePreload: { polyfill: false, resolveDependencies: () => [] } } : {},
   define: {
     __VIGIE_HORS_LIGNE__: JSON.stringify(Boolean(process.env.VIGIE_HORS_LIGNE)),
   },

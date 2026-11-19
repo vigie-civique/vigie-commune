@@ -36,12 +36,25 @@ def sauvegarder(source: Path | str, dest: Path | str) -> Path:
         copie = sqlite3.connect(str(partiel))
         try:
             origine.backup(copie)
+            sans_index_de_sens(copie)
         finally:
             copie.close()
     finally:
         origine.close()
     os.replace(partiel, dest)
     return dest
+
+
+def sans_index_de_sens(copie: sqlite3.Connection) -> None:
+    """Vide `embeddings` dans une COPIE : l'index de recherche par sens se
+    recalcule depuis la base (`scripts/build_rag_index.py`), et pèse un
+    cinquième de celle de Lasalle (30 Mo sur 144, 07/11/2026) à chaque copie.
+    Décision de Julien, 08/11/2026. Une base restaurée revient sans index : la
+    recherche répond vide jusqu'à la prochaine passe de `build_rag_index.py`."""
+    if copie.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='embeddings'").fetchone():
+        copie.execute("DELETE FROM embeddings")
+        copie.commit()
+        copie.execute("VACUUM")
 
 
 def verifier(chemin: Path | str) -> list[str]:

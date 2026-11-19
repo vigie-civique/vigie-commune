@@ -130,6 +130,84 @@ def montants_cites(texte: str) -> set[float]:
     return sortie
 
 
+# ─── Tous les montants d'un acte, à leur position ────────────────────────────
+#
+# Lot 1 du chantier « lire les montants des PV » (24/10/2026). Demander à un
+# modèle de TROUVER les montants perdait des lignes sans le dire (13 lignes sur
+# 23 jamais envoyées en 2025). Le relevé est donc mécanique et exhaustif ; le
+# modèle ne fait plus que QUALIFIER une liste fermée. Le VPS refait ce même
+# relevé au dépôt d'un rapport : un montant présent ici et absent du rapport
+# est « non qualifié », jamais oublié.
+#
+# `montants_cites` reste tel quel : les lecteurs du moteur s'en servent, et le
+# changer changerait ce qui est publié. Trois formes de plus ici :
+#   - « €2 500,00 », l'euro AVANT le nombre (C5 : la CC 2025 rendait 0) ;
+#   - la cellule de tableau, sans unité (l'unité est dans l'en-tête) : un
+#     nombre à centimes ou à milliers séparés, retenu seulement sur une ligne
+#     qui porte au moins deux montants ;
+#   - les centimes gardés tels qu'écrits (C10).
+# Une année, une date, un numéro d'acte ne passent aucune des trois formes.
+#
+# Mesuré le 24/10 sur les 99 textes océrisés de Saillans : 4 168 montants
+# relevés, dont 1 303 cellules, contre 1 769 valeurs pour `montants_cites`.
+# Les 47 valeurs de `montants_cites` absentes d'ici sont TOUTES des lectures
+# fausses de sa part, sur un nombre que l'OCR a soudé à son voisin :
+# « 2021 835 804,96 € » (une année de colonne, puis le montant) lui donne
+# 21 835 804,96, ici 835 804,96 — le bon. « 1016 608.11 € » (l'espace des
+# millions perdu) : faux des deux côtés, 16 608,11 et 608,11. ⚠️ Limite
+# connue : le montant est bien relevé et situé, mais sa valeur n'est sûre
+# qu'à l'image de la page — c'est la fiche « acte relu » du lot 4.
+_MONTANT_POS = re.compile(r"(?<!\d)(?<!\d[,.])(\d{1,3}(?:[   .]\d{3})+|\d+)(?:,(\d+)|\.(\d{1,2})(?!\d))?"
+                          r"\s*(?:€|euros?\b)", re.I)
+_EURO_AVANT = re.compile(r"€\s?(\d{1,3}(?:[   .]\d{3})+|\d+)(?:,(\d{2}))?(?!\d)")
+_CELLULE = re.compile(r"(?<![\d,./-])(\d{1,3}(?:[   .]\d{3})+(?:,\d{2})?|\d{1,7},\d{2})(?![\d/])")
+
+
+def _en_valeur(entier: str, decimales: str | None) -> float | None:
+    e = re.sub(r"\D", "", entier)
+    return float(f"{e}.{decimales or 0}") if e else None
+
+
+def montants_a_positions(texte: str, pages: list[int] | None = None) -> list[dict]:
+    """Chaque montant du texte : début et fin dans le texte, valeur, forme
+    (`euro` ou `cellule`), ligne, et page si les débuts de page sont donnés
+    (ceux du manifeste `x.ocr.json`). Ordre du texte, identifiants M1, M2…"""
+    texte = texte or ""
+    # L'unité suit le nombre, parfois à la ligne suivante (« 6 821⏎€ ») : ces
+    # formes se cherchent sur le texte entier. Un montant nul (« 0,00 € ») est
+    # relevé comme les autres — un zéro de tableau est une valeur à qualifier.
+    vus = []
+    for m in _MONTANT_POS.finditer(texte):
+        if (v := _en_valeur(m.group(1), m.group(2) or m.group(3))) is not None:
+            vus.append((m.start(), m.end(), v, "euro"))
+    for m in _EURO_AVANT.finditer(texte):
+        v = _en_valeur(m.group(1), m.group(2))
+        if v is not None and not any(a <= m.start(1) < b for a, b, _, _ in vus):
+            vus.append((m.start(), m.end(), v, "euro"))
+    # La cellule sans unité se juge à sa ligne : deux montants au moins.
+    decalage = 0
+    for ligne in texte.split("\n"):
+        fin_ligne = decalage + len(ligne)
+        cellules = []
+        for m in _CELLULE.finditer(ligne):
+            a, b = decalage + m.start(), decalage + m.end()
+            entier, _, dec = m.group(1).partition(",")
+            if (v := _en_valeur(entier, dec or None)) is not None and \
+                    not any(x <= a < y for x, y, _, _ in vus):
+                cellules.append((a, b, v, "cellule"))
+        sur_la_ligne = sum(1 for x, _, _, _ in vus if decalage <= x <= fin_ligne)
+        if sur_la_ligne + len(cellules) >= 2:
+            vus += cellules
+        decalage = fin_ligne + 1
+    sortie = [{"debut": a, "fin": b, "valeur": v, "forme": forme,
+               "ligne": texte.count("\n", 0, a), "texte": " ".join(texte[a:b].split()),
+               "page": (sum(1 for p in pages if p <= a) if pages else None)}
+              for a, b, v, forme in sorted(vus)]
+    for i, o in enumerate(sortie, 1):
+        o["id"] = f"M{i}"
+    return sortie
+
+
 def _prefixe(assemblee: str | None) -> str | None:
     a = _ascii(assemblee or "")
     if not a:

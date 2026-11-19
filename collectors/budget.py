@@ -23,7 +23,7 @@ import urllib.request
 from .archive import fetch_json
 from .db import get_conn
 
-from .config import COMMUNE_NAME, COMMUNE_SIREN as SIREN_COMMUNE, HEADERS
+from .config import COMMUNE_NAME, COMMUNES_ABSORBEES, HEADERS, releve_et_siren
 
 # Datasets disponibles par année (dataset_id sur data.economie.gouv.fr)
 DATASETS = {
@@ -74,6 +74,17 @@ COMPTES_CLES = {
 
 def fetch_comptes(year: int) -> list[dict]:
     """Récupère toutes les lignes comptables de la commune pour une année."""
+    return fetch_comptes_siren(year)[1]
+
+
+def fetch_comptes_siren(year: int) -> tuple[str | None, list[dict]]:
+    """`(SIREN qui a répondu, lignes comptables)` pour une année."""
+    # `None` (erreur de lecture) ne passe pas à l'ancien SIREN.
+    siren, lignes = releve_et_siren(lambda s: _fetch_comptes(year, s))
+    return siren, lignes or []
+
+
+def _fetch_comptes(year: int, siren: str) -> list[dict] | None:
     dataset = DATASETS.get(year)
     if not dataset:
         return []
@@ -84,17 +95,17 @@ def fetch_comptes(year: int) -> list[dict]:
 
     while True:
         params = urllib.parse.urlencode({
-            "where": f'siren="{SIREN_COMMUNE}"',
+            "where": f'siren="{siren}"',
             "limit": page_size,
             "offset": offset,
         })
         url = f"{API_BASE}/{dataset}/records?{params}"
         try:
             data = fetch_json(url, source="budget-dgfip", timeout=30,
-                              headers=HEADERS)
+                              headers=HEADERS, complete=True)
         except Exception as e:
             print(f"  [erreur] {year} offset={offset} : {e}")
-            break
+            return None
 
         records = data.get("results", [])
         all_records.extend(records)
@@ -162,18 +173,52 @@ def ensure_budget_table(conn):
             montant     REAL,
             source      TEXT DEFAULT 'dgfip',
             created_at  TEXT DEFAULT (datetime('now')),
+            siren       TEXT,
             UNIQUE(year, compte, categorie)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS budget_annuel_absorbees (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            siren       TEXT NOT NULL,
+            year        INTEGER NOT NULL,
+            categorie   TEXT NOT NULL,
+            compte      TEXT NOT NULL,
+            libelle     TEXT,
+            montant     REAL,
+            source      TEXT DEFAULT 'dgfip',
+            created_at  TEXT DEFAULT (datetime('now')),
+            UNIQUE(siren, year, compte, categorie)
+        )
+    """)
+    # Une base d'avant le 02/11/2026 n'a pas la colonne `siren`.
+    from .db import _rattraper_colonnes
+    _rattraper_colonnes(conn)
     conn.commit()
 
 
 def import_year(conn, year: int, dry_run: bool = False) -> int:
-    records = fetch_comptes(year)
+    siren, records = fetch_comptes_siren(year)
     if not records:
         print(f"  {year} : aucune donnée")
         return 0
+    return _ecrire(conn, year, records, siren, "budget_annuel", dry_run)
 
+
+def import_absorbees(conn, year: int, dry_run: bool = False) -> int:
+    """Les comptes de chaque commune absorbée d'un autre code, sous SON SIREN,
+    dans `budget_annuel_absorbees` : jamais additionnés à la commune."""
+    total = 0
+    for siren, d in COMMUNES_ABSORBEES.items():
+        records = _fetch_comptes(year, siren) or []
+        if records:
+            print(f"  {year} : {d['nom']} (absorbée, SIREN {siren})")
+            total += _ecrire(conn, year, records, siren, "budget_annuel_absorbees", dry_run)
+    return total
+
+
+def _ecrire(conn, year: int, records: list[dict], siren: str | None, table: str,
+            dry_run: bool) -> int:
     result = aggregate(records)
     totaux = result["totaux"]
     lignes = result["lignes"]
@@ -191,9 +236,9 @@ def import_year(conn, year: int, dry_run: bool = False) -> int:
     for ligne in lignes:
         try:
             conn.execute(
-                "INSERT OR REPLACE INTO budget_annuel (year, categorie, compte, libelle, montant)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (year, ligne["categorie"], ligne["compte"], ligne["libelle"], ligne["montant"])
+                f"INSERT OR REPLACE INTO {table} (year, categorie, compte, libelle, montant, siren)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (year, ligne["categorie"], ligne["compte"], ligne["libelle"], ligne["montant"], siren)
             )
             inserted += 1
         except Exception as e:
@@ -203,9 +248,9 @@ def import_year(conn, year: int, dry_run: bool = False) -> int:
     for key, montant in totaux.items():
         try:
             conn.execute(
-                "INSERT OR REPLACE INTO budget_annuel (year, categorie, compte, libelle, montant)"
-                " VALUES (?, 'total', ?, ?, ?)",
-                (year, key, key.replace("_", " "), montant)
+                f"INSERT OR REPLACE INTO {table} (year, categorie, compte, libelle, montant, siren)"
+                " VALUES (?, 'total', ?, ?, ?, ?)",
+                (year, key, key.replace("_", " "), montant, siren)
             )
             inserted += 1
         except Exception as e:
@@ -240,6 +285,7 @@ def run(year: int | None = None, dry_run: bool = False, stats_only: bool = False
     for y in years:
         print(f"\nAnnée {y} :")
         total += import_year(conn, y, dry_run=dry_run)
+        total += import_absorbees(conn, y, dry_run=dry_run)
 
     print(f"\nTotal : {total} lignes insérées/mises à jour.")
     conn.close()

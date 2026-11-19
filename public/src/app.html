@@ -2,7 +2,13 @@
 <html lang="fr">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- Les polices du portail, servies par l'instance elle-même (jamais depuis
+         le portail : une vigie doit tenir seule). Les deux qui dessinent le
+         premier écran sont demandées tout de suite ; Plex Sans 600 et Plex Mono
+         suivent par @font-face (+layout.svelte), en `font-display: swap`. -->
+    <link rel="preload" href="/fonts/fraunces-latin-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/ibm-plex-sans-latin-400.woff2" as="font" type="font/woff2" crossorigin />
     <!-- Pas de <meta name="description"> ici : chaque page définit la sienne
          dans son <svelte:head>. La description générique faisait doublon sur
          les pages qui en avaient une, et ne décrivait aucune page en propre. -->

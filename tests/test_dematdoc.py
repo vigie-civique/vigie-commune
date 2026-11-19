@@ -194,7 +194,7 @@ def test_acte_unique_ne_decoupe_rien_et_le_dit():
 def sans_reseau(monkeypatch):
     """`lire_document` rend le texte relevé, sans rien télécharger."""
     monkeypatch.setattr(conseils, "lire_document",
-                        lambda doc, avec_ocr=False: (TEXTE_ACTE, "pdf", False))
+                        lambda doc, avec_ocr=False, budget=None: (TEXTE_ACTE, "pdf", False))
 
 
 def _acte(numero: str, date_portail: str) -> DocumentPublie:
@@ -254,7 +254,7 @@ def test_recollecter_le_meme_acte_ne_le_duplique_pas(base, sans_reseau):
 def test_une_piece_sans_couche_texte_nest_pas_enregistree(base, monkeypatch):
     """Mieux vaut une lacune signalée qu'une délibération vide qui passe pour lue."""
     monkeypatch.setattr(conseils, "lire_document",
-                        lambda doc, avec_ocr=False: ("trop court", "pdf", False))
+                        lambda doc, avec_ocr=False, budget=None: ("trop court", "pdf", False))
 
     r = conseils.traiter_acte(base, _acte("DE2026098", "2026-06-30"), "epci",
                               verbose=False)

@@ -432,3 +432,137 @@ def test_deux_actes_qui_ecrivent_le_meme_beneficiaire_font_un_flux(
         flux = conn.execute(
             "SELECT year, amount FROM financial_flows WHERE type='subvention'").fetchall()
     assert [tuple(f) for f in flux] == [(2024, 500)]
+
+
+# ── Un montant lu par OCR attend sa relecture (D5, 23/10/2026) ───────────────
+
+@pytest.mark.parametrize("ocr, attendu", [(True, "probable"), (False, "verified")])
+def test_un_montant_lu_par_ocr_nentre_pas_verifie(base, tmp_path, monkeypatch, ocr, attendu):
+    """Le doublon de 2 380 € publié pour 2024 venait d'une ligne de tableau
+    océrisée, écrite `verified` d'office avec son bénéficiaire illisible. Le
+    drapeau `ocr` est sur la SÉANCE : l'acte le trouve par son document."""
+    from collectors import cm_finances, db
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
+    url = f"https://{SITE_EPCI}/deliberations-2018.pdf"
+    base.execute("INSERT INTO events (type, date, title, source, source_url, metadata) "
+                 "VALUES ('conseil_communautaire', '2018-04-04', 'Séance', ?, ?, ?)",
+                 (SITE_EPCI, url, '{"ocr": %s}' % ("true" if ocr else "false")))
+    base.execute("INSERT INTO events (type, date, title, content, source, source_url) "
+                 "VALUES ('deliberation_cc', '2018-04-04', 'Subventions aux associations 2018', ?, ?, ?)",
+                 (PV_COLONNES, SITE_EPCI, url))
+    base.commit()
+    cm_finances.run_subventions(commit=True)
+    flux = {r[0] for r in base.execute("SELECT confidence FROM financial_flows")}
+    liens = {r[0] for r in base.execute(
+        "SELECT confidence FROM relations WHERE relation_type = 'subventionné'")}
+    creees = {r[0] for r in base.execute(
+        "SELECT confidence FROM entities WHERE type = 'association'")}
+    assert flux == {attendu}, flux
+    assert liens == {attendu}, liens
+    assert creees == {attendu}, creees
+
+
+# ── … quel que soit le nombre de pièces de la séance (24/10/2026) ────────────
+
+def _piece(url: str, libelle: str, **acte):
+    from collectors.connecteurs.base import DocumentPublie
+    return DocumentPublie(date="2025-10-29", url=f"https://{SITE_EPCI}/{url}",
+                          libelle=libelle, source=SITE_EPCI, acte=acte or None)
+
+
+def _delib(numero: str = "") -> dict:
+    return {"titre": "Subventions aux associations 2025", "texte": PV_COLONNES,
+            "categorie": None, "tags": [], "vote": None, "montants": [],
+            "numero_seance": None, "numero_acte": numero, "regime": "test"}
+
+
+@pytest.fixture
+def lecture(monkeypatch):
+    """`traiter` sans réseau : chaque pièce rend un texte, océrisé ou non, et
+    le découpage rend un acte — numéroté dans le recueil, pas dans le PV."""
+    pytest.importorskip("pdfplumber",
+                        reason="job « tests-deps » : pip install -r requirements.txt")
+    from collectors import conseils
+    ocrisees = set()
+    monkeypatch.setattr(conseils, "lire_document", lambda doc, avec_ocr=False, budget=None: (
+        f"{doc.url} — séance du conseil communautaire. " * 40, "pdf", doc.url in ocrisees))
+    monkeypatch.setattr(conseils, "deliberations", lambda texte, pagine=False, ecarts=None: [
+        _delib("98/2025") if "recueil" in texte else _delib()])
+    monkeypatch.setattr(conseils, "date_de_seance",
+                        lambda texte, doc, portee: (doc.date, "test", {}))
+    monkeypatch.setattr(conseils, "acte_unique",
+                        lambda objet, texte, numero: _delib(numero))
+
+    def lire(base, doc, ocr: bool) -> None:
+        if ocr:
+            ocrisees.add(doc.url)
+        conseils.traiter(base, doc, "epci", verbose=False)
+    return lire
+
+
+@pytest.mark.parametrize("ordre", [("recueil", "pv"), ("pv", "recueil")])
+def test_lacte_dun_recueil_ocerise_le_reste_a_cote_dun_pv_natif(base, lecture, ordre):
+    """La séance prend l'adresse du PV, le plus probant, et le drapeau de la
+    dernière pièce lue : l'acte du recueil océrisé ne retrouvait plus `ocr`
+    par elle, et sa ligne de tableau entrait `verified`."""
+    from collectors.cm_finances import lu_par_ocr
+    pieces = {"recueil": (_piece("recueil-29.10.2025.pdf", "Délibérations du 29 octobre 2025"), True),
+              "pv": (_piece("pv-29.10.2025.pdf", "Procès-verbal du 29 octobre 2025"), False)}
+    for nom in ordre:
+        lecture(base, *pieces[nom])
+    actes = base.execute("SELECT id FROM events WHERE type='deliberation_cc'").fetchall()
+    assert len(actes) == 1                          # le jumeau est bien retrouvé
+    assert lu_par_ocr(base, actes[0]["id"])
+
+
+def test_le_pv_ocerise_ne_marque_pas_lacte_quil_ne_fait_que_completer(base, lecture):
+    """L'acte garde le texte natif du recueil : il n'a pas à attendre une relecture."""
+    from collectors.cm_finances import lu_par_ocr
+    lecture(base, _piece("recueil-29.10.2025.pdf", "Délibérations du 29 octobre 2025"), False)
+    lecture(base, _piece("pv-29.10.2025.pdf", "Procès-verbal du 29 octobre 2025"), True)
+    (acte,) = base.execute("SELECT id FROM events WHERE type='deliberation_cc'").fetchall()
+    assert not lu_par_ocr(base, acte["id"])
+
+
+def test_un_acte_ocerise_dun_portail_le_reste(base, lecture):
+    """Sur un portail d'actes, la séance pointe vers le portail : aucune de ses
+    pièces ne partageait son adresse."""
+    from collectors.cm_finances import lu_par_ocr
+    portail = f"https://{SITE_EPCI}/seance-2025-10-29"
+    scanne = _piece("acte-01.pdf", "Délibération", numero="DE01", objet="Subventions 2025",
+                    portail=portail)
+    natif = _piece("acte-02.pdf", "Délibération", numero="DE02", objet="Budget 2025",
+                   portail=portail)
+    lecture(base, scanne, True)
+    lecture(base, natif, False)
+    ocr = {r["source_url"].rsplit("/", 1)[-1]: lu_par_ocr(base, r["id"]) for r in base.execute(
+        "SELECT id, source_url FROM events WHERE type='deliberation_cc'")}
+    assert ocr == {"acte-01.pdf": True, "acte-02.pdf": False}
+
+
+def test_le_rattrapage_marque_les_actes_collectes_avant(base, lecture, tmp_path, monkeypatch):
+    """Les actes collectés avant le correctif n'ont que le drapeau de la séance :
+    `scripts/marquer_actes_ocerises.py` le pose sur ceux dont la pièce a son
+    `x.ocr.pdf` ou son `x.ocr.txt` en cache, et compte les flux sans y toucher."""
+    from collectors import conseils
+    from collectors.cm_finances import lu_par_ocr
+    from scripts import marquer_actes_ocerises as rattrapage
+    monkeypatch.setattr(conseils, "PDF_DIR", tmp_path)
+    monkeypatch.setattr(conseils, "_marquer_ocr", lambda *a: None)    # la collecte d'avant
+    lecture(base, _piece("recueil-29.10.2025.pdf", "Délibérations du 29 octobre 2025"), True)
+    lecture(base, _piece("pv-29.10.2025.pdf", "Procès-verbal du 29 octobre 2025"), False)
+    monkeypatch.undo()
+    monkeypatch.setattr(conseils, "PDF_DIR", tmp_path)
+    (tmp_path / "recueil-29.10.2025.ocr.txt").write_text("texte océrisé")
+    (acte,) = base.execute("SELECT id FROM events WHERE type='deliberation_cc'").fetchall()
+    base.execute("INSERT INTO financial_flows (type, year, amount, event_id, confidence)"
+                 " VALUES ('subvention', 2025, 500, ?, 'verified')", (acte["id"],))
+    assert not lu_par_ocr(base, acte["id"])
+
+    bilan = rattrapage.calculer(base)
+    assert (len(bilan["a_marquer"]), bilan["flux_verified"]) == (1, 1)
+    rattrapage.appliquer(base, bilan)
+
+    assert lu_par_ocr(base, acte["id"])
+    assert base.execute("SELECT confidence FROM financial_flows").fetchone()[0] == "verified"
+    assert rattrapage.calculer(base)["a_marquer"] == []               # rejouable

@@ -12,6 +12,7 @@
   import 'leaflet.markercluster/dist/MarkerCluster.Default.css'
   // Après Leaflet : ses contrôles et ses popups lisent les jetons du thème.
   import '#lib/theme.css'
+  import '#lib/mobile.css'
   // Le choix Système / Clair / Sombre s'applique sur toutes les pages.
   import '#lib/theme.js'
 
@@ -77,7 +78,7 @@
     </a>
 
     {#if !horsSession && dansAtelier}{' '}
-      <a class="view-public seul" href={PUBLIC_URL} target="_blank" rel="noopener">👁 Voir le site public</a>
+      <a class="view-public seul" href={PUBLIC_URL} target="_blank" rel="noopener">👁 <span class="long">Voir le </span>site public</a>
     {' '}{:else if !horsSession}
     <nav>
       {#each nav as n}
@@ -214,6 +215,13 @@
   .view-public.seul {
     margin-left: auto; padding: .25rem .75rem; border-radius: 4px;
     font-size: .8rem; color: var(--info); border: 1px solid var(--bordure);
+  }
+  /* Téléphone : une seule ligne, sans la légende ; le lien se raccourcit. */
+  @media (max-width: 900px) {
+    header { padding: .3rem .6rem; gap: .5rem; flex-wrap: nowrap; }
+    .sub, .long { display: none; }
+    .brand { min-width: 0; overflow: hidden; }
+    .view-public.seul { display: inline-flex; align-items: center; min-height: 44px; flex: none; }
   }
   .view-public.seul:hover { background: var(--fond); }
 

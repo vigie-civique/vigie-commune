@@ -3,7 +3,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from '#lib/donnees.server.js'
-import { EPCI_DOMAINE } from '#lib/instance.js'
 
 export const prerender = true
 
@@ -13,19 +12,13 @@ const lire = (nom, defaut = {}) => {
 }
 
 export function load() {
-  // Ne sont listés que les actes de décision rattachables à la CC : une version
-  // antérieure affichait « Protégez votre compteur » au milieu des PV.
-  const TYPES_ACTES = new Set([
-    'délibérations_cc', 'pv_cc', 'deliberation', 'arrete_prefectoral_epci',
-  ])
-  // Le domaine de l'EPCI vient de l'instance (config/instance.json, epci_url).
-  const echappe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const CC_RE = new RegExp(
-    [EPCI_DOMAINE && echappe(EPCI_DOMAINE), 'intercommunal', 'communaut'].filter(Boolean).join('|'), 'i')
-
+  // Les actes de la communauté sont les `deliberation_cc` : c'est le type que la
+  // collecte écrit (`TYPES_DELIBERES`, scripts/snapshot/actes.py). L'ancien filtre
+  // cherchait des types qui n'existent pas (`délibérations_cc`, `pv_cc`) et se
+  // rabattait sur « communaut » dans le titre : il servait des délibérations
+  // MUNICIPALES qui citent la communauté, et aucune de celles de la communauté.
   const events = (lire('events.json', { events: [] }).events || [])
-    .filter((x) => TYPES_ACTES.has(x.type)
-                && (CC_RE.test(x.source || '') || CC_RE.test(x.title || '')))
+    .filter((x) => x.type === 'deliberation_cc')
     .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
     .slice(0, 40)
 

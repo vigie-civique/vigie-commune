@@ -69,7 +69,8 @@ ETAPES: list[Etape] = [
           lit=("conn", "revue", "noms_publics", "redige"),
           complete=("exclusions",),
           produit=("event_rows", "public_events", "event_exclusions",
-                   "textes_extraits", "masquages")),
+                   "textes_extraits", "masquages", "pieces_des_fragments",
+                   "actes_de_rubrique")),
     # Après les liens, la portée : un acte sans type d'assemblée connu a besoin
     # de ses acteurs pour dire de qui il parle. L'étape l'écrit dans chaque
     # acte publié.
@@ -84,7 +85,8 @@ ETAPES: list[Etape] = [
           produit=("index_actes", "affiches", "cles_stats")),
     Etape("flux", etape_flux,
           lit=("conn", "revue", "entity_rows", "public_person_ids", "public_ids",
-               "ecartees_du_perimetre", "redige"),
+               "ecartees_du_perimetre", "redige", "public_events",
+               "pieces_des_fragments", "actes_de_rubrique"),
           complete=("exclusions",),
           produit=("flow_rows", "public_flows", "flows_par_etat")),
     # AVANT `citations` : les couches copient les fiches telles qu'elles sont.
@@ -94,8 +96,8 @@ ETAPES: list[Etape] = [
           lit=("conn", "revue", "public_ids", "public_entities", "perimetre_par_entite",
                "noms_publics"),
           complete=("exclusions",),
-          produit=("budget_annuel", "budget_annexe", "ofgl_data", "budget_vote",
-                   "dvf_data", "marches_data", "approbations_data")),
+          produit=("avant_fusion_data", "budget_annuel", "budget_annexe", "ofgl_data",
+                   "budget_vote", "dvf_data", "marches_data", "approbations_data")),
     # Tout est sélectionné : les compteurs de `stats.json` se calculent. Le
     # relevé des exclusions y est recopié tel qu'il est à ce moment-là.
     Etape("compteurs", etape_compteurs,
@@ -132,9 +134,9 @@ ETAPES: list[Etape] = [
           ecrit=tuple(f"layers/{c}.geojson" for c in COUCHES)),
     Etape("ecrire_finances", etape_ecrire_finances,
           lit=("out", "budget_annuel", "budget_annexe", "budget_vote", "ofgl_data",
-               "dvf_data", "marches_data", "approbations_data"),
+               "dvf_data", "marches_data", "approbations_data", "avant_fusion_data"),
           ecrit=("budget.json", "budget_vote.json", "ofgl.json", "dvf.json",
-                 "marches.json", "approbations.json")),
+                 "marches.json", "approbations.json", "avant_fusion.json")),
     Etape("environnement", etape_environnement,
           lit=("conn", "out"), ecrit=("environnement.json",)),
     Etape("territoire", etape_territoire,
@@ -198,9 +200,10 @@ ETAPES: list[Etape] = [
           ecrit=("extrait/*.json",)),
     Etape("index_recherche", etape_index_recherche,
           lit=("out", "entity_rows", "public_entities", "public_events", "public_links",
-               "marches_data", "public_flows", "seances_relues", "dossiers_publies"),
+               "marches_data", "public_flows", "seances_relues", "dossiers_publies",
+               "textes_extraits"),
           produit=("indexed", "recherche"),
-          ecrit=("entity_index.json", "recherche_index.json")),
+          ecrit=("entity_index.json", "recherche_index.json", "recherche_texte.json")),
     Etape("stats", etape_stats,
           lit=("out", "exclusions_publiees", "revue_atelier", "stats_en_clair",
                "stats_dossiers", "stats_graphe", "cles_stats", "corrections", "actualite",
@@ -215,9 +218,10 @@ ETAPES: list[Etape] = [
           lit=("graphe", "stats", "entity_exclusions", "relation_exclusions",
                "event_exclusions")),
     Etape("dictionnaire", etape_dictionnaire,
-          lit=("out", "stats", "location_quality"), ecrit=("README.md",)),
+          lit=("out", "stats", "location_quality", "conn", "public_ids"),
+          ecrit=("README.md",)),
     # TOUJOURS la dernière : un snapshot sans manifeste est une construction
     # interrompue, et `verify_snapshot.py` le refuse.
     Etape("manifeste", etape_manifeste,
-          lit=("out", "stats"), ecrit=(MANIFESTE,)),
+          lit=("out", "stats", "conn"), ecrit=(MANIFESTE,)),
 ]

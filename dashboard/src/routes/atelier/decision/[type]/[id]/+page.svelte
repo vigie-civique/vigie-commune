@@ -18,6 +18,7 @@
   import { auMoins } from '#lib/roles.js'
   import { heureLocale } from '#lib/heure.js'
   import { ORIGINES, ORIGINE_AIDE, VERDICT } from '#lib/axes.js'
+  import { erreurHttp, phraseErreur, phraseStatut } from '#lib/libelles.js'
 
   $: type = $page.params.type
   $: id   = $page.params.id
@@ -39,9 +40,9 @@
     loading = true; error = ''; choisi = null; precision = ''; texteOuvert = false
     try {
       const res = await authFetch(`/atelier/decision/${t}/${i}`)
-      if (!res.ok) throw new Error(`${res.status}`)
+      if (!res.ok) throw erreurHttp(res)
       d = await res.json()
-    } catch (e) { error = e.message; d = null }
+    } catch (e) { error = phraseErreur(e); d = null }
     finally { loading = false }
   }
 
@@ -56,7 +57,7 @@
       if (!res.ok) {
         const det = corps.detail
         avis = (typeof det === 'object' ? det?.message : det)
-             || `L'enregistrement a échoué (${res.status}).`
+             || `L'enregistrement a échoué. ${phraseStatut(res.status)}`
         return
       }
       // Dire ce qui vient de se passer, puis enchaîner — ou s'arrêter en le
@@ -108,7 +109,7 @@
   {#if loading}
     <p class="msg">Chargement…</p>
   {:else if error}
-    <p class="msg erreur">Cette ligne n'a pas pu être ouverte ({error}).</p>
+    <p class="msg erreur">Cette ligne n'a pas pu être ouverte. {error}</p>
   {:else if d}
 
     <!-- ZONE 1 — la question, et ce que la ligne affirme -->

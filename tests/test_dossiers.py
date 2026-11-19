@@ -140,8 +140,9 @@ def atelier(tmp_path, monkeypatch, schema_sql, instance):
     monkeypatch.setattr(api, "DB_PATH", chemin)
     monkeypatch.setattr(db_mod, "DB_PATH", chemin)
     monkeypatch.setattr(api, "RACINE", instance)
-    monkeypatch.setenv("ADMIN_KEY", "cle-de-test")
-    client = TestClient(api.app, headers={"x-admin-key": "cle-de-test"})
+    monkeypatch.setattr(api, "ADMIN_KEY", "cle-de-test")
+    client = TestClient(api.app, headers={"x-admin-key": "cle-de-test"},
+                        client=("127.0.0.1", 50000))
 
     def en_tant_que(user):
         api.app.dependency_overrides[require_auth] = lambda: user
@@ -278,3 +279,58 @@ def test_un_sujet_relie_son_dossier_et_ses_donnees(tmp_path):
     assert sujets["incendie"]["donnees"] is True
     assert sujets["logement"]["dossier"] == "la-cure"
     assert sujets["sante"]["sections"] == [] and sujets["sante"]["donnees"] is False
+
+
+# ── A4 : un dossier retenu qu'on modifie sort de la publication, et ça se voit ─
+# Audit du 15/11/2026. Le retrait est voulu (sens prudent) ; le défaut était le
+# silence : le verdict disait encore « retenu ».
+
+def test_modifier_un_dossier_retenu_rend_un_etat_distinct_et_se_compte(atelier):
+    v = atelier["en_tant_que"](VALIDEUR)
+    d = v.get("/api/atelier/dossiers/eau").json()
+    url = f"/api/atelier/annotations/dossier/{d['dossier_id']}"
+    assert v.patch(url, json={"review_status": "retenu", "empreinte_vue": d["empreinte"]}).status_code == 200
+    [ligne] = v.get("/api/atelier/dossiers").json()
+    assert ligne["etat"] == "retenu"
+    files = {f["cle"]: f for f in v.get("/api/atelier/files").json()["files"]}
+    assert files["dossiers-modifies"]["reste"] == 0
+
+    c = atelier["en_tant_que"](CONTRIB)
+    r = c.put("/api/atelier/dossiers/eau", json={"texte": d["texte"] + "\nAjout.\n",
+                                                 "empreinte_lue": d["empreinte"]})
+    assert r.status_code == 200, r.text
+    # Celui qui modifie l'apprend tout de suite.
+    assert r.json()["retire_de_la_publication"] is True
+    assert r.json()["etat"] == "modifie_hors_publication"
+
+    v = atelier["en_tant_que"](VALIDEUR)
+    [ligne] = v.get("/api/atelier/dossiers").json()
+    assert ligne["verdict"] == "retenu", "le verdict posé ne change pas"
+    assert ligne["etat"] == "modifie_hors_publication"
+    assert v.get("/api/atelier/dossiers/eau").json()["etat"] == "modifie_hors_publication"
+    f = {f["cle"]: f for f in v.get("/api/atelier/files").json()["files"]}["dossiers-modifies"]
+    assert (f["reste"], f["dossiers"], f["role_min"]) == (1, ["eau"], "validator")
+
+    # Une seconde modification ne « retire » plus rien : c'est déjà fait.
+    c = atelier["en_tant_que"](CONTRIB)
+    d2 = c.get("/api/atelier/dossiers/eau").json()
+    r = c.put("/api/atelier/dossiers/eau", json={"texte": d2["texte"] + "Encore.\n",
+                                                 "empreinte_lue": d2["empreinte"]})
+    assert r.json()["retire_de_la_publication"] is False
+    assert r.json()["etat"] == "modifie_hors_publication"
+
+    # Retenu de nouveau : la file se vide, l'état redevient « retenu ».
+    v = atelier["en_tant_que"](VALIDEUR)
+    d3 = v.get("/api/atelier/dossiers/eau").json()
+    assert v.patch(url, json={"review_status": "retenu", "empreinte_vue": d3["empreinte"]}).status_code == 200
+    assert v.get("/api/atelier/dossiers").json()[0]["etat"] == "retenu"
+    f = {f["cle"]: f for f in v.get("/api/atelier/files").json()["files"]}["dossiers-modifies"]
+    assert f["reste"] == 0
+
+
+def test_un_dossier_jamais_retenu_modifie_ne_se_dit_pas_retire(atelier):
+    c = atelier["en_tant_que"](CONTRIB)
+    d = c.get("/api/atelier/dossiers/eau").json()
+    r = c.put("/api/atelier/dossiers/eau", json={"texte": d["texte"] + "\nAjout.\n",
+                                                 "empreinte_lue": d["empreinte"]})
+    assert (r.json()["retire_de_la_publication"], r.json()["etat"]) == (False, "jamais_relu")

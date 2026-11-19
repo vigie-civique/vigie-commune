@@ -70,6 +70,7 @@ def test_aucun_fichier_suivi_n_est_ignore():
     "public/static/.data.precedent/entities.json",   # son retour arrière
     "dashboard/static/public_api/budget.json",
     "dashboard/static/.public_api.precedent/budget.json",
+    "dashboard/static/api/syntheses/30140-0001.json",  # synthèses IA nominatives de l'atelier
     "audits/versions/data.precedent/entities.json",  # leur emplacement depuis le 16/09
     "public/static/carte/fond.pmtiles",       # artefact d'instance, borné à sa commune
     ".wrangler/cache/pages.json",             # cache local de l'hébergeur

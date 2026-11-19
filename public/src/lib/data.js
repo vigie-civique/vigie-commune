@@ -1,12 +1,9 @@
 // Chargement des données statiques exportées par build_public_snapshot.py
-// Servies depuis /data/ (public/static/data/). Aucun backend.
-const BASE = '/data'
+// Servies depuis /data/ (public/static/data/). Aucun backend. Le chargement
+// passe par `charger.js`, qui sait aussi lire le dossier ouvert au double-clic.
+import { chargerJSON } from './charger.js'
 
-export async function loadJSON(name) {
-  const res = await fetch(`${BASE}/${name}`)
-  if (!res.ok) throw new Error(`${name}: HTTP ${res.status}`)
-  return res.json()
-}
+export const loadJSON = (name) => chargerJSON(`data/${name}`)
 
 export const TYPE_LABELS = {
   person: 'Personne',

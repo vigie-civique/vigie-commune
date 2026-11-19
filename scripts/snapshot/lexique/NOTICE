@@ -1,0 +1,14 @@
+mots_courants.txt est dérivé de Morphalou 3.1 (ATILF, CNRS / Université de
+Lorraine, https://www.ortolang.fr/market/lexicons/morphalou, version de 6/2016),
+diffusé sous Lesser General Public License for Linguistic Resources (LGPL-LR),
+dont le texte est dans LICENCE-LGPLLR.txt, à côté de ce fichier.
+
+Modifications, faites le 13/11/2026 par À Bout de Champ avec deriver.py :
+seules sont gardées les formes d'un seul mot, en minuscules, de trois lettres
+au moins, des noms communs, adjectifs qualificatifs et adverbes, ainsi que
+l'infinitif et les participes des verbes, attestées par deux au moins des
+lexiques que Morphalou fusionne. Les autres colonnes (catégorie, flexion,
+phonétique, origines) ne sont pas reprises.
+
+mots_courants.txt reste sous LGPL-LR. Le reste du dépôt est sous licence MIT
+(fichier LICENSE à la racine).

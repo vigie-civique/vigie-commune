@@ -49,6 +49,7 @@ import time
 import urllib.request
 import zipfile
 
+from . import mesure
 from .config import CENTROID, HEADERS, NATIONAL_STORE, TELECOMS_RAYON_KM, communes_du_step
 from .db import get_conn
 from .national_store import ecrire_atomiquement, est_frais
@@ -244,19 +245,30 @@ def lignes_fixe(techno: list[dict], meilleure: list[dict], communes: set[str],
 def releve_fixe(conn, communes: list[str]) -> int:
     connus = {r[0] for r in conn.execute("SELECT DISTINCT trimestre FROM telecoms_fixe")}
     ecrits = 0
-    for t in _sous_repertoires(f"{MCI}/statistiques/index.html"):
+    trimestres = _sous_repertoires(f"{MCI}/statistiques/index.html")
+    if not trimestres:
+        raise RuntimeError("index des statistiques ARCEP sans aucun trimestre — la page a changé")
+    for t in trimestres:
         if t in connus:
             continue
         base = f"{MCI_S3}/statistiques/{t}/commune"
         try:
             techno = _csv(_en_cache(f"mci/{t}_commune_techno.csv",
                                     f"{base}/commune_techno.csv", None))
+            # Un trimestre déjà en base n'est pas relu : la forme sert, pas le volume.
+            mesure.lu("arcep-mci-techno", len(techno), mesure.forme_de(techno))
             try:
                 meilleure = _csv(_en_cache(f"mci/{t}_commune_meilleure_techno_thd.csv",
                                            f"{base}/commune_meilleure_techno_thd.csv", None))
             except urllib.error.HTTPError:
                 meilleure = []          # les premiers trimestres ne la publient pas
         except urllib.error.HTTPError as e:
+            # Les trimestres de 2019 sont listés sans être publiés sous cette
+            # forme : un trou ancien de la source, dit et sauté. Le DERNIER
+            # trimestre absent, lui, est une panne — un 404 imprimé puis ignoré
+            # laissait le relevé « réussi » sans données neuves.
+            if t == max(trimestres):
+                raise RuntimeError(f"dernier trimestre {t} introuvable : {e}") from e
             print(f"  [telecoms] {t} : {e}")
             continue
         lignes = lignes_fixe(techno, meilleure, set(communes), t)
@@ -314,6 +326,7 @@ def releve_oi(conn, communes: list[str]) -> int:
     dbf = next(n for n in archive.namelist() if n.lower().endswith(".dbf"))
     cibles = set(communes)
     lignes = lire_dbf(archive.read(dbf), lambda l: l.get("INSEE_COM") in cibles)
+    mesure.lu("arcep-deploiements", len(lignes), mesure.forme_de(lignes))
     conn.executemany(
         "INSERT OR IGNORE INTO telecoms_fixe_oi VALUES (?,?,?,?,?,?,?)",
         [(trimestre, l["INSEE_COM"], l.get("zone"), l.get("oi"), entier(l.get("Locaux")),
@@ -332,6 +345,9 @@ def releve_qualite(conn) -> int:
     if not res:
         return 0
     lignes = _csv(_get(res[1]))
+    # Le fichier national, relu à chaque passe.
+    mesure.lu("arcep-qualite-ftth", len(lignes), mesure.forme_de(lignes),
+              complete=True)
     conn.executemany(
         "INSERT OR REPLACE INTO telecoms_qualite_ftth VALUES (?,?,?,?,?,?,?,?,?)",
         [(r["periode"], r["OI"], r.get("maison_mere"), r["perimetre"], r["dep_code"],
@@ -373,6 +389,7 @@ def releve_sites(conn) -> int:
         return 0
     lignes = _csv(_en_cache(f"mobile/{trimestre}_sites_Metropole.csv",
                             f"{MOBILE}/sites/{trimestre}/{trimestre}_sites_Metropole.csv", None))
+    mesure.lu("arcep-sites-mobiles", len(lignes), mesure.forme_de(lignes))
     retenus = sites_proches(lignes, CENTROID, TELECOMS_RAYON_KM, trimestre)
     conn.executemany(f"INSERT OR IGNORE INTO telecoms_sites_mobiles VALUES ({','.join('?' * 18)})",
                      retenus)
@@ -404,6 +421,8 @@ def releve_indisponibilites(conn, communes: list[str]) -> tuple[int, int]:
         for j, features in ex.map(_jour, a_lire):
             if isinstance(features, Exception):
                 continue
+            mesure.lu("arcep-indispo-jour", len(features),
+                      mesure.forme_de(features, "properties"))
             for p in pannes_du_jour(features, cibles):
                 conn.execute(
                     "INSERT OR IGNORE INTO telecoms_indisponibilites VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",

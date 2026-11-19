@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import urllib.parse
 
+from . import mesure
 from .archive import fetch_json
 from .config import communes_du_step
 from .db import get_conn
@@ -133,6 +134,9 @@ def lignes(jeu: str, **params) -> list[dict]:
     while data.get("next") and len(rendu) < data.get("total", 0):
         data = fetch_json(data["next"], source="sinoe", timeout=60)
         rendu += data.get("results", [])
+    # data-fair rend `total`, pas `total_count` : `fetch_json` ne compte pas.
+    mesure.lu(f"sinoe-{jeu}", len(rendu), mesure.forme_de(rendu),
+              complete=True)
     return rendu
 
 

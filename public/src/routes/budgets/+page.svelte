@@ -2,6 +2,7 @@
   import { COMMUNE, COMMUNE_DE, INSEE, SITE_NOM, NOMS_BUDGETS } from '#lib/instance.js'
   import Niveau from '#lib/components/Niveau.svelte'
   import SourceAbsente from '#lib/components/SourceAbsente.svelte'
+  import AvantFusion from '#lib/components/AvantFusion.svelte'
   import { euros } from '#lib/data.js'
   import Perimetre from './Perimetre.svelte'
   import Repartition from './Repartition.svelte'
@@ -11,6 +12,8 @@
   $: annuel = data.budget.annuel || []
   $: annexe = data.budget.annexe || []
   $: ofgl = data.ofgl.ofgl || []
+  // Un exercice lu sous le SIREN d'une ancienne commune (commune nouvelle).
+  $: avantFusion = new Map([...ofgl, ...annuel].filter(r => r.avant_fusion).map(r => [r.year, r.avant_fusion]))
   $: vote = data.budgetVote.budget_vote || []
   $: sourceVote = data.sourceVote || { etat: 'servie', sources: [] }
   // Exercice par défaut = année OFGL la plus récente (réalisé consolidé).
@@ -432,7 +435,7 @@
     </div>
     {#if years.length}{' '}
       <label class="year">Année affichée
-        <select bind:value={year}>{#each years as y}<option value={y}>{y}{isVoteOnly(y) ? ' · budget voté (prévision)' : ''}</option>{/each}</select>
+        <select bind:value={year}>{#each years as y}<option value={y}>{y}{isVoteOnly(y) ? ' · budget voté (prévision)' : ''}{avantFusion.has(y) ? ' · avant fusion' : ''}</option>{/each}</select>
       </label>
     {' '}{/if}
   </header>
@@ -447,6 +450,11 @@
   {#if aDesAnnexes && (ofgl.length || annuel.length)}<Perimetre bind:value={perimetre} consolide={aDesConsolides} />{/if}
 
   {#if !ofgl.length && !annuel.length}<p class="muted">Aucune donnée budgétaire.</p>{/if}
+
+  <AvantFusion af={data.avantFusion} lignes={[...ofgl, ...annuel]} serie />
+  {#if year && avantFusion.has(year)}
+    <p class="pilote"><b>{year}, avant fusion</b> : les chiffres de cette année sont ceux de l'ancienne commune {avantFusion.get(year)} (<a href="#avant-fusion">pourquoi</a>).</p>
+  {/if}
 
   {#if sourceVote.etat === 'absente' && !vote.length}
     <SourceAbsente etat={sourceVote.etat} sources={sourceVote.sources}
@@ -737,7 +745,7 @@
           <thead>
             <tr>
               <th scope="col" class="ag">Agrégat</th>
-              {#each ofglYears as y}<th scope="col" class="r" class:cur={y === year} class:hors={y !== year && y !== year - 1}>{y}</th>{/each}
+              {#each ofglYears as y}<th scope="col" class="r" class:cur={y === year} class:hors={y !== year && y !== year - 1}>{y}{#if avantFusion.has(y)}<a class="af" href="#avant-fusion" title="Avant fusion : comptes de l'ancienne commune {avantFusion.get(y)}">*</a>{/if}</th>{/each}
               {#if matriceEvol}<th scope="col" class="r">Évolution</th>{/if}
             </tr>
           </thead>
@@ -904,7 +912,7 @@
   /* Tuiles chiffres-clés */
   .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: .75rem; margin-bottom: 1.75rem; }
   .tiles.small { margin-top: .75rem; }
-  .tile { background: #fff; border: 1px solid var(--trait); border-top: 3px solid var(--trait); border-radius: 8px; padding: .8rem .9rem; display: flex; flex-direction: column; gap: .15rem; }
+  .tile { background: var(--carte); border: 1px solid var(--trait); border-top: 3px solid var(--trait); border-radius: 8px; padding: .8rem .9rem; display: flex; flex-direction: column; gap: .15rem; }
   .tile.in   { border-top-color: var(--recette); }
   .tile.out  { border-top-color: var(--depense); }
   .tile.save { border-top-color: var(--ardoise); }
@@ -968,21 +976,22 @@
   .secthead { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin: 1.75rem 0 .25rem; }
   .secthead h3 { margin: 0; }
   .seg { display: inline-flex; border: 1px solid var(--trait); border-radius: 6px; overflow: hidden; }
-  .seg button { padding: .35rem .7rem; font-size: .8rem; background: #fff; color: var(--gris); border: none; border-left: 1px solid var(--trait); cursor: pointer; }
+  .seg button { padding: .35rem .7rem; font-size: .8rem; background: var(--carte); color: var(--gris); border: none; border-left: 1px solid var(--trait); cursor: pointer; }
   .seg button:first-child { border-left: none; }
-  .seg button.on { background: var(--ardoise); color: #fff; }
+  .seg button.on { background: var(--ardoise); color: var(--papier); }
   .scrollx { overflow-x: auto; }
   table.matrix { min-width: 640px; }
-  table.matrix th.ag { text-align: left; white-space: normal; min-width: 150px; max-width: 220px; position: sticky; left: 0; background: #fff; color: var(--gris); font-weight: 400; font-size: .82rem; }
+  table.matrix th.ag { text-align: left; white-space: normal; min-width: 150px; max-width: 220px; position: sticky; left: 0; background: var(--carte); color: var(--gris); font-weight: 400; font-size: .82rem; }
   table.matrix thead th.ag { font-weight: 600; font-size: .78rem; }
   table.matrix th { font-size: .78rem; }
   table.matrix td.neg { color: var(--depense); font-weight: 600; }
   table.matrix td.evol { color: var(--gris); font-size: .78rem; }
-  .voir-tout { display: none; margin: .5rem 0 0; min-height: 44px; padding: .4rem .9rem; border: 1px solid var(--trait); border-radius: 8px; background: #fff; color: var(--ardoise); font-size: .85rem; cursor: pointer; }
+  .voir-tout { display: none; margin: .5rem 0 0; min-height: 44px; padding: .4rem .9rem; border: 1px solid var(--trait); border-radius: 8px; background: var(--carte); color: var(--ardoise); font-size: .85rem; cursor: pointer; }
   .tperim { display: block; text-transform: none; font-weight: 400; letter-spacing: 0; color: var(--gris-clair); }
   table.matrix td { font-size: .82rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
   table.matrix .grp td { background: var(--trait-pale); font-weight: 700; font-size: .74rem; text-transform: uppercase; letter-spacing: .03em; color: var(--gris); }
   table.matrix th.cur, table.matrix td.cur { background: var(--ardoise-pale); }
+  .af { margin-left: .15rem; text-decoration: none; color: var(--ambre); }
   .annexe-struct { margin: 0; padding: 0; border: none; border-bottom: 1px solid var(--trait); }
   .annexe-struct > summary { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: .25rem 1rem; min-height: 44px; padding: .6rem .25rem; color: var(--encre); font-weight: 400; }
   .annexe-struct > summary .anom { font-weight: 600; }
@@ -1009,11 +1018,11 @@
   .note { background: var(--ambre-pale); border: 1px solid #eadfc6; color: var(--ambre); border-radius: 8px; padding: .6rem .8rem; font-size: .85rem; margin: 1rem 0; max-width: 80ch; }
 
   /* Budget voté (prévisionnel, source CR) */
-  .votebanner { background: #eef2ff; border: 1px solid #c7d2fe; border-left: 3px solid var(--ardoise-fonce); color: var(--ardoise-fonce); border-radius: 8px; padding: .7rem .9rem; font-size: .88rem; line-height: 1.5; margin: 1.25rem 0 1.5rem; }
+  .votebanner { background: var(--indigo-voile); border: 1px solid var(--indigo-bord); border-left: 3px solid var(--ardoise-fonce); color: var(--ardoise-fonce); border-radius: 8px; padding: .7rem .9rem; font-size: .88rem; line-height: 1.5; margin: 1.25rem 0 1.5rem; }
   .votebanner a { color: var(--ardoise-fonce); font-weight: 600; }
   .tile.vote { border-top-color: var(--ardoise); }
   .votecards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: .75rem; margin: .25rem 0 1rem; }
-  .votecard { background: #fff; border: 1px solid var(--trait); border-top: 3px solid var(--ardoise); border-radius: 8px; padding: .75rem .9rem; }
+  .votecard { background: var(--carte); border: 1px solid var(--trait); border-top: 3px solid var(--ardoise); border-radius: 8px; padding: .75rem .9rem; }
   .votecard h4 { margin: 0 0 .5rem; }
   .votecard dl { display: grid; grid-template-columns: auto 1fr; column-gap: .8rem; row-gap: .3rem; margin: 0; font-size: .85rem; }
   .votecard dt { color: var(--gris); }

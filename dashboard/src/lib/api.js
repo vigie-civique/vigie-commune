@@ -151,6 +151,14 @@ export const api = {
   donnees: (type, status = '', limit = 200, origine = '') =>
     getAuth('/atelier/donnees' + qs({ type, status, origine, limit })),
 
+  // Une page + le total du filtre (en-tête X-Total-Count).
+  donneesPage: async (type, status = '', origine = '', limit = 50, offset = 0) => {
+    const r = await authFetch('/atelier/donnees' + qs({ type, status, origine, limit, offset }))
+    if (!r.ok) throw await echec(r)
+    const items = await r.json()
+    return { items, total: Number(r.headers.get('X-Total-Count')) || items.length }
+  },
+
   annotate: (objectType, objectId, body) =>
     patchAuth(`/atelier/annotations/${objectType}/${objectId}`, body),
 
@@ -170,6 +178,20 @@ export const api = {
     post('/atelier/saisies', { objet, valeurs, source, confidence }),
 
   saisieRetirer: (id) => del(`/atelier/saisies/${id}`),
+
+  // La fiche qu'une saisie d'entité rejoindrait, demandée AVANT d'enregistrer.
+  saisieEntiteExistante: ({ type, name, commune, siren }) =>
+    getAuth('/atelier/saisies/entite/existante' + qs({ type, name, commune, siren })),
+
+  // Demander le retrait, la fusion ou la relecture d'une fiche : une
+  // proposition, que le validateur tranche dans la file.
+  signaler: (entityId, motif, texte = '', doublon_de = null) =>
+    post(`/atelier/entities/${entityId}/signalement`, { motif, texte, doublon_de }),
+
+  // Les liens supprimés que la collecte ne recrée plus (validateur).
+  refusDeLaFiche: (entityId) => getAuth('/atelier/relations/refus' + qs({ entity_id: entityId })),
+  refusGarder: (id, motif = '') => post(`/atelier/relations/refus/${id}/garder` + qs({ motif })),
+  refusLever: (id, motif) => del(`/atelier/relations/refus/${id}` + qs({ motif })),
 
   // Documents archivés localement : une saisie s'y adosse, ou dit pourquoi
   // elle ne le peut pas.
@@ -253,15 +275,6 @@ export const api = {
   // `appliquer: false` par défaut — on regarde le rapport avant d'écrire.
   decisionsImporter: (appliquer = false, forcer = false) =>
     post('/atelier/decisions/importer', { appliquer, forcer }),
-
-  publicSnapshotStatus: (adminKey) =>
-    getAdmin('/admin/public-snapshot', adminKey),
-
-  // Le geste unique d'avant : construit par-dessus ce qui est servi et
-  // synchronise dans la foulée. Gardé pour les scripts de déploiement ; la page
-  // Publication ne s'en sert plus, elle passe par le flux en deux temps.
-  generatePublicSnapshot: (adminKey) =>
-    postAdmin('/admin/public-snapshot/generate', {}, adminKey),
 
   // Publication en deux temps. `publicationEtat` est en lecture seule, ouvert
   // au validateur et au-dessus (07/10/2026).

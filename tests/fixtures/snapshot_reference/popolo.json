@@ -1,13 +1,15 @@
 {
   "@context": "https://www.popoloproject.com/contexts/organization.jsonld",
-  "generated_at": "2026-10-19T22:05:14",
+  "generated_at": "2026-11-14T22:27:08",
   "license": "ODbL-1.0",
   "license_url": "https://opendatacommons.org/licenses/odbl/1-0/",
   "attribution": "",
   "source_attributions": [
     "Contient des informations d'OpenStreetMap, mises à disposition sous Open Database License (ODbL) — © les contributeurs OpenStreetMap",
     "Contient des données publiques sous Licence Ouverte v2 (Etalab) : SIRENE et indicateurs INSEE, RNA, DVF, BODACC, OFGL et DGFiP, DECP et BOAMP, Répertoire National des Élus, résultats électoraux du ministère de l'Intérieur, BANATIC",
-    "Contient des données IGN (géocodage) sous Licence Ouverte v2"
+    "Contient des données IGN (géocodage) sous Licence Ouverte v2",
+    "Contient des données de l'Observatoire des services publics d'eau et d'assainissement (SISPEA, OFB), composition communale des services et indicateurs, téléchargées sur services.eaufrance.fr, sous Licence Ouverte v2",
+    "Contient les résultats des campagnes FDVA 2 publiés par la DRAJES Occitanie, © www.ac-montpellier.fr (https://www.ac-montpellier.fr/fdva-2-fonctionnement-global-et-nouveaux-projets-les-resultats-122195) : intitulé et montant accordé, pour les associations du territoire"
   ],
   "note": "Vue Popolo (popoloproject.com) des mandats publiés. Sous-ensemble de entities.json et relations.json, exporté dans un vocabulaire partagé pour être réutilisable hors de ce projet. Les liens économiques et les lieux n'entrent pas dans ce modèle et restent dans les fichiers d'origine. Pas de VoteEvent : les procès-verbaux publiés ne donnent pas les votes nominatifs.",
   "persons": [

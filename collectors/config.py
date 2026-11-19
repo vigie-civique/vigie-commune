@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re as _re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -75,8 +76,65 @@ DEPARTEMENT   = _exiger("departement")
 # forme qu'aucune règle d'article ne rattrape. Il est donc DÉCLARÉ, écrit par
 # `init_instance.py` depuis geo.api.gouv.fr, comme le reste du périmètre.
 DEPARTEMENT_NOM = _I.get("departement_nom", "")
-COMMUNE_SIREN = _I.get("commune_siren", "")
+def _sirens_valides(cle: str, valeur, liste: bool) -> list[str]:
+    """Des SIREN à neuf chiffres, ou l'arrêt au chargement.
+
+    Ils servent de PRÉFIXE au filtre des marchés (`startswith`) : une chaîne
+    saisie sans crochets (« "212602890" ») se parcourait caractère par
+    caractère, et `startswith("2")` faisait entrer presque tous les acheteurs
+    publics de France dans le site (revue sécurité de la PR #195).
+    """
+    if liste and not isinstance(valeur, list):
+        raise SystemExit(f"config/instance.json : « {cle} » doit être une liste "
+                         f'de SIREN, par exemple ["212602890"] (lu : {valeur!r}).')
+    valeurs = valeur if liste else [valeur]
+    fautifs = [v for v in valeurs
+               if v and not (isinstance(v, str) and _re.fullmatch(r"\d{9}", v))]
+    if fautifs:
+        raise SystemExit(f"config/instance.json : « {cle} » : SIREN invalide "
+                         f"{fautifs!r} (neuf chiffres attendus).")
+    return [v for v in valeurs if v]
+
+
+COMMUNE_SIREN = (_sirens_valides("commune_siren", _I.get("commune_siren", ""), False)
+                 or [""])[0]
 COMMUNE_SIRET = _I.get("commune_siret", "")
+# Une commune devenue commune nouvelle change de SIREN en gardant son code :
+# Saillans (26289) est 212602890 jusqu'en 2024, 938438454 depuis le 01/01/2025.
+# Ses comptes, ses marchés d'avant la fusion restent sous l'ancien. Écrits par
+# `init_instance.py` (les entités cessées du répertoire au même code INSEE).
+COMMUNE_SIRENS_ANCIENS: list[str] = [
+    s for s in _sirens_valides("commune_sirens_anciens",
+                               _I.get("commune_sirens_anciens", []), True)
+    if s != COMMUNE_SIREN]
+#: Le SIREN actuel d'abord, puis les anciens.
+COMMUNE_SIRENS: list[str] = [s for s in (COMMUNE_SIREN, *COMMUNE_SIRENS_ANCIENS) if s]
+
+
+def premier_releve(lire):
+    """Le relevé seul de `releve_et_siren` (voir sa documentation)."""
+    return releve_et_siren(lire)[1]
+
+
+def releve_et_siren(lire):
+    """`lire(siren)` pour chaque SIREN de la commune, jusqu'au premier non vide.
+
+    Rend `(siren, relevé)` : le SIREN qui a répondu se garde avec l'exercice,
+    pour qu'une année lue sous l'ancienne commune se publie marquée « avant
+    fusion » et non sous le nom actuel (`None` si aucun n'a répondu).
+
+    Pour les jeux tenus par exercice (OFGL, balances DGFiP) : une année est
+    sous l'un OU l'autre SIREN. S'arrêter au premier qui répond évite de
+    compter deux fois une année que les deux porteraient. Seul un vide
+    (`[]`) fait passer au suivant : un `None` (non publié, lecture incomplète)
+    est rendu tel quel, il ne se remplace pas par l'ancien SIREN.
+    """
+    resultat = []
+    for siren in COMMUNE_SIRENS:
+        resultat = lire(siren)
+        if resultat != []:
+            return (siren if resultat else None), resultat
+    return None, resultat
 
 # ── Registre de COLLECTE — les communes de l'EPCI ────────────────────────────
 # Piloter le périmètre de collecte se fait ici et nulle part ailleurs : rna,
@@ -97,7 +155,7 @@ COMMUNES_INSEE = list(COMMUNES)
 # supprimer ce filtre aval en croyant que le code postal suffit.
 COMMUNES_CP = sorted({c["cp"] for c in COMMUNES.values()})
 
-# Communes déléguées — une fusion de communes n'est pas répercutée dans toutes
+# Anciennes communes — une fusion de communes n'est pas répercutée dans toutes
 # les sources ADRESSÉES : SIRENE et DVF continuent d'indexer sous l'ancien code,
 # BODACC sous l'ancien nom. Les clés sont des CODES INSEE envoyés tels quels aux
 # API : ne rien y mettre qui n'en soit pas un.
@@ -105,8 +163,45 @@ COMMUNES_CP = sorted({c["cp"] for c in COMMUNES.values()})
 # Ce registre était vide sur la commune d'origine, donc le code qui l'exploite
 # n'avait jamais tourné. Une branche jamais empruntée est une branche fausse
 # jusqu'à preuve du contraire — leçon du premier portage.
-COMMUNES_DELEGUEES: dict[str, dict] = _I.get("communes_deleguees", {})
-COMMUNES_ADRESSE = {**COMMUNES, **COMMUNES_DELEGUEES}
+#
+# La clé s'appelle `anciennes_communes` depuis le 02/11/2026. Elle s'appelait
+# `communes_deleguees`, et aucune des cinq entrées des trois instances n'est une
+# commune déléguée au COG 2025 : ce sont des communes fusionnées qui n'existent
+# plus (Ferrières et Le Margnès dans Fontrieu, Véronne dans Saillans…).
+# L'ancien nom reste lu, sous la même forme ; les deux à la fois sont refusés,
+# deux registres d'une même chose finissant toujours par diverger.
+if "anciennes_communes" in _I and "communes_deleguees" in _I:
+    raise SystemExit(
+        "config/instance.json : `anciennes_communes` et `communes_deleguees` "
+        "sont deux noms du même registre ; n'en garder qu'un, `anciennes_communes`.")
+CLE_ANCIENNES = "anciennes_communes" if "anciennes_communes" in _I else "communes_deleguees"
+ANCIENNES_COMMUNES: dict[str, dict] = _I.get(CLE_ANCIENNES, {})
+
+# ── Avant la fusion ──────────────────────────────────────────────────────────
+# Une commune nouvelle a deux sortes de prédécesseurs :
+#   - l'ancienne commune AU MÊME CODE (`commune_sirens_anciens`) : sa série
+#     continue celle de la commune, chaque exercice marqué de son SIREN ;
+#   - les communes absorbées d'un AUTRE code (Véronne dans Saillans, Vallouise
+#     dans Vallouise-Pelvoux) : une entrée de `anciennes_communes` rattachée à
+#     la commune de collecte, qui porte son `siren`.
+# Tranché le 02/11/2026 : les secondes se relèvent À PART, chacune sous son
+# SIREN, dans des tables à part, et ne s'additionnent JAMAIS à la commune.
+# Sans `siren`, une entrée reste ce qu'elle était (un code d'adresse) :
+# Brassac et Lasalle n'en déclarent pas.
+COMMUNES_ABSORBEES: dict[str, dict] = {}
+for _code, _d in ANCIENNES_COMMUNES.items():
+    if _d.get("commune") != COMMUNE_INSEE or not _d.get("siren"):
+        continue
+    for _s in _sirens_valides(f"{CLE_ANCIENNES}.{_code}.siren", _d["siren"], False):
+        if _s not in COMMUNE_SIRENS:
+            COMMUNES_ABSORBEES[_s] = {"nom": _d.get("nom") or _code, "insee": _code}
+
+#: SIREN → nom, pour tout ce qui précède la commune actuelle (marquage « avant fusion »).
+SIRENS_AVANT_FUSION: dict[str, str] = {
+    **{s: COMMUNE_NAME for s in COMMUNE_SIRENS_ANCIENS},
+    **{s: d["nom"] for s, d in COMMUNES_ABSORBEES.items()},
+}
+COMMUNES_ADRESSE = {**COMMUNES, **ANCIENNES_COMMUNES}
 COMMUNES_INSEE_ADRESSE = list(COMMUNES_ADRESSE)
 
 # ── PROFONDEUR DE COLLECTE ───────────────────────────────────────────────────
@@ -146,15 +241,39 @@ if _hors_registre:
         "écarte ensuite tout ce qu'ils en ont rapporté.")
 
 COMMUNES_FOND = {c: COMMUNES[c] for c in COMMUNES_FOND_INSEE}
-# Les communes déléguées suivent leur commune de rattachement : une fusion ne
+# Les anciennes communes suivent leur commune de rattachement : une fusion ne
 # change pas la profondeur à laquelle on suit un territoire, seulement le code
 # sous lequel les répertoires continuent de l'indexer.
 COMMUNES_FOND_ADRESSE = {
     **COMMUNES_FOND,
-    **{code: d for code, d in COMMUNES_DELEGUEES.items()
+    **{code: d for code, d in ANCIENNES_COMMUNES.items()
        if d.get("commune") in COMMUNES_FOND},
 }
 COMMUNES_FOND_INSEE_ADRESSE = list(COMMUNES_FOND_ADRESSE)
+
+# ── SOURCES SUSPENDUES ───────────────────────────────────────────────────────
+# Une source qu'une instance cesse de relancer, le temps de régler la cause :
+#
+#   "collecte": {"suspendus": {"raa": {"motif": "…", "depuis": "2026-10-29"}}}
+#
+# Le cas d'origine (29/10/2026) : tarn.gouv.fr coupe toute adresse qui lit ses
+# recueils d'affilée. La boucle quotidienne relançait `raa` chaque nuit, ce qui
+# entretenait le blocage, et l'échec quotidien noyait les vraies pannes.
+#
+# Une suspension n'est pas un oubli : sans motif ni date, elle est refusée, et
+# `collect_loop` la remet en alerte passé SUSPENSION_ALERTE_JOURS. Elle ne vaut
+# que pour la boucle : `collect_loop --only raa --force` et `run_all --step raa`
+# jouent toujours la source.
+COLLECTE_SUSPENDUS: dict[str, dict] = dict(_COLLECTE.get("suspendus") or {})
+_suspensions_mal_formees = [
+    nom for nom, s in COLLECTE_SUSPENDUS.items()
+    if not (isinstance(s, dict) and str(s.get("motif") or "").strip()
+            and _re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(s.get("depuis") or "")))]
+if _suspensions_mal_formees:
+    raise SystemExit(
+        "config/instance.json : collecte.suspendus — chaque source suspendue "
+        "porte un `motif` et une date `depuis` (AAAA-MM-JJ) : "
+        f"{', '.join(_suspensions_mal_formees)}.")
 
 # Profondeur de chaque step qui boucle sur des communes. Piloter le périmètre de
 # collecte se fait ici et nulle part ailleurs : un collecteur ne CHOISIT pas sa
@@ -182,6 +301,12 @@ PROFONDEUR_STEP = {
     "equipements": "fond",          # commerces, santé, écoles (BPE)
     "dpe":         "fond",          # état énergétique du parc de logements
     "lovac":       "fond",          # logements vacants du parc privé
+    "enaf":        "fond",          # consommation d'espaces NAF (ZAN)
+    "vigieau":     "fond",          # restrictions d'eau en sécheresse
+    "cantines":    "fond",          # cantines et taux EGalim
+    "odre":        "fond",          # installations de production d'électricité
+    "loyers":      "fond",          # loyers d'annonce
+    "rpls":        "fond",          # logements sociaux
     "guichets":    "fond",          # guichets compétents (annuaire de la DILA)
     "mobilite":    "fond",          # AOM, arrêts déclarés, dispositifs de l'État
     "sante":       "fond",          # établissements sanitaires et médico-sociaux
@@ -215,7 +340,7 @@ for _step, _prof in _COLLECTE.get("profondeur_steps", {}).items():
 def registre_du_step(step: str, adresse: bool = False) -> dict:
     """Les communes que ce step doit interroger, par code INSEE.
 
-    `adresse=True` ajoute les communes déléguées : les sources ADRESSÉES
+    `adresse=True` ajoute les anciennes communes : les sources ADRESSÉES
     (SIRENE, DVF, Sitadel) indexent encore sous l'ancien code des communes
     qu'une fusion a absorbées, et les oublier fait disparaître des
     établissements et des mutations d'un territoire.
@@ -244,8 +369,10 @@ def cp_du_step(step: str) -> list[str]:
     step, sans quoi la réduction est annulée par la commune voisine qui partage
     le code postal.
     """
-    return sorted({c["cp"] for c in registre_du_step(step, adresse=True).values()
-                   if c.get("cp")})
+    # `codes_postaux` : tous ceux d'une commune qui en a plusieurs (cf.
+    # init_instance._autres_cp) ; `cp` seul n'en est que le premier.
+    return sorted({cp for c in registre_du_step(step, adresse=True).values()
+                   for cp in (c.get("codes_postaux") or [c.get("cp")]) if cp})
 
 
 # ── Bruit propre à la mise en page des PV de cette mairie ─────────────────────
@@ -309,6 +436,45 @@ from collectors.statut import normaliser as _normaliser_statut  # noqa: E402
 
 STATUT = _normaliser_statut(_I.get("statut"))
 
+# ── Teinte de la commune ─────────────────────────────────────────────────────
+# Le site d'une instance porte l'identité du portail (encre, papier, point
+# rouge) et UNE couleur propre, choisie dans cette liste fermée : la 2e ligne
+# du titre de l'accueil, la plaque du nom, le filet des intertitres, la
+# navigation active. Jamais les liens ni les graphiques. Les valeurs sont dans
+# public/src/routes/+layout.svelte ; chacune y tient 5,9:1 sur le papier.
+#
+# « framboise » est la plus proche de la couleur des dépenses (36° d'écart) :
+# faire une capture de contrôle des pages budget avant de l'attribuer.
+#
+# Clé facultative « teinte » de `config/instance.json`. Absente : pétrole.
+# Hors de la liste : erreur, plutôt qu'un site qui retombe sans le dire sur
+# une autre couleur que celle choisie.
+TEINTES = ("petrole", "prusse", "indigo", "violet",
+           "prune", "mure", "framboise", "mousse")
+TEINTE_DEFAUT = "petrole"
+
+
+def teinte_valide(valeur) -> str:
+    """La teinte déclarée, ou la teinte par défaut si la clé est absente.
+
+    Lève ValueError (et non SystemExit) : une fonction du moteur ne sort pas
+    du processus (tests/test_run_step.py). L'appelant convertit.
+    """
+    if valeur is None:
+        return TEINTE_DEFAUT
+    if valeur not in TEINTES:
+        raise ValueError(
+            f"config/instance.json : teinte « {valeur} » inconnue. "
+            f"Valeurs admises : {', '.join(TEINTES)} "
+            f"(ou retirer la clé : {TEINTE_DEFAUT} par défaut).")
+    return valeur
+
+
+try:
+    TEINTE = teinte_valide(_I.get("teinte"))
+except ValueError as _e:
+    raise SystemExit(str(_e)) from None
+
 # ── Sites officiels ──────────────────────────────────────────────────────────
 # La partie irréductible du portage : il n'existe pas de format commun aux sites
 # de mairie. Le connecteur qui sait les lire est nommé dans l'instance ; le
@@ -348,6 +514,16 @@ PREFECTURE_NOM      = _I.get("prefecture_nom", f"Préfecture ({DEPARTEMENT})")
 PREFECTURE_URL      = _I.get("prefecture_url", "")
 PREFECTURE_RAA_PATH = _I.get("prefecture_raa_path", "")
 
+#: Steps qui ne peuvent rien relever sans une source déclarée dans l'instance.
+#: Leur zéro n'est ni un résultat ni un échec : la question n'a pas été posée.
+#: Un dossier national n'a aucune préfecture déclarée ; `raa` y rendait
+#: `empty`, et la couverture laissait lire « interrogé, rien » (02/11/2026).
+SOURCES_NON_CONFIGUREES: dict[str, str] = {
+    **({} if PREFECTURE_URL and PREFECTURE_RAA_PATH else
+       {"raa": "aucun recueil des actes de préfecture déclaré "
+               "(prefecture_url et prefecture_raa_path)"}),
+}
+
 # ── Géographie ───────────────────────────────────────────────────────────────
 BBOX     = tuple(_I.get("bbox", []))       # (sud, ouest, nord, est) — Overpass
 CENTROID = tuple(_I.get("centroid", []))
@@ -376,10 +552,10 @@ TELECOMS_RAYON_KM = float((_COLLECTE.get("telecoms") or {}).get("rayon_km", 10))
 
 # Suivi de fraîcheur par collecteur : (ttl_jours, priorité, table, where).
 # Source unique de vérité, consommée par `run_all.run_step` (journal
-# collector_runs), `scripts/collect_loop` (relance des sources périmées) et
-# `scripts/qa_loop` (alerte source muette). Elle vit ici parce que qa_loop doit
-# la lire sans importer les collecteurs. `init` n'est pas un collecteur : pas
-# d'entrée. Priorité : petit = d'abord.
+# collector_runs) et `scripts/collect_loop` (relance des sources périmées,
+# alertes de `sante.json`). Elle vit ici pour se lire sans importer les
+# collecteurs. `init` n'est pas un collecteur : pas d'entrée. Priorité :
+# petit = d'abord.
 STEP_META = {
     "events":     (3,   1,  "events",            "type='local_event'"),
     "cm":         (7,   2,  "events",            "type IN ('deliberation','conseil_municipal')"),
@@ -445,6 +621,8 @@ STEP_META = {
     "region":     (90,  25, "financial_flows",   "type='subvention_region'"),
     # Un jaune par projet de loi de finances, donc un par an, à l'automne.
     "jaune":      (365, 25, "financial_flows",   "source='jaune-associations'"),
+    # Une campagne FDVA par an, résultats publiés l'été, déposés à la main.
+    "fdva":       (365, 25, "financial_flows",   "source='fdva-drajes'"),
     "eau":        (90,  26, "eau_analyses",      ""),
     # 365 jours : l'OFB publie UN exercice par an, vers la mi-année. Réclamer
     # plus frais ferait rougir un indicateur que rien ne peut rafraîchir.
@@ -475,6 +653,19 @@ STEP_META = {
     "dpe":        (30,  15, "dpe_couverture",    ""),
     # Le Cerema dépose un millésime par an, à l'été.
     "lovac":      (365, 15, "lovac_vacance",     ""),
+    # Le Cerema dépose un millésime par an.
+    "enaf":       (365, 15, "enaf_consommation", ""),
+    # Le fichier de l'année se republie chaque jour en saison : une semaine de
+    # retard en été, c'est une crise qui manque au dossier eau.
+    "vigieau":    (7,   15, "vigieau_jours",     ""),
+    # Le registre est republié chaque nuit, les campagnes une fois par an.
+    "cantines":   (30,  15, "cantines_registre", ""),
+    # RTE arrête le registre chaque mois.
+    "odre":       (30,  15, "odre_installations", ""),
+    # Un jeu par an, en fin d'année.
+    "loyers":     (365, 15, "loyers_annonces",   ""),
+    # Un millésime par an, au 1er janvier, publié l'hiver suivant.
+    "rpls":       (365, 15, "rpls_communes",     ""),
     # L'annuaire est republié chaque nuit ; un guichet bouge rarement.
     "guichets":   (30,  15, "guichets",          ""),
     # Un GTFS se republie en continu, la table de l'ANCT quelques fois par an :

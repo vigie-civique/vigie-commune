@@ -22,8 +22,8 @@
     "marked": "18.1.0"
   },
   "devDependencies": {
-    "@sveltejs/adapter-static": "4.0.0",
-    "@sveltejs/kit": "3.0.1",
+    "@sveltejs/adapter-static": "4.0.1",
+    "@sveltejs/kit": "3.1.1",
     "@sveltejs/vite-plugin-svelte": "7.3.1",
     "pagefind": "1.5.2",
     "svelte": "5.57.2",

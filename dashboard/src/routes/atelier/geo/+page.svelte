@@ -1,5 +1,6 @@
 <script>
-  import { COMMUNE_DE } from '#lib/instance.js'
+  import { COMMUNE, COMMUNE_DE } from '#lib/instance.js'
+  import { libelleType, phraseErreur, erreurHttp } from '#lib/libelles.js'
   import { onMount } from 'svelte'
   import { authFetch } from '#lib/stores/auth.js'
 
@@ -9,10 +10,10 @@
   let filter = 'tofix'   // tofix | all
 
   const STATUS = {
-    missing:   { label: 'Sans coords', color: 'var(--serie-rouge)' },
+    missing:   { label: 'Sans position', color: 'var(--serie-rouge)' },
     imprecise: { label: 'Imprécis',    color: 'var(--serie-ambre)' },
-    ok:        { label: 'OK auto',     color: 'var(--serie-bleu)' },
-    ok_manual: { label: 'Validé',      color: 'var(--serie-vert)' },
+    ok:        { label: 'Placé automatiquement',     color: 'var(--serie-bleu)' },
+    ok_manual: { label: 'Confirmé',      color: 'var(--serie-vert)' },
   }
 
   onMount(load)
@@ -21,10 +22,11 @@
     loading = true; error = ''
     try {
       const res = await authFetch('/atelier/geo-review?limit=150')
+      if (!res.ok) throw erreurHttp(res)
       const data = await res.json()
       items = Array.isArray(data) ? data : []
     } catch (e) {
-      error = 'Chargement impossible (connecté ?).'
+      error = phraseErreur(e)
     } finally {
       loading = false
     }
@@ -35,24 +37,24 @@
   $: shown = filter === 'tofix' ? tofix : items
 </script>
 
-<svelte:head><title>Correction géolocalisation — Atelier</title></svelte:head>
+<svelte:head><title>Points sur la carte — Atelier {COMMUNE}</title></svelte:head>
 
 <section>
   <header>
     <div>
-      <h1>Correction géolocalisation — entités exposées</h1>
-      <p class="sub">Top 150 des entités physiques {COMMUNE_DE}, triées par exposition. Objectif : précision &lt;5 m sur fond Ortho/Cadastre IGN.</p>
+      <h1>Points sur la carte</h1>
+      <p class="sub">Les 150 lieux {COMMUNE_DE} les plus vus, du plus vu au moins vu. Objectif : un point à moins de 5 mètres de la bonne adresse, sur la photo aérienne ou le cadastre de l'IGN.</p>
     </div>
     <div class="stats">
       <span class="pill red">{tofix.length} à corriger</span>
-      <span class="pill green">{done.length} validées</span>
+      <span class="pill green">{done.length} confirmés</span>
     </div>
   </header>
 
   <div class="bar">
     <button class:active={filter === 'tofix'} on:click={() => filter = 'tofix'}>À corriger ({tofix.length})</button>
     <button class:active={filter === 'all'} on:click={() => filter = 'all'}>Toutes ({items.length})</button>
-    <button class="reload" on:click={load}>↺</button>
+    <button class="reload" on:click={load} aria-label="Recharger la liste">↺</button>
   </div>
 
   {#if error}<p class="err">{error}</p>{/if}
@@ -60,18 +62,18 @@
 
   <table>
     <thead>
-      <tr><th>Statut</th><th>Expo</th><th>Type</th><th>Nom</th><th>Adresse</th><th>Coords actuelles</th><th></th></tr>
+      <tr><th>Statut</th><th>Visibilité</th><th>Type</th><th>Nom</th><th>Adresse</th><th>Position actuelle</th><th><span class="sr-only">Action</span></th></tr>
     </thead>
     <tbody>
       {#each shown as it (it.id)}
         <tr>
-          <td><span class="badge" style="background:{STATUS[it.geo_status].color}">{STATUS[it.geo_status].label}</span></td>
-          <td class="num">{it.expo}</td>
-          <td class="muted">{it.type}</td>
-          <td>{it.name}</td>
-          <td class="muted addr">{it.address || '—'}</td>
-          <td class="num muted">{it.lat != null ? `${it.lat.toFixed(5)}, ${it.lng.toFixed(5)}` : '—'}</td>
-          <td><a class="fix" href={`/atelier/entite/${it.id}`}>Corriger →</a></td>
+          <td data-label="Statut"><span class="badge" style="background:{STATUS[it.geo_status].color}">{STATUS[it.geo_status].label}</span></td>
+          <td class="num" data-label="Visibilité">{it.expo}</td>
+          <td class="muted" data-label="Type">{libelleType(it.type)}</td>
+          <td class="nom" data-label="Nom">{it.name}</td>
+          <td class="muted addr" data-label="Adresse">{it.address || '—'}</td>
+          <td class="num muted" data-label="Position actuelle">{it.lat != null ? `${it.lat.toFixed(5)}, ${it.lng.toFixed(5)}` : '—'}</td>
+          <td data-label=""><a class="fix" href={`/atelier/entite/${it.id}`}>Corriger →</a></td>
         </tr>
       {/each}
     </tbody>
@@ -98,4 +100,16 @@
   .badge { color: var(--sur-accent); font-size: .7rem; padding: .12rem .55rem; border-radius: 999px; white-space: nowrap; }
   .fix { color: var(--lien); font-weight: 600; white-space: nowrap; }
   .err { color: var(--danger-texte); }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  @media (max-width: 900px) {
+    section { padding: .8rem; }
+    .bar { flex-wrap: wrap; }
+    table, tbody, tr, td { display: block; width: 100%; }
+    thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    tr { border: 1px solid var(--bordure); border-radius: 8px; padding: .4rem .6rem; margin-bottom: .6rem; background: var(--surface); }
+    td { display: flex; gap: .6rem; align-items: baseline; padding: .25rem 0; border: none; }
+    td[data-label]::before { content: attr(data-label); flex: 0 0 7.5rem; font-size: .7rem; text-transform: uppercase; color: var(--texte-doux); }
+    td[data-label=""]::before { display: none; }
+    .addr { max-width: none; white-space: normal; }
+  }
 </style>

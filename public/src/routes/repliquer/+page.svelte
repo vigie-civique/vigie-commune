@@ -120,7 +120,7 @@
            background: var(--papier); }
   .lien-depot {
     display: inline-block; padding: .6rem 1.1rem; border-radius: 8px;
-    background: var(--ardoise); color: #fff; font-weight: 600; text-decoration: none;
+    background: var(--ardoise); color: var(--papier); font-weight: 600; text-decoration: none;
   }
   .lien-depot:hover { background: var(--ardoise-fonce); }
 

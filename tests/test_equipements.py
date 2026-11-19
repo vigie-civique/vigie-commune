@@ -57,3 +57,29 @@ class TestValeur:
     def test_un_zero_publie_reste_un_zero(self):
         """L'INSEE publie parfois 0 : c'est une mesure, pas une absence."""
         assert _valeur(_obs("A", "A1", "A129", valeur=0.0)) == 0.0
+
+
+# ── Melodi par lots de communes (31/10/2026) ─────────────────────────────────
+
+def test_un_lot_de_communes_tient_en_une_requete(monkeypatch):
+    import urllib.parse
+    from collectors import equipements as eq
+    appels = []
+
+    def melodi(url, **_):
+        geo = [v for k, v in urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query) if k == "GEO"]
+        appels.append(geo)
+        return {"observations": [{"dimensions": {"GEO": f"2025-{g}"}} for g in geo if g != "COM-30003"]}
+    monkeypatch.setattr(eq, "fetch_json", melodi)
+    par_commune = eq.observations_par_commune(["30001", "2A004", "30003"])
+    assert appels == [["COM-30001", "COM-2A004", "COM-30003"]]
+    assert sorted(par_commune) == ["2A004", "30001"]
+
+
+def test_une_reponse_au_plafond_est_refusee(monkeypatch):
+    """Au plafond, Melodi coupe sans annoncer de page suivante."""
+    import pytest
+    from collectors import equipements as eq
+    monkeypatch.setattr(eq, "fetch_json", lambda url, **_: {"observations": [{}] * 3})
+    with pytest.raises(RuntimeError, match="tronquée"):
+        eq._observations("DS_BPE", ["COM-30001"], maxi=3)

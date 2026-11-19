@@ -36,6 +36,7 @@ import sqlite3
 
 import requests
 
+from . import mesure
 from .archive import archive_fetch
 from .config import (COMMUNES, COMMUNES_INSEE, DB_PATH, HEADERS)
 from .db import pivot_ids, upsert_entity
@@ -82,7 +83,11 @@ def _lire_csv(session: requests.Session, url: str, source: str) -> list[dict]:
     # DÉDUIT de l'en-tête : une extraction annuelle change de forme sans le dire.
     entete = texte.split("\n", 1)[0]
     sep = ";" if entete.count(";") > entete.count(",") else ","
-    return list(csv.DictReader(io.StringIO(texte), delimiter=sep))
+    lecteur = csv.DictReader(io.StringIO(texte), delimiter=sep)
+    lignes = list(lecteur)
+    # Un fichier national par exercice, sommés : un exercice neuf fait monter.
+    mesure.lu(source, len(lignes), lecteur.fieldnames, complete=True)
+    return lignes
 
 
 def _famille(dispositif: str) -> tuple[str, str]:
@@ -236,7 +241,7 @@ def collecter(conn, session: requests.Session, dry_run: bool = False) -> dict:
 
 
 def run(dry_run: bool = False):
-    session = requests.Session()
+    session = mesure.suivre(requests.Session())
     session.headers.update(HEADERS)
 
     conn = sqlite3.connect(str(DB_PATH))

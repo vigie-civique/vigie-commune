@@ -55,7 +55,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from collectors.config import (COMMUNE_NAME, COMMUNE_SIREN, COMMUNES_ADRESSE,  # noqa: E402
+from collectors.config import (COMMUNE_NAME, COMMUNE_SIRENS, COMMUNES_ADRESSE,  # noqa: E402
                                EPCI_NOM, EPCI_SIREN)
 from collectors.db import get_conn  # noqa: E402
 from collectors.marches_publics import _norme_acheteur  # noqa: E402
@@ -86,7 +86,7 @@ def rattachements_a_reprendre(conn) -> list[dict]:
     l'instance et la collecte n'a jamais eu tort. Ne lit que ; rend, pour
     chaque marché, la fiche voulue (None : aucune) et la certitude voulue.
     """
-    notres = {siren_de(COMMUNE_SIREN), siren_de(EPCI_SIREN)} - {""}
+    notres = {*map(siren_de, COMMUNE_SIRENS), siren_de(EPCI_SIREN)} - {""}
     plan = []
     for m in conn.execute(
             "SELECT m.id, m.acheteur_id, m.acheteur_siren, m.acheteur_nom, m.confidence, "
@@ -220,7 +220,7 @@ def main() -> int:
     autres_acheteurs = {r[0] for r in conn.execute(
         "SELECT id, acheteur_siren FROM marches_publics")
         if siren_de(r[1]) and siren_de(r[1]) not in
-        {siren_de(COMMUNE_SIREN), siren_de(EPCI_SIREN)}}
+        {*map(siren_de, COMMUNE_SIRENS), siren_de(EPCI_SIREN)}}
 
     a_degrader, a_promouvoir = [], []
     for mid, nom, actuelle, source, objet in lignes:

@@ -10,6 +10,7 @@
   import { authFetch, currentUser } from '#lib/stores/auth.js'
   import { auMoins } from '#lib/roles.js'
   import { heureLocale } from '#lib/heure.js'
+  import { erreurHttp, phraseErreur, motifReponse } from '#lib/libelles.js'
 
   $: tranche = auMoins($currentUser, 'validator')
   $: me = $currentUser?.email || ''
@@ -18,6 +19,7 @@
   let loading = true
   let error   = ''
   let avis    = ''
+  let avisFiche = null     // un lien refusé : la fiche où le refus se lit et se lève
   let occupe  = {}
 
   // Ce que le détecteur a remarqué, dit en français. Un `signal` inconnu se
@@ -54,20 +56,15 @@
     loading = true; error = ''
     try {
       const res = await authFetch('/candidates?status=pending')
-      if (!res.ok) throw new Error(`${res.status}`)
+      if (!res.ok) throw erreurHttp(res)
       liens = await res.json()
-    } catch (e) { error = e.message }
+    } catch (e) { error = phraseErreur(e) }
     finally { loading = false }
-  }
-
-  async function motif(res, defaut) {
-    const d = (await res.json().catch(() => ({}))).detail
-    return (typeof d === 'object' ? d?.message : d) || defaut
   }
 
   async function trancher(lien, action, libelle, effet) {
     occupe = { ...occupe, [lien.id]: true }
-    avis = ''
+    avis = ''; avisFiche = null
     try {
       const res = await authFetch(`/candidates/${lien.id}/review`, {
         method: 'POST', body: JSON.stringify({ action, note: '' }),
@@ -76,7 +73,9 @@
         liens = liens.filter(l => l.id !== lien.id)
         avis = `« ${lien.from_name} → ${lien.to_name} » : ${libelle}. ${effet}`
       } else {
-        avis = await motif(res, `L'enregistrement a échoué (${res.status}).`)
+        const corps = await res.clone().json().catch(() => ({}))
+        avis = await motifReponse(res, "L'enregistrement a échoué")
+        if (corps.detail?.refus_id) avisFiche = lien.from_id
         if (res.status === 409) await charger()
       }
     } finally {
@@ -94,7 +93,7 @@
       liens = liens.map(l => l.id === lien.id
         ? { ...l, reservation: { par: r.locked_by, expire_dans_min: r.expires_in_min } } : l)
     } else {
-      avis = await motif(res, `Réservation impossible (${res.status}).`)
+      avis = await motifReponse(res, "Réservation impossible")
       if (res.status === 409) await charger()
     }
   }
@@ -104,7 +103,7 @@
     const res = await authFetch(
       `/atelier/queue/${lien.id}/claim?table=relation_candidates`, { method: 'DELETE' })
     if (res.ok) liens = liens.map(l => l.id === lien.id ? { ...l, reservation: null } : l)
-    else avis = await motif(res, `Libération impossible (${res.status}).`)
+    else avis = await motifReponse(res, "Libération impossible")
   }
 </script>
 
@@ -128,7 +127,8 @@
     {/if}
   </header>
 
-  {#if avis}<p class="avis" role="status">{avis}</p>{/if}
+  {#if avis}<p class="avis" role="status">{avis}
+    {#if avisFiche}<a href="/atelier/entite/{avisFiche}">Voir les liens refusés sur la fiche</a>{/if}</p>{/if}
   {#if $currentUser && !tranche}
     <p class="msg">
       Vous pouvez lire cette file. Confirmer ou écarter un lien demande le rôle
@@ -139,7 +139,7 @@
   {#if loading}
     <p class="msg">Chargement…</p>
   {:else if error}
-    <p class="msg erreur">Erreur : {error}</p>
+    <p class="msg erreur" role="alert">{error}</p>
   {:else if liens.length === 0}
     <p class="msg">
       Rien n'attend ici. Un zéro sur cette file ne veut pas dire que tout a été

@@ -43,6 +43,7 @@ import json
 import time
 import urllib.request
 
+from . import mesure
 from .archive import HEADERS, archive_fetch
 from .config import COMMUNES, NATIONAL_STORE, REQUEST_DELAY, communes_du_step
 from .db import get_conn, transaction
@@ -132,6 +133,8 @@ def ensure_table(conn):
 def import_commune(insee: str, commune_nom: str) -> dict:
     brut = telecharger(insee)
     traits = json.loads(gzip.decompress(brut)).get("features") or []
+    mesure.lu("cadastre-parcelles", len(traits),
+              mesure.forme_de(traits, "properties"), complete=True)
     releve = {"parcelles": len(traits), "contenance": 0, "dvf_situees": 0,
               "dvf_sans_parcelle": 0}
 

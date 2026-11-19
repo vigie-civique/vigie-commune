@@ -14,11 +14,10 @@
 // ODbL) borné à l'emprise de l'instance — 2,2 Mo pour une commune au zoom 15.
 // Il est produit par `scripts/carte_fond.py`, lu par plages d'octets, et il
 // vient du même domaine que le reste du site.
-// Chemin relatif : dans un dossier hors-ligne, `/carte/fond.pmtiles` désignerait
-// la racine du disque. `asset()` préfixe le chemin de base — '' sur le site
-// servi, celui qui convient dans une archive. (`base` a quitté `$app/paths` avec
-// SvelteKit 3.)
-import { asset } from '$app/paths'
+// Chemin relatif, résolu par `charger.js` : dans un dossier hors-ligne,
+// `/carte/fond.pmtiles` désignerait la racine du disque ; ouvert au double-clic,
+// le fichier est lu par son jumeau `.js`, aucun `fetch` n'y passant.
+import { chargerOctets } from '../charger.js'
 
 const ATTRIBUTION =
   '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap<span class="visually-hidden"> (nouvelle fenêtre)</span></a>'
@@ -26,13 +25,11 @@ const ATTRIBUTION =
 /** Source PMTiles qui télécharge le fichier une fois et sert les plages depuis
  *  la mémoire — l'interface attendue par la bibliothèque. */
 class FichierEntier {
-  constructor(url) { this.url = url; this.tampon = null }
-  getKey() { return this.url }
+  constructor(chemin) { this.chemin = chemin; this.tampon = null }
+  getKey() { return this.chemin }
   async getBytes(offset, length) {
     if (!this.tampon) {
-      const r = await fetch(this.url)
-      if (!r.ok) throw new Error(`${r.status} sur ${this.url}`)
-      this.tampon = await r.arrayBuffer()
+      this.tampon = await chargerOctets(this.chemin)
     }
     return { data: this.tampon.slice(offset, offset + length) }
   }
@@ -53,7 +50,6 @@ export async function poserFond(L, carte) {
       import('pmtiles'),
       import('protomaps-leaflet'),
     ])
-    const url = asset('carte/fond.pmtiles')
     // Le fichier est chargé ENTIER, une fois, plutôt que lu par plages.
     //
     // Un PMTiles se lit normalement par requêtes Range. Or Cloudflare Pages les
@@ -68,7 +64,7 @@ export async function poserFond(L, carte) {
     // de deux cent cinquante — le charger d'un bloc est plus simple et marche
     // partout. Le jour où un fond dépassera la dizaine de mégaoctets, il faudra
     // un hébergement qui gère Range, et le dire ici.
-    const source = new PMTiles(new FichierEntier(url))
+    const source = new PMTiles(new FichierEntier('carte/fond.pmtiles'))
     // Lecture de l'en-tête AVANT de monter la couche : c'est le seul moyen de
     // distinguer « fichier absent » de « fichier présent mais illisible », et
     // de le dire à l'appelant plutôt que de laisser une carte grise sans

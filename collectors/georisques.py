@@ -20,6 +20,7 @@ import json
 import time
 import urllib.parse
 
+from . import mesure
 from .archive import fetch_json
 from .config import COMMUNES, COMMUNES_INSEE, REQUEST_DELAY, SIRENE_API
 from .db import get_conn
@@ -218,6 +219,7 @@ IMPORTERS = {
 def run(insee_list: list[str] | None = None):
     conn = get_conn()
     ensure_tables(conn)
+    echecs = []
     for insee in (insee_list or COMMUNES_INSEE):
         commune = COMMUNES.get(insee, {}).get("nom", insee)
         print(f"[georisques] {commune} ({insee})")
@@ -225,8 +227,19 @@ def run(insee_list: list[str] | None = None):
             try:
                 items = fetch_paginated(ep, insee)
             except Exception as e:
-                print(f"  {ep}: erreur — {e}")
+                # Format lu par le service local du portail (DETAIL / RESUME de
+                # local_service/server.py) : un 503 se rejoue, un défaut non. Un
+                # `: erreur —` avalé faisait passer une commune sans ses risques
+                # pour une commune sans risque (même piège que patrimoine, #190).
+                print(f"  [georisques] {insee} {commune} {ep} : échec → {type(e).__name__}: {e}")
+                echecs.append(f"{insee} {commune} {ep}")
                 continue
+            # `data` + `total_pages` : `fetch_json` ne compte pas. Les risques
+            # arrivent en un élément par commune, leur détail fait le volume.
+            rendus = (sum(len(it.get("risques_detail") or []) for it in items)
+                      if ep == "gaspar/risques" else len(items))
+            mesure.lu(f"georisques-{ep.replace('/', '-')}", rendus,
+                      mesure.forme_de(items), complete=True)
             n = IMPORTERS[ep](conn, insee, items)
             conn.commit()
             print(f"  {ep}: {len(items)} → {n}")
@@ -235,6 +248,8 @@ def run(insee_list: list[str] | None = None):
     print(f"[georisques] formes juridiques des exploitants : {relevees} relevées, "
           f"{manquees} sans réponse")
     conn.close()
+    if echecs:
+        raise RuntimeError(f"relevés en échec : {', '.join(echecs)}")
     print("[georisques] OK")
 
 

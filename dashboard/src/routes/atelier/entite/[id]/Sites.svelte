@@ -6,7 +6,7 @@
   export let tranche = false
   export let brouillon            // { ajouts, statuts: {id: statut}, suppr }
 
-  const LIBELLE = { validated: 'validé', rejected: 'rejeté' }
+  const LIBELLE = { validated: 'confirmé', rejected: 'écarté', candidate: 'à confirmer' }
   let url = ''
 
   function ajouter() {
@@ -26,8 +26,12 @@
 </script>
 
 <section class="card">
-  <h2>Sites web <span class="count-badge">{sites.length}</span></h2>
+  <h2>Sites internet <span class="count-badge">{sites.length}</span></h2>
 
+  {#if tranche && sites.length}
+    <p class="muted legende">« Écarter » retire l'adresse du site public et la garde ici.
+      « Supprimer » l'efface de la base.</p>
+  {/if}
   {#if sites.length || brouillon.ajouts.length}
     <ul class="web-list">
       {#each sites as w (w.id)}
@@ -35,11 +39,12 @@
         {@const supprime = brouillon.suppr.includes(w.id)}
         <li class="web-item" class:validated={statut==='validated'} class:rejected={statut==='rejected' && !brouillon.statuts[w.id]}
             class:a-supprimer={supprime} class:a-modifier={brouillon.statuts[w.id]}>
-          <span class="web-status-dot web-{statut}" title={statut}></span>
+          <span class="web-status-dot web-{statut}" aria-hidden="true"></span>
+          <span class="web-etat">{LIBELLE[statut] ?? statut}</span>
           <a href={lienSur(w.url)} target="_blank" rel="noopener" class="web-url">{w.url}</a>
           <span class="web-meta">{w.found_by} {w.score != null ? `(${w.score.toFixed(2)})` : ''}</span>
           {#if supprime}{' '}
-            <span class="tag-attente">supprimé à l'enregistrement</span>
+            <span class="tag-attente">sera effacé quand vous enregistrerez la fiche</span>
             <button class="lien-annuler" on:click={() => basculerSuppr(w.id)}>rétablir</button>
           {' '}{:else if brouillon.statuts[w.id]}{' '}
             <span class="tag-attente">{LIBELLE[statut] ?? statut}, à enregistrer</span>
@@ -48,12 +53,12 @@
           <div class="web-actions">
             {#if tranche && !supprime}
               {#if statut !== 'validated'}{' '}
-                <button class="web-btn web-validate" on:click={() => trancher(w, 'validated')} title="Valider">✓</button>
+                <button class="btn-texte" on:click={() => trancher(w, 'validated')} title="Le site sera affiché sur la fiche publiée" aria-label="Confirmer ce site">Confirmer</button>
               {' '}{/if}
               {#if statut !== 'rejected'}{' '}
-                <button class="web-btn web-reject" on:click={() => trancher(w, 'rejected')} title="Rejeter">✕</button>
+                <button class="btn-texte" on:click={() => trancher(w, 'rejected')} title="Retiré du site public, gardé dans l'atelier" aria-label="Écarter ce site : le retirer du site public, le garder en base">Écarter</button>
               {' '}{/if}
-              <button class="web-btn web-del" on:click={() => basculerSuppr(w.id)} title="Supprimer">🗑</button>
+              <button class="btn-texte danger" on:click={() => basculerSuppr(w.id)} title="Efface l'adresse de la base" aria-label="Supprimer ce site : l'effacer de la base">Supprimer</button>
             {' '}{/if}
           </div>
         </li>
@@ -78,6 +83,7 @@
 </section>
 
 <style>
+  .legende { margin-bottom: .4rem; }
   .web-list { list-style: none; display: flex; flex-direction: column; gap: .35rem; margin-bottom: .6rem; }
   .web-item { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; font-size: .78rem; padding: .3rem .4rem; border-radius: 5px; background: var(--fond); }
   .web-item.validated { border-left: 3px solid var(--succes); }
@@ -97,4 +103,5 @@
   .web-del      { color: var(--texte-doux); } .web-del:hover      { color: var(--danger); }
   .add-web { display: flex; gap: .4rem; margin-top: .4rem; }
   .web-input { flex: 1; }
+  .web-etat { font-size: .68rem; color: var(--texte-doux); white-space: nowrap; }
 </style>

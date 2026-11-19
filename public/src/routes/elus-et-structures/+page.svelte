@@ -193,7 +193,7 @@
              margin-bottom: 1.5rem; }
   .reponse strong { display: block; margin-bottom: .2rem; color: var(--ambre); }
 
-  .groupe { margin-bottom: 2rem; padding: 1rem 1.1rem; background: #fff;
+  .groupe { margin-bottom: 2rem; padding: 1rem 1.1rem; background: var(--carte);
             border: 1px solid var(--trait); border-radius: 12px; border-left: 3px solid var(--trait); }
   .groupe.ok { border-left-color: var(--recette); }
   .groupe.attention { border-left-color: var(--ambre); }
@@ -214,7 +214,7 @@
              font-variant-numeric: tabular-nums; }
   .montant .type { color: var(--gris-clair); font-size: .78rem; }
   .deport { font-size: .82rem; color: #065f46; margin: .4rem 0 0; line-height: 1.5;
-            padding: .35rem .5rem; background: #e7f0ea; border-radius: 6px; }
+            padding: .35rem .5rem; background: var(--recette-pale); border-radius: 6px; }
 
   .note { margin-top: 2rem; padding: 1.1rem 1.25rem; background: var(--papier);
           border: 1px solid var(--trait); border-left: 3px solid var(--ardoise); border-radius: 10px; }

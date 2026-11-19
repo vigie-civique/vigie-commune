@@ -68,8 +68,7 @@ export function load() {
   // encore vérifier, pas la première ligne du site.
   //
   // ⚖️ Et une séance dont AUCUN acte n'a pu être lu ne tient pas cette place :
-  // la section s'appelle « ce que la commune vient de décider », or cette
-  // ligne-là ne le dit pas. Elle reste entière sur /deliberations et
+  // sur la page de garde, cette ligne-là n'apprend rien de ce qui a été décidé. Elle reste entière sur /deliberations et
   // /nouveautes — elle n'est pas effacée, elle n'est pas mise en avant.
   const ACTES_DE_SEANCE = new Set(['deliberation', 'deliberation_cc'])
 
@@ -101,11 +100,16 @@ export function load() {
     const id = `${i.date}_${ASSEMBLEE[i.type]}`
     return pages.has(id) ? `/conseils/${id}` : `/deliberations/${i.date.slice(0, 4)}`
   }
+  // Une séance déjà présentée dans « Les conseils en clair » ne se redit pas
+  // juste dessous (conseil design du 09/11/2026) : la même séance, deux fois
+  // en un écran, sous deux titres, faisait croire à deux choses différentes.
+  const dejaMontrees = new Set(dernieres.map((s) => s.id))
   const recents = passes
     .filter((i) => GOUVERNANCE.has(i.genre))
     .filter(communal)
     .filter((i) => !ACTES_DE_SEANCE.has(i.type))
     .filter((i) => i.nb_actes == null || i.nb_actes > 0)
+    .filter((i) => i.nb_actes == null || !dejaMontrees.has(`${i.date}_${ASSEMBLEE[i.type]}`))
     .slice(0, 6)
     .map((i) => (i.nb_actes != null ? { ...i, lien: lienDeSeance(i) } : i))
   const agenda = passes.filter((i) => i.genre === 'vie').filter(communal).slice(0, 4)
@@ -121,8 +125,17 @@ export function load() {
     .filter((i) => SEANCES.has(i.type) && i.date && i.date >= aujourdhui)
     .sort((a, b) => a.date.localeCompare(b.date))
     .slice(0, 2)
-  const ailleurs = passes.filter(
-    (i) => GOUVERNANCE.has(i.genre) && i.portee === 'intercommunalite').length
+  // Les délibérations de l'intercommunalité, et DEPUIS QUAND. Comptées dans
+  // `seances.json` (somme des `nb_actes` des séances communautaires), jamais
+  // dans `actualite.json` : celui-ci est tronqué à 400 items
+  // (scripts/snapshot/actualite.py), si bien que « depuis » tombait sur la
+  // coupure, et son genre « acte » mêle élections et subventions d'autres
+  // communes (vérificateur, 09/11/2026). La date est celle de la première
+  // séance communautaire dont une délibération est publiée.
+  const seancesCc = seances.filter((s) => s.code === 'cc' && s.date <= aujourdhui && s.nb_actes > 0)
+  const ailleurs = seancesCc.reduce((n, s) => n + s.nb_actes, 0)
+  const ailleursDepuis = seancesCc.length
+    ? seancesCc.reduce((d, s) => (s.date < d ? s.date : d), seancesCc[0].date) : null
 
   // entity_index abrège les champs : `t` = type, `p` = portée.
   // `a` : 1 en activité, 0 cessée, ABSENT quand les registres se taisent.
@@ -200,6 +213,7 @@ export function load() {
     marches: marchesInterco.filter(estAttribue).length,
     avis: marchesInterco.filter((m) => !estAttribue(m)).length,
     recents: ailleurs,
+    depuis: ailleursDepuis,
   }
   // Ce que vaut un zéro de marchés : une question non posée (collecte
   // absente) n'est pas un résultat (cf. #lib/couverture.js).

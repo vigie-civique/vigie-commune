@@ -53,8 +53,9 @@ from __future__ import annotations
 import os
 import re
 import unicodedata
+from collections import Counter
 
-from .cm_parser import (categorize, extract_amounts, extract_vote,
+from .cm_parser import (categorize, extract_amounts, extract_vote, is_section_header,
                         split_into_deliberations)
 
 # ── Régime « numéroté » : NN/AAAA [: n° NNNN] ────────────────────────────────
@@ -122,6 +123,355 @@ _APPEL_NOMINAL = re.compile(
     r"(?:oui|non|abstention|pour|contre|ne\s+prend\s+pas\s+part)\b", re.I)
 
 
+# ── Ce qui n'est pas l'objet d'un acte ───────────────────────────────────────
+#
+# La rubrique d'un procès-verbal où l'exécutif RAPPORTE les décisions qu'il a
+# prises par délégation du conseil (CGCT L2122-22, L5211-10). Le conseil n'y
+# délibère de rien : il en prend acte. Le découpage en faisait une délibération
+# — « Décisions du Président », trois fois à Lasalle et une à Brassac au
+# 14/11/2026, sous l'en-tête d'un ordre du jour numéroté ou en capitales. Et ces
+# décisions ne sont pas publiées une à une depuis un procès-verbal (Julien, 14
+# et 15/11/2026) : la rubrique part entière, titre et texte.
+#
+# « Délégations consenties au Maire », « Décision modificative n° 2 » sont de
+# vraies délibérations : seul « décision(s) » suivi de qui l'a prise, ou de la
+# délégation qui la fonde, désigne la rubrique.
+_RUBRIQUE_DES_DECISIONS = re.compile(
+    r"^\W*(?:\d{1,3}\s*[.)/–-]?\s*)?"
+    r"(?:(?:compte[\s-]*rendu|information|relev[ée]|liste|point|rapport|communication)s?"
+    r"\b[^\n]{0,60}?(?:\b(?:des|les|aux)\s+|:\s*))?"
+    r"d[ée]cisions?\s+(?:(?:prises?\s+)?"
+    r"(?:(?:du|de\s+la|de\s+m(?:\.|onsieur|adame)?\s*(?:le|la)?|par\s+(?:le|la|m(?:\.|onsieur|adame)"
+    r"\s*(?:le|la)?)?)\s*(?:pr[ée]sidente?|maire|bureau)\b"
+    r"|(?:prises?\s+)?(?:par|en\s+vertu|dans\s+le\s+cadre|au\s+titre|sur)\b[^\n]{0,80}?"
+    r"(?:d[ée]l[ée]gation|L\.?\s*2122-2[23]|L\.?\s*5211-10)))", re.I)
+
+
+# « Décision n° 2021-12 : attribution du marché… » : un point de la rubrique,
+# qui la continue. Lu SEULEMENT à sa suite : une collectivité peut intituler ses
+# délibérations « Décision n° » (relecture vigie-securite du 15/11/2026).
+_DECISION_NUMEROTEE = re.compile(r"^\W*d[ée]cisions?\s+n[°ºo]\s*\d", re.I)
+
+
+def rubrique_de_decisions(titre: str | None) -> bool:
+    """Le titre est-il celui de la rubrique des décisions prises par délégation ?"""
+    return bool(_RUBRIQUE_DES_DECISIONS.match(titre or ""))
+
+
+# Un TITRE qui commence au milieu d'une phrase. Les découpages en produisent par
+# trois chemins, relevés le 15/11/2026 sur les pièces publiques des trois sites :
+#
+#   - `numerote` prend pour un en-tête le renvoi d'un visa coupé en fin de
+#     ligne — « Vu la délibération … N° ⏎ 54/2025 en date du 2/4/2025 et de la
+#     commune de… » : cinq « délibérations » au conseil communautaire du
+#     04/03/2026 de Lasalle ;
+#   - `acte_final` et `capitales` ne gardent que la DERNIÈRE ligne d'un objet
+#     écrit sur deux : « à temps complet », « DE MASSE 2025 », « DE RESULTAT » ;
+#   - `puces` prend les alinéas d'un texte suivi : « En cas de temps partiel
+#     thérapeutique ».
+#
+# Un objet d'acte ne commence ni par une conjonction ni par une préposition qui
+# le rattache à ce qui précède. Les articles n'en sont pas : « LA BERGERIE :
+# CESSION DE FONDS » est un objet. En minuscule, la règle s'étend aux articles
+# et aux lettres isolées de l'océrisation (« l'UNANIMITÉ », « c RÉSRARRIE ») ;
+# un nom en minuscule reste un objet (« vote de crédits supplémentaires »).
+#
+# Les articles INDÉFINIS en font partie depuis le 16/11/2026 : « une veille
+# technologique en vue d'optimiser la diffusion d'informations… » (Saillans,
+# 03/10/2014) est le treizième item d'une énumération dont le redécoupage a
+# retiré les douze autres (« la mise à disposition de matériels… », « la
+# formation des élus… »). « des » y était déjà (`_MOTS_DE_SUITE`). Seule la
+# minuscule compte : « Une convention… » ou « UNE CONVENTION… » ouvre un objet.
+_MOTS_DE_SUITE = (r"et|ou|ni|mais|donc|car|que|qu['’]|qui|dont|de|des|du|d['’]|à|a|au|aux"
+                  r"|en|avec|dans|sans|soit|ayant|actant|afin|lors|puis|ainsi"
+                  r"|avant\s+(?:le|la|les|l['’])|apr[èe]s\s+(?:le|la|les|l['’])"
+                  r"|sur\s+proposition|conform[ée]ment")
+_DEBUT_DE_SUITE = re.compile(rf"^(?:{_MOTS_DE_SUITE})(?:\s|$)|^(?:d|qu)['’]", re.I)
+_DEBUT_MINUSCULE_DE_SUITE = re.compile(
+    rf"^(?:(?:{_MOTS_DE_SUITE}|la|le|les|une?|[a-zà-ÿ])(?:\s|$)|[a-z]['’])")
+# La formule de vote n'est pas un objet. « LE CONSEIL, APRES EN AVOIR DELIBERE,
+# DECIDE » (Brassac) compte quand elle OUVRE le titre, à un débris près
+# (« DE_2020_132) LE CONSEIL… ») : plus loin, elle finit un objet que le
+# découpage a pris trop long, et l'acte reste un acte (Brassac, 22/03/2016,
+# « 3749 Mise en péril : frais propriétaires … après en avoir délibéré »). Le
+# résultat du vote, lui, compte où qu'il soit : c'est la ligne d'une LISTE des
+# délibérations dont les colonnes se sont mêlées — « 3 Cévennes - Terres
+# Solidaires et l'association … ADOPTEE AVEC 19 VOIX POUR » (Lasalle, conseil
+# communautaire du 28/10/2026).
+_FORMULE_POUR_TITRE = re.compile(
+    r"^[^\n]{0,20}?\ble\s+conseil\b[^\n]{0,60}?\b(?:d[ée]cide|d[ée]lib[èée]r)"
+    r"|^[^\n]{0,20}?\bapr[èe]s\s+en\s+avoir\s+d[ée]lib[ée]r"
+    r"|\badopt[ée]e?s?\s+(?:[àa]\s+l['’]\s*unanimit|avec\s+\d+\s+voix|par\s+\d+\s+voix)", re.I)
+
+
+def titre_en_fragment(titre: str | None) -> bool:
+    """Le titre est-il un morceau de phrase plutôt que l'objet d'un acte ?"""
+    t = (titre or "").strip(" \t\n:;,.-–—")
+    if not t:
+        return False
+    return bool(_DEBUT_MINUSCULE_DE_SUITE.match(t) or _DEBUT_DE_SUITE.match(t)
+                or _FORMULE_POUR_TITRE.search(t))
+
+
+# ── Mots collés et débris de tableau ────────────────────────────────────────
+#
+# Ces deux gardes vivent AU SNAPSHOT SEULEMENT (`scripts/snapshot/actes.py`,
+# `motif_de_titre_douteux`), pas dans `_titre_plausible`. Un titre refusé par
+# `_titre_plausible` est RECOLLÉ à l'acte d'avant (`_recoller`) : son titre et son
+# texte rejoignent l'acte précédent, dont le vote et les montants sont relus.
+# Pour un morceau de phrase ou une ligne de tableau, c'est voulu. Pour des mots
+# collés, ce serait faux : « Ventedemobiliercommunal », « Décisionsmodificatives
+# au budget… » sont de VRAIS objets à l'océrisation défectueuse, et la page sans
+# espaces en porte plusieurs à la suite : le texte d'une aliénation serait publié
+# sous le titre de l'acte d'avant (relecture vigie-securite du 16/11/2026). Même
+# prudence pour « DE_2022_061) » : on ne sait pas si c'est un renvoi ou l'en-tête
+# d'un vrai acte. Le snapshot écarte l'acte sans rien recoller.
+#
+# Deux défauts de l'océrisation que `titre_en_fragment` ne voit pas, parce qu'il
+# ne lit que le DÉBUT du titre. Relevés le 16/11/2026 sur les `events.json`
+# servis des trois sites ; chaque règle porte le cas qui l'a fait naître.
+#
+# MOTS COLLÉS — une page dont l'espace entre les mots a disparu (Saillans,
+# 05/02/2016 et 10/07/2015) :
+#
+#     « uneparticipation pourlebranchementau futurréseau de chaleur »
+#     « laparticipationau raccordementà l'égout »
+#     « lesrecettesfiscales issues de laTaxed'Aménagement »
+#     « Acceptationetsignatureaccordcadrepourl'égliseSaintGéraud »
+#     « Conventiondemiseà dispositiond^unlocal »
+#
+# Pas de dictionnaire : le moteur n'en embarque pas, et un nom propre ou un
+# sigle ne doit pas tomber (« McDonald », « SICTOBA », « eARDECHE », « PayFiP »,
+# « VéloDrôme », « LaFilature »). Trois indices, choisis pour qu'aucun mot
+# français ne les porte seul ; UN suffit pour les deux premiers, il en faut DEUX
+# pour le troisième (« plusieurs soudures », le brief du 16/11) :
+#   1. un mot d'au moins 22 lettres : les plus longs mots courants des actes
+#      relevés en comptent 20 (« Professionnalisation », « PLURIPROFESSIONNELLE ») ;
+#      les collés vont de 22 à 54 ;
+#   2. un titre qui OUVRE par un mot en minuscule d'au moins 15 lettres commençant
+#      par un article ou « pour » : « laparticipationau », « lesrecettesfiscales »,
+#      « uneparticipation », « pourlebranchementau ». Les mots français qui
+#      commencent ainsi sont plus courts (« labellisation » en a 13) ;
+#   3. des soudures plus courtes, qui seules ne prouvent rien : un mot de huit
+#      lettres ou plus terminé par « à » (« raccordementà » ; déjà, voilà, delà,
+#      deçà n'ont pas huit lettres), un article en minuscule soudé à un mot à
+#      capitale initiale (« laTaxed'Aménagement » ; un nom propre commence par sa
+#      capitale). Une seule ne tombe pas : « Création d'un emploi permanent … à
+#      temps non completà raison de 10h » (Lasalle, 14/12/2022) est un vrai objet
+#      avec une faute d'océrisation. Un mot en « à » de 15 lettres ou plus en
+#      porte deux à lui seul (« Conventiondemiseà »).
+_MOT_DE_LETTRES = re.compile(r"[^\W\d_]+")
+_ARTICLE_SOUDE_EN_TETE = re.compile(r"^(?:la|le|les|une?|pour|aux)[a-zà-ÿ]+$")
+_ARTICLE_SOUDE_A_UN_NOM = re.compile(r"^(?:la|le|les|du|des|au|aux|une?)[A-ZÀ-Ý][a-zà-ÿ]{3,}")
+
+
+def titre_en_mots_colles(titre: str | None) -> bool:
+    """Le titre porte-t-il des mots que l'océrisation a soudés ?"""
+    mots = _MOT_DE_LETTRES.findall(titre or "")
+    if not mots:
+        return False
+    if any(len(m) >= 22 for m in mots):
+        return True
+    if len(mots[0]) >= 15 and _ARTICLE_SOUDE_EN_TETE.match(mots[0]):
+        return True
+    if any(len(m) >= 15 and m[-1] in "àÀ" for m in mots):
+        return True
+    soudures = sum(1 for m in mots
+                   if (len(m) >= 8 and m[-1] in "àÀ") or _ARTICLE_SOUDE_A_UN_NOM.match(m))
+    return soudures >= 2
+
+
+# DÉBRIS DE TABLEAU — le découpage coupe dans un tableau de comptes et prend
+# pour un titre ce qui reste d'une cellule (Saillans, 13/12/2019) :
+#
+#     « M 49). | | »      « _ PRINCIPAL »      « HT TVA TIC »      « AT TVA TIC »
+#
+# et dans un renvoi de pièce (Brassac, 2018-2023) : « DE_2022_061) » et ses
+# trente pareils, un numéro d'acte pris pour un titre. Le signe d'un débris est
+# une barre verticale, un tiret bas ou une parenthèse fermante sans ouvrante ;
+# SEUL, il ne suffit pas, car de vrais objets en portent un : « DM n°3 |
+# SUPPLEMENT RENOVATION APPARTEMENT » (Saillans, 2017), « Acquisition de la
+# parcelle Section AD n°78_Commune de Vabre » (Brassac, 2025), « _INDEMNITÉ DU
+# RECEVEUR MUNICIPAL POUR 2016 » (Lasalle, 2017). Le titre n'est un débris que
+# s'il ne lui reste pas deux mots de trois lettres ou plus. Deux exceptions de
+# lecture, pour ne pas toucher aux titres courts sans débris (décision de Julien,
+# 16/11/2026) : la numérotation de tête (« 1) PLU », « 2) TARIFS ») et la
+# ponctuation finale (« TARIFS | », « CCAS) », « SIVOM) ») ne sont pas des signes ;
+# elles ne comptent que si, ôtées, il ne reste aucun mot (« M 49). | | »,
+# « DE_2022_061) », « L 2123-24-1 – II) »). « HT », « TVA », « TTC » et leurs
+# lectures fautives « TIC » et « AT » forment un en-tête de colonnes de montants :
+# deux ou plus, et rien d'autre (« HT TVA TIC L » : la lettre isolée est du bruit).
+# « ¦ » (U+00A6) : la barre cassée, lecture fautive de « | ».
+_SIGNE_DE_DEBRIS = re.compile(r"[|¦_]")
+# Chiffres (avec ou sans « ° »), chiffres romains (sans D ni M) ou lettre seule :
+# « 1) », « 3°) », « IV) », « a) ».
+NUMEROTATION_DE_TETE = re.compile(r"^\s*(?:\d{1,3}(?:\s*°)?|[IVXLCivxlc]{1,5}|[A-Za-z])\s*\)\s*")
+_MOT_DE_TROIS_LETTRES = re.compile(r"[^\W\d_]{3,}")
+_MOT_DE_DEUX_LETTRES = re.compile(r"[^\W\d_]{2,}")
+_CHIFFRE_ROMAIN = re.compile(r"[IVXLCivxlc]+")
+_MOTS_OUTILS = {"DE", "LA", "LE", "ET", "EN", "AU", "DU", "OU", "UN", "SUR", "PAR"}
+_SIGLES_DE_MONTANT = {"HT", "HTVA", "TVA", "TTC", "TIC", "AT", "TT"}
+
+
+def titre_en_debris_de_tableau(titre: str | None) -> bool:
+    """Le titre est-il ce qui reste d'une cellule de tableau ?"""
+    t = (titre or "").strip()
+    coeur = NUMEROTATION_DE_TETE.sub("", t).rstrip(" \t|¦).")
+    mots = len(_MOT_DE_TROIS_LETTRES.findall(coeur))
+    # Le signe se cherche dans le titre ENTIER pour un titre sans mot (« M 49). | | »,
+    # « L 2123-24-1 – II) »), dans le cœur pour un titre qui en garde un : la
+    # ponctuation finale et la numérotation de tête ne sont pas des signes.
+    barre = bool(_SIGNE_DE_DEBRIS.search(t))
+    signe = barre or t.count(")") > t.count("(")
+    signe_du_coeur = bool(_SIGNE_DE_DEBRIS.search(coeur)) or coeur.count(")") > coeur.count("(")
+    # Une `)` seule, sans barre ni tiret bas, ne suffit pas quand le cœur porte un
+    # sigle de deux lettres ou plus, en capitales, qui n'est ni un chiffre romain, ni
+    # un en-tête de montant (HT, TTC…), ni un mot-outil (DE, ET…), et s'il n'y a pas
+    # plus d'une `)` en trop (« DM) », « CR) »,
+    # « BP 2026) », « 2) DM n°3 ») : titres courts sans débris, gardés (relecteur du
+    # 17/11/2026). « M57) » (une lettre) et « L 2123-24-1 – II) » (« II » est romain)
+    # restent des débris.
+    sans_numero = NUMEROTATION_DE_TETE.sub("", t)
+    sigle = (sans_numero.count(")") - sans_numero.count("(") <= 1
+             and any(m.isupper() and not _CHIFFRE_ROMAIN.fullmatch(m)
+                     and m not in _SIGLES_DE_MONTANT and m not in _MOTS_OUTILS
+                     for m in _MOT_DE_DEUX_LETTRES.findall(coeur)))
+    if (signe and mots == 0 and (barre or not sigle)) or (signe_du_coeur and mots < 2):
+        return True
+    sigles = [m.upper() for m in _MOT_DE_DEUX_LETTRES.findall(t)]
+    return len(sigles) >= 2 and all(m in _SIGLES_DE_MONTANT for m in sigles)
+
+
+# ── En-tête de tampon d'un extrait, point sans vote ─────────────────────────
+#
+# Deux titres que le découpage prend pour un objet. Même place que les gardes
+# d'au-dessus : le snapshot, sans recollage (`_titre_plausible` ne les voit pas).
+#
+# EN-TÊTE DE TAMPON — un extrait de délibération est un SCAN : la préfecture y
+# appose son tampon, dont les deux premières lignes sont « DEPARTEMENT : <nom> »
+# et « ARRONDISSEMENT : <nom> », avec le numéro de l'acte à la suite. L'océrisation
+# les lit comme du texte, et le découpage en fait un titre (Lasalle, extraits
+# de 2021 à 2023, 52 actes servis le 17/11/2026) :
+#
+#     « DEPARTEMENT : GARD N°132/2023 »      « ARRONDISSEMENT: LE VIGAN »
+#     « Æ, — DEPARTEMENT : GARD Na°64/2021 » « AN°138/2022 À oual DEPARTEMENT : GARD »
+#     « T£ g oual ARRONDISSEME:N : LTE VIGAN » « Zoual DEPARTEM:E GNARTD »
+#
+# Les débris de tête sont les restes du logo (« Aigoual » devient « oual »,
+# « goual »). La règle porte sur la FORME, jamais sur un lieu : Saillans et
+# Brassac ont leur tampon (« DEPARTEMENT : DROME », « ARRONDISSEMENT : CASTRES »),
+# et d'autres communes viendront. Cinq conditions, toutes requises :
+#   1. un mot-clé EN CAPITALES, lu de travers au plus de quelques lettres
+#      (« ARRONDISSEME:N », « DEPARTEM:E ») : `DEPARTEM` ou `ARRONDISS`, puis au
+#      plus 4 ou 6 lettres ou deux-points, sans lettre derrière. « Syndicat
+#      Départemental », « DEPARTEMENTALE » (« AGENCE DEPARTEMENTALE ») ne
+#      sont pas le mot-clé ;
+#   2. un DEUX-POINTS à lui, dans ce mot ou juste derrière : « DEMANDE DE
+#      SUBVENTION AU DEPARTEMENT » et « … A LA REGION ET AU DEPARTEMENT » n'en
+#      portent pas ; « Convention avec le Département : transport scolaire »
+#      en porte un, mais en minuscules et derrière un vrai mot ;
+#   3. AVANT le mot-clé, des débris seulement : 24 caractères au plus, aucun mot
+#      de plus de six lettres (« Baüal », « ISoual » ; « Convention »,
+#      « SUBVENTION » ne sont pas des débris), au plus un de quatre lettres ou plus
+#      (« Compte rendu DEPARTEMENT : GARD » : deux vrais mots), ni deux-points, ni numérotation de
+#      tête (« 1) », « Objet : »), ni mot-outil ou d'objet (« AIDE DU DEPARTEMENT : 
+#      VOIRIE ») ;
+#   4. APRÈS, un nom court et au plus un numéro d'acte : un à trois mots (les
+#      particules « de », « du », « et »… ne comptent pas : « ALPES DE HAUTE
+#      PROVENCE »), chacun fait de pièces d'au plus quatorze lettres jointes par
+#      des traits d'union (« SAINT-JEAN-DE-MAURIENNE »), sans chiffre, sans mot
+#      de quatre lettres ou plus en minuscules, quarante caractères au plus, aucun mot d'objet (SUBVENTION, CONVENTION, PLAN, DM…),
+#      et le numéro (« N°43/2021 », « Na°64/2021 », « IN°107/2021 », « N°%61/2021 »,
+#      « N°2023-132 ») s'il y est ferme le titre ;
+#   5. un tampon lu sur UNE ligne porte son second bloc : « DEPARTEMENT : GARD
+#      ARRONDISSEMENT : LE VIGAN » compte, chaque bloc suivant les mêmes règles.
+# La liste des mots d'objet est une garde, pas un inventaire : elle ne sait pas
+# tout. Le résidu connu : un titre en capitales « DEPARTEMENT : <un à trois mots
+# courts> » dont aucun mot n'est dans la liste serait écarté même si c'était un
+# objet. Aucun n'est servi (mesure du 17/11/2026, trois sites).
+_ENTETE_DE_TAMPON = re.compile(
+    r"(?<![A-Za-z])(?:DEPARTEM[A-Za-z:]{0,4}|ARRONDISS[A-Za-z:]{0,6})(?![A-Za-z])\s?:?")
+# Avec année (« N°43/2021 », « N°2023-132 ») ou, sans année, avec un chiffre
+# (« N°43 », lu « N43 » : `_sans_accent` efface le « ° »). Sans année ni chiffre,
+# « NIMES » serait pris pour un numéro.
+_NUMERO_D_ACTE = re.compile(
+    r"\b[IN]{1,2}[a-z]?\W{0,2}[%\w]{1,5}\s?[/-]\s?\d{2,4}$|\b[IN]{1,2}[a-z]?[o%*]?\s?\d[%\w]{0,4}$")
+_PIECE_DE_NOM = re.compile(r"^[A-Za-z']{1,14}$")
+_PARTICULES_DE_NOM = {"DE", "DU", "DES", "D", "ET", "LA", "LE", "LES", "EN", "SUR", "SOUS", "AU", "AUX", "L"}
+_MOTS_D_OBJET = {
+    "SUBVENTION", "SUBVENTIONS", "CONVENTION", "CONVENTIONS", "ADHESION", "PLAN", "DM", "BP", "CA",
+    "BUDGET", "DEMANDE", "AIDE", "AIDES", "PARTICIPATION", "TRAVAUX", "VOIRIE", "ECLAIRAGE", "AMENDES",
+    "POLICE", "TRANSPORT", "FONDS", "MOTION", "REDECOUPAGE", "AVENANT", "MARCHE", "TARIF", "TARIFS",
+    "OBJET", "PROJET", "SCHEMA", "CONSEIL", "DECISION", "MODIFICATION", "DELIBERATION", "DIVERSES"}
+_MOTS_DE_PREFIXE = (_PARTICULES_DE_NOM - {"L", "D"}) | _MOTS_D_OBJET
+
+
+def _sans_accent(texte: str) -> str:
+    return unicodedata.normalize("NFKD", texte).encode("ascii", "ignore").decode()
+
+
+def _bloc_de_tampon(texte: str, debris_avant: bool) -> bool:
+    """`texte` commence-t-il (à des débris près, si `debris_avant`) par un bloc
+    « mot-clé : nom [numéro] » complet, suivi d'autres blocs de même forme ?"""
+    # Le premier mot-clé à deux-points : un second ne peut pas être celui du tampon
+    # (le premier ferait plus de six lettres de « débris »), et boucler sur chacun
+    # rendrait le garde quadratique sur un titre fait de mots-clés répétés.
+    m = next((m for m in _ENTETE_DE_TAMPON.finditer(texte) if ":" in m.group(0)), None)
+    if m is None:
+        return False
+    avant, apres = texte[:m.start()], texte[m.end():]
+    if debris_avant:
+        lettres = _MOT_DE_LETTRES.findall(avant)
+        if (len(avant) > 24 or ":" in avant or any(len(x) > 6 for x in lettres)
+                or sum(len(x) >= 4 for x in lettres) > 1
+                or NUMEROTATION_DE_TETE.match(avant)
+                or any(x.upper() in _MOTS_DE_PREFIXE for x in lettres)):
+            return False
+    elif avant.strip(" \t:;,.|-"):
+        return False
+    suite = _ENTETE_DE_TAMPON.search(apres)
+    nom, reste = (apres[:suite.start()], apres[suite.start():]) if suite else (apres, "")
+    # La ponctuation finale d'abord (« N°43/2021. »), le numéro ensuite.
+    nom = _NUMERO_D_ACTE.sub("", nom.strip(" \t:;,.|-")).strip(" \t:;,.|-")
+    mots = [x for x in nom.split() if x.upper() not in _PARTICULES_DE_NOM]
+    if (not mots or len(nom) > 40 or len(mots) > 3
+            or any(not all(_PIECE_DE_NOM.match(piece) and not (len(piece) >= 4 and piece.islower())
+                           for piece in x.split("-")) for x in mots)
+            or any(piece.upper() in _MOTS_D_OBJET for x in mots for piece in x.split("-"))):
+        return False
+    return not reste or _bloc_de_tampon(reste, False)
+
+
+def titre_en_entete_de_tampon(titre: str | None) -> bool:
+    """Le titre est-il l'en-tête de tampon de la préfecture, lu sur un extrait ?"""
+    t = " ".join(_sans_accent(titre or "").split())
+    # Deux blocs de tampon, débris et numéros compris, tiennent en moins de 160 signes.
+    return len(t) <= 160 and _bloc_de_tampon(t, True)
+
+
+# QUESTIONS DIVERSES — le dernier point d'un ordre du jour, sans vote ni objet :
+# publié comme une délibération, il en a l'air (Lasalle, séance communautaire du
+# 04/03/2026). Seul le titre ÉGAL à « Questions diverses » tombe, à la casse, aux
+# accents, à la ponctuation et à une numérotation de tête près (« 7) QUESTIONS
+# DIVERSES », « 9 - Questions diverses », « IX - Questions diverses », « Point 7 :
+# Questions diverses »), avec les trois variantes que la liste de l'actualité
+# (`TITRES_VIDES`, scripts/snapshot/textes.py) tient pour vides : « Informations et
+# questions diverses », « Questions et informations diverses », « Question
+# diverse ». « Questions diverses : vente du tracteur » garde un objet et reste.
+_NUMERO_DE_TETE_LARGE = re.compile(
+    r"^\s*(?:point\s+)?(?:\d{1,3}|[ivxlc]{1,5})\s*[.\-–—:]\s*|^\s*point\s+\d{1,3}\s*[.\-–—:]?\s*")
+_QUESTIONS_DIVERSES = {"questions diverses", "question diverse", "informations et questions diverses",
+                       "questions et informations diverses"}
+
+
+def titre_questions_diverses(titre: str | None) -> bool:
+    """Le titre est-il le seul point « Questions diverses » ?"""
+    t = _sans_accent(titre or "").lower()
+    t = NUMEROTATION_DE_TETE.sub("", t)
+    t = _NUMERO_DE_TETE_LARGE.sub("", t)
+    return " ".join(re.findall(r"[a-z0-9]+", t)) in _QUESTIONS_DIVERSES
+
+
 def _titre_plausible(titre: str) -> bool:
     """Un titre de délibération qui porte un montant doit aussi porter des mots.
 
@@ -153,6 +503,10 @@ def _titre_plausible(titre: str) -> bool:
     """
     titre = titre or ""
     if _APPEL_NOMINAL.match(titre):
+        return False
+    # Un morceau de phrase, ou la rubrique des décisions prises par délégation
+    # (15/11/2026) : ni l'un ni l'autre n'est l'objet d'une délibération.
+    if titre_en_fragment(titre) or rubrique_de_decisions(titre):
         return False
     mots = _MOT_PORTEUR.findall(titre)
     if mots and all(m.upper() in _MOTS_DE_COLONNE for m in mots):
@@ -428,7 +782,35 @@ def _suite_croissante(valeurs: list[int]) -> list[int]:
     while i >= 0:
         chemin.append(i)
         i = precedent[i]
-    return chemin[::-1]
+    chemin.reverse()
+    # Un rang abîmé plus petit que tous ceux qui le suivent (ou plus grand que
+    # tous ceux qui le précèdent) tient dans la suite : il en prend la TÊTE (ou
+    # la queue). CC du 29/10/2025, recueil océrisé : « D141_2025 » lu
+    # « Di41_2025 » page 44, devant 120…135 ; l'acte « 41 » avalait les pages
+    # 44 à 251, prenait l'objet du 141 et se publiait en double. Au bord, un
+    # saut que le reste de la suite ne connaît pas est un rang mal lu.
+    while len(chemin) > 2 and _saut_isole(valeurs[chemin[1]] - valeurs[chemin[0]],
+                                          [valeurs[k] for k in chemin[1:]]):
+        chemin.pop(0)
+    while len(chemin) > 2 and _saut_isole(valeurs[chemin[-1]] - valeurs[chemin[-2]],
+                                          [valeurs[k] for k in chemin[:-1]]):
+        chemin.pop()
+    return chemin
+
+
+# Mesuré le 02/11/2026 sur les 47 liasses océrisées des trois instances : au
+# bord de la suite, l'écart légitime le plus grand est 3, au milieu 7. Les deux
+# conditions sont exigées : un saut absolu (SAUT_ISOLE), et dix fois le plus
+# grand écart du reste — une suite qui garde son millésime collé (Saillans,
+# 07/04/2022 : 370422, 470422…) a des écarts de 100 000 partout, et rien n'y
+# est un saut isolé.
+SAUT_ISOLE = 20
+SAUT_RELATIF = 10
+
+
+def _saut_isole(saut: int, reste: list[int]) -> bool:
+    interieur = max((b - a for a, b in zip(reste, reste[1:])), default=1)
+    return saut > SAUT_ISOLE and saut > SAUT_RELATIF * max(interieur, 1)
 
 
 def _ligne_dobjet(ligne: str) -> str | None:
@@ -691,6 +1073,22 @@ def _titre_dacte(corps: str, rang: int, amont: str = "",
     return f"Délibération n° {rang}", "repli_numerote"
 
 
+def _titrer(corps: str, rang: int, annee: str, texte: str, debut: int,
+            capitales: bool) -> tuple[str, str]:
+    """Le titre d'un acte de liasse et son origine, quel que soit le découpage."""
+    # Tout l'amont, et non le bloc précédent : le PREMIER acte d'une liasse
+    # a lui aussi son bandeau au-dessus de son cachet, et aucun bloc avant
+    # lui pour le porter.
+    titre, origine = _titre_dacte(corps, rang, texte[:debut], capitales)
+    if origine == "repli_numerote":
+        objet = _objet_par_numero(texte, rang, annee)
+        if objet:
+            titre, origine = objet, "objet_registre"
+        elif (decision := _titre_de_la_decision(corps, rang)):
+            titre, origine = decision, "clause_decisive"
+    return titre, origine
+
+
 def _actes_teletransmis(texte: str, pagine: bool = True) -> list[dict]:
     marques = list(_REFERENCE_TOLERANTE.finditer(texte))
     if len(marques) < 3:
@@ -736,18 +1134,8 @@ def _actes_teletransmis(texte: str, pagine: bool = True) -> list[dict]:
         corps = texte[debut:fin].strip()
         if not corps:
             continue
-        # Tout l'amont, et non le bloc précédent : le PREMIER acte d'une liasse
-        # a lui aussi son bandeau au-dessus de son cachet, et aucun bloc avant
-        # lui pour le porter.
-        titre, origine = _titre_dacte(
-            corps, lisible if lisible is not None else rang, texte[:debut], capitales)
-        if origine == "repli_numerote":
-            objet = _objet_par_numero(texte, lisible if lisible is not None else rang,
-                                      marque.group(3)[:4])
-            if objet:
-                titre, origine = objet, "objet_registre"
-            elif (decision := _titre_de_la_decision(corps, lisible if lisible is not None else rang)):
-                titre, origine = decision, "clause_decisive"
+        titre, origine = _titrer(corps, lisible if lisible is not None else rang,
+                                 marque.group(3)[:4], texte, debut, capitales)
         sorties.append(_enrichir({
             "regime": "actes_teletransmis",
             "numero_seance": None,
@@ -759,21 +1147,192 @@ def _actes_teletransmis(texte: str, pagine: bool = True) -> list[dict]:
     return sorties
 
 
-def deliberations(texte: str, pagine: bool = True) -> list[dict]:
+# ── Découpage À LA PAGE d'une liasse (lot 2, chantier « lire les montants ») ──
+#
+# `_actes_teletransmis` coupe sur la LIGNE du premier cachet d'un nouveau
+# numéro. Mesuré par l'audit du 23/10/2026 sur les recueils de l'intercommunalité
+# (2022-2026) : 13 actes sur 213 fusionnés ou décalés — l'orientation de 2024 et
+# celle de 2025 dans l'acte voisin, un tableau de subventions coupé en deux. Un
+# acte télétransmis commence pourtant toujours sur une page NEUVE : quand le
+# texte garde ses débuts de page (le manifeste `x.ocr.json`, depuis le 24/10),
+# la coupure se fait au début de la page, plus au milieu.
+#
+# Deux règles, et pas une de plus :
+#   - une page reçoit le numéro le plus fréquent de ses cachets ; une page SANS
+#     cachet lisible continue l'acte en cours ;
+#   - quand la page du premier cachet d'un acte n'en porte pas l'OUVERTURE
+#     (« L'an deux mille… », « Objet : », « Extrait du registre »), la page sans
+#     cachet la plus proche en amont qui la porte est la première page de cet
+#     acte : l'océrisation a perdu le cachet de la page de tête. Saillans,
+#     30/06/2022 : l'acte 10 s'ouvre page 17, cachet illisible ; la coupure au
+#     cachet donnait sa première page, et son objet, à l'acte 9.
+#
+# Le contrôle de la suite des numéros est rendu avec le découpage : un numéro
+# manquant entre le premier et le dernier, un cachet hors de la suite, une
+# ouverture déplacée se COMPTENT. Rien ici n'est encore branché sur la collecte :
+# `scripts/mesurer_decoupage_pages.py` le compare au découpage actuel d'abord.
+_OUVERTURE_DACTE = re.compile(
+    r"L['’]an\s+deux\s+mille|^[^\n]{0,12}?Ob[jil1í]et\s*[:;]|EXTRAIT\s+du\s+registre",
+    re.I | re.M)
+# La formule d'ouverture se trouve en tête d'acte ; plus bas, c'est une citation.
+ZONE_DOUVERTURE = 2500
+
+
+# Ce qui vaut le mieux, d'abord : écrit par la collectivité, puis lu, puis avoué.
+_RANG_DORIGINE = {o: i for i, o in enumerate(
+    ("objet_declare", "objet_registre", "clause_decisive", "ligne_capitale", "repli_numerote"))}
+
+
+def actes_par_page(pages: list[str]) -> dict:
+    """Découpe une liasse page par page, et contrôle la suite de ses numéros.
+
+    Rend `{"actes": [...], "controle": {...}}`. Chaque acte a la forme de ceux
+    de `_actes_teletransmis`, plus `pages` : [première, dernière], comptées à
+    partir de 1. `actes` est vide quand le document n'est pas une liasse (moins
+    de trois actes numérotés à la suite) — la même porte que le régime actuel.
+    """
+    vide = {"actes": [], "controle": {}}
+    marques = [list(_REFERENCE_TOLERANTE.finditer(p)) for p in pages]
+    numeros = [m.group(4) for ms in marques for m in ms]
+    if len(numeros) < 3:
+        return vide
+    suffixe = _suffixe_de_seance(numeros)
+    prefixe = _prefixe_de_seance(numeros) if not suffixe else ""
+
+    from collections import Counter
+    lus: list[tuple | None] = []          # par page : (rang, lisible, marque) ou None
+    for ms in marques:
+        rangs = Counter(r for m in ms
+                        if (r := _rang_dans_la_seance(m.group(4), suffixe)) is not None)
+        if not rangs:
+            lus.append(None)
+            continue
+        rang = rangs.most_common(1)[0][0]
+        marque = next(m for m in ms if _rang_dans_la_seance(m.group(4), suffixe) == rang)
+        lus.append((rang, _rang_dans_la_seance(marque.group(4), suffixe, prefixe), marque))
+
+    blocs: list[tuple] = []               # (première page, rang, lisible, marque)
+    for i, lu in enumerate(lus):
+        if lu is not None and (not blocs or blocs[-1][1] != lu[0]):
+            blocs.append((i, *lu))
+    gardes = _suite_croissante([b[1] for b in blocs])
+    if len(gardes) < 3:
+        return vide
+
+    debuts: list[int] = []
+    deplacees = []
+    for indice in gardes:
+        page, rang = blocs[indice][0], blocs[indice][1]
+        borne = debuts[-1] + 1 if debuts else 0
+        # La page du premier cachet qui porte elle-même l'ouverture EST la
+        # première page. Sinon, l'ouverture la plus proche en amont, parmi les
+        # pages sans cachet : une plus lointaine ouvre un autre acte, dont le
+        # cachet est perdu — Saillans, 07/04/2022 : en prenant la plus lointaine,
+        # l'acte 3 avalait l'acte 2 et son tableau des subventions.
+        if not _OUVERTURE_DACTE.search(pages[page][:ZONE_DOUVERTURE]):
+            j = page
+            while j - 1 >= borne and lus[j - 1] is None:
+                j -= 1
+                if _OUVERTURE_DACTE.search(pages[j][:ZONE_DOUVERTURE]):
+                    deplacees.append({"numero": rang, "de": page + 1, "a": j + 1})
+                    page = j
+                    break
+        debuts.append(page)
+
+    texte = "\n".join(pages)
+    positions = [sum(len(p) + 1 for p in pages[:i]) for i in range(len(pages))]
+    capitales = len(_OBJET.findall(texte)) < OBJETS_DECLARES_MINIMUM
+    actes = []
+    for k, indice in enumerate(gardes):
+        _, rang, lisible, marque = blocs[indice]
+        premiere = debuts[k]
+        derniere = debuts[k + 1] - 1 if k + 1 < len(debuts) else len(pages) - 1
+        bloc = "\n".join(pages[premiere:derniere + 1])
+        corps = bloc.strip()
+        if not corps:
+            continue
+        # Deux lectures du titre quand la page d'ouverture porte le cachet : depuis
+        # le haut de la page, et depuis le cachet, comme le régime l'a toujours
+        # fait. La meilleure origine l'emporte. Le bandeau de tête peut être mal
+        # relu — Lasalle, 09/02/2022 : « N°2/2022 » pour l'acte 9, et la garde
+        # d'appartenance refusait son objet lu depuis le haut ; un objet écrit
+        # AU-DESSUS du cachet, lui, ne se lit que depuis le haut.
+        lectures = [(0, corps)]
+        if premiere == blocs[indice][0]:
+            depart = pages[premiere].rfind("\n", 0, marque.start()) + 1
+            if depart:
+                lectures.append((depart, bloc[depart:].strip()))
+        titres = [_titrer(c, lisible if lisible is not None else rang, marque.group(3)[:4],
+                          texte, positions[premiere] + d, capitales) for d, c in lectures]
+        titre, origine = min(titres, key=lambda t: _RANG_DORIGINE.get(t[1], len(_RANG_DORIGINE)))
+        actes.append(_enrichir({
+            "regime": "actes_teletransmis",
+            "numero_seance": None,
+            "numero_acte": str(rang),
+            "titre": titre,
+            "titre_origine": origine,
+            "texte": corps,
+            "pages": [premiere + 1, derniere + 1],
+        }))
+
+    # La suite se contrôle sur le rang POUR L'ŒIL : l'identité garde le
+    # millésime collé (« 260602 »), et entre 260602 et 260615 il ne manque
+    # pas 260 000 actes. Un rang encore invraisemblable rend la suite illisible.
+    rangs = [blocs[i][2] if blocs[i][2] is not None else blocs[i][1] for i in gardes]
+    lisible = max(rangs) <= RANG_MAX_PLAUSIBLE
+    retenus = set(gardes)
+    hors_suite = [{"cachet": b[3].group(4).strip(), "page": b[0] + 1}
+                  for i, b in enumerate(blocs) if i not in retenus]
+    return {"actes": actes, "controle": {
+        "premier": min(rangs), "dernier": max(rangs), "suite_lisible": lisible,
+        "manquants": sorted(set(range(min(rangs), max(rangs) + 1)) - set(rangs)) if lisible else [],
+        "hors_suite": hors_suite,
+        "pages_sans_cachet": sum(1 for lu in lus if lu is None),
+        "ouvertures_deplacees": deplacees,
+    }}
+
+
+def deliberations_a_la_page(texte: str, pages: list[str] | None,
+                            ecarts: Counter | None = None) -> tuple[list[dict], dict]:
+    """Le découpage à la page quand le texte garde ses pages, et son contrôle.
+
+    Rend `([], {})` quand les pages manquent, ne recomposent pas le texte, ou que
+    le document n'est pas une liasse : l'appelant passe alors à `deliberations`.
+    Branché le 25/10/2026 après mesure sur les 38 liasses de Lasalle (868 actes,
+    mêmes numéros ; 57 premières pages rendues à leur acte, 34 objets retrouvés).
+    """
+    if not pages or "\n".join(pages) != texte:
+        return [], {}
+    decoupe = actes_par_page(pages)
+    if not decoupe["actes"]:
+        return [], {}
+    return _recoller(decoupe["actes"], ecarts), decoupe["controle"]
+
+
+def deliberations(texte: str, pagine: bool = True,
+                  ecarts: Counter | None = None) -> list[dict]:
     """Découpe un procès-verbal, ou rend [] si aucun régime ne s'applique.
 
     `pagine` dit si le document a des pages — un PDF en a, une page web n'en a
     pas. Deux régimes s'en servent pour ne pas confondre l'en-tête d'une page
     avec la ligne de colonnes d'un tableau ; cf. `_sans_entetes`.
+
+    `ecarts`, s'il est donné, compte ce que le découpage a écarté et pourquoi :
+    la fiche de séance le garde, pour que rien ne disparaisse sans motif.
     """
     for analyseur in (_actes_teletransmis, _numerote, _acte_final, _puces,
                       _liste, _capitales):
         sorties = analyseur(texte, pagine)
         if sorties:
+            if analyseur is _numerote and ecarts is not None:
+                renvois = sum(1 for m in ENTETE_NUMEROTE.finditer(texte)
+                              if _est_un_renvoi(texte, m))
+                if renvois:
+                    ecarts["numero_en_renvoi_ignore"] += renvois
             # Filtré ICI et non dans chaque régime : la règle vaut pour tous, et
             # les faux actes venaient aussi bien des PV de la commune que de ceux
             # de l'intercommunalité.
-            return _recoller(sorties)
+            return _recoller(sorties, ecarts)
     return []
 
 
@@ -798,7 +1357,7 @@ def acte_unique(titre: str, texte: str, numero_acte: str = "",
     })
 
 
-def _recoller(sorties: list[dict]) -> list[dict]:
+def _recoller(sorties: list[dict], ecarts: Counter | None = None) -> list[dict]:
     """Écarte les faux titres et REND LEUR TEXTE à l'acte qu'ils coupaient.
 
     Un titre invraisemblable ne signale pas seulement un acte de trop : il
@@ -809,13 +1368,35 @@ def _recoller(sorties: list[dict]) -> list[dict]:
     budgets votés ce soir-là. Refuser le titre sans recoller le texte revenait à
     supprimer les huit budgets au lieu de les rattacher à « BUDGET PRINCIPAL ».
     """
+    ecarts = Counter() if ecarts is None else ecarts
     gardees: list[dict] = []
+    dans_rubrique = False
     for d in sorties:
+        # La rubrique des décisions par délégation part ENTIÈRE : recollé à
+        # l'acte d'avant, son texte serait publié comme extrait d'une
+        # délibération qui n'en dit rien — et il nomme parfois l'agent ou le
+        # particulier concerné (avis DPO du 14/11/2026). ENTIÈRE : les blocs qui
+        # la suivent sans titre plausible (« de louer le logement… à M. … »)
+        # sont encore elle, jusqu'au prochain objet (relecture vigie-securite
+        # du 15/11/2026, qui les a vus recollés à l'acte d'AVANT la rubrique).
+        if rubrique_de_decisions(d.get("titre")):
+            dans_rubrique = True
+            ecarts["rubrique_des_decisions"] += 1
+            continue
+        if dans_rubrique and _DECISION_NUMEROTEE.match(d.get("titre") or ""):
+            ecarts["suite_de_rubrique"] += 1
+            continue
         if _titre_plausible(d.get("titre", "")):
+            dans_rubrique = False
             gardees.append(d)
             continue
-        if not gardees:
+        if dans_rubrique:
+            ecarts["suite_de_rubrique"] += 1
             continue
+        if not gardees:
+            ecarts["titre_refuse_sans_acte_avant"] += 1
+            continue
+        ecarts["titre_refuse_recolle"] += 1
         recolle = "\n".join(x for x in (d.get("titre"), d.get("texte")) if x)
         gardees[-1]["texte"] = f"{gardees[-1]['texte']}\n{recolle}".strip()
         _enrichir(gardees[-1])
@@ -829,8 +1410,21 @@ def _enrichir(d: dict) -> dict:
     return d
 
 
+# La fin de ligne d'un visa qui CITE un acte : « Vu la délibération … N° ⏎
+# 54/2025 en date du… ». Le numéro qui ouvre la ligne suivante est un renvoi,
+# pas l'en-tête d'un acte de la séance (conseil communautaire du 04/03/2026 de
+# Lasalle : cinq « délibérations » intitulées « en date du 2/4/2025 et de la
+# commune de… »).
+_RENVOI_EN_FIN_DE_LIGNE = re.compile(
+    r"(?:\bn[°ºo]\.?|\bnum[ée]ros?|\bd[ée]lib[ée]rations?|\bl['’]acte)[ \t]*\n[ \t]*$", re.I)
+
+
+def _est_un_renvoi(texte: str, m: re.Match) -> bool:
+    return bool(_RENVOI_EN_FIN_DE_LIGNE.search(texte, max(0, m.start() - 80), m.start()))
+
+
 def _numerote(texte: str, pagine: bool = True) -> list[dict]:
-    marques = list(ENTETE_NUMEROTE.finditer(texte))
+    marques = [m for m in ENTETE_NUMEROTE.finditer(texte) if not _est_un_renvoi(texte, m)]
     sorties = []
     for i, m in enumerate(marques):
         fin = marques[i + 1].start() if i + 1 < len(marques) else len(texte)
@@ -850,6 +1444,22 @@ def _numerote(texte: str, pagine: bool = True) -> list[dict]:
             "texte": corps,
         }))
     return sorties
+
+
+# Une ligne de vote ou qui nomme quelqu'un n'appartient jamais à l'objet d'un
+# acte : « Abstention : NOM Prénom », « Indemnité versée à Mme … ». Remonter sur
+# elle mettait un nom dans le titre (relecture vigie-securite du 15/11/2026).
+_LIGNE_DE_VOTE_OU_DE_PERSONNE = re.compile(
+    r"\b(?:M\.|MM\.|Mmes?\b|Mlle\b|Monsieur|Madame|Mademoiselle|pour\s*:|contre\s*:"
+    r"|abstentions?\b|unanimit|adopt[ée]e?s?\b|votants?\b|exprim[ée]s\b|suffrages?\b"
+    r"|pr[ée]sents?\s*:|absents?\b|pouvoirs?\s*:|procurations?\b"
+    r"|secr[ée]taire\s+de\s+s[ée]ance|\bmembres\s*:)", re.I)
+
+# Une ligne qui s'arrête sur un mot qui en appelle un autre : la phrase continue
+# à la ligne suivante.
+_FIN_SUSPENDUE = re.compile(
+    r"(?:\b(?:de|du|des|d['’]|la|le|les|l['’]|et|ou|à|au|aux|en|pour|par|sur|avec|dans"
+    r"|entre|vers)|[–—\-,])$", re.I)
 
 
 def _acte_final(texte: str, pagine: bool = True) -> list[dict]:
@@ -875,18 +1485,48 @@ def _acte_final(texte: str, pagine: bool = True) -> list[dict]:
         for _ in range(3):
             if not lignes:
                 break
-            debute_mal = bool(re.match(r"[a-z0-9«»(,]", titre_lignes[0] or "x"))
-            if LIGNE_CAPITALES.match(lignes[-1].strip()) or debute_mal:
+            # 🔴 Un objet écrit sur deux lignes ne gardait que la seconde quand
+            # elle commençait par une capitale ou une minuscule accentuée :
+            # « à temps complet », « ET PLATEAUX 2025 », « Val d'Agout »,
+            # « SOLUTIONS » (relevés de décisions de la CC de Brassac, servis
+            # au 15/11/2026). La ligne d'au-dessus appartient au titre quand
+            # elle ne clôt pas une phrase et que la suite ne se tient pas seule.
+            premiere, dessus = titre_lignes[0] or "x", lignes[-1].strip()
+            debute_mal = (bool(re.match(r"[a-z0-9«»(,]", premiere))
+                          or titre_en_fragment(premiere))
+            # Jamais au-dessus d'un montant : « Entreprise SEIHE, pour un
+            # montant de 116 084,64 €HT » finit l'acte d'avant, pas le titre.
+            # Pas de remontée sur un titre « court » : la ligne d'au-dessus
+            # pouvait être un nom sans civilité (« Bail consenti à Albert
+            # Fictif »), qui entrait dans le titre (relecture vigie-securite).
+            suspendue = (bool(dessus) and not re.search(r"[.;:!?]$", dessus)
+                         and not _MONTANT_TITRE.search(dessus)
+                         and bool(_FIN_SUSPENDUE.search(dessus)))
+            if _LIGNE_DE_VOTE_OU_DE_PERSONNE.search(dessus):
+                break
+            if LIGNE_CAPITALES.match(dessus) or debute_mal or suspendue:
                 titre_lignes.insert(0, lignes.pop().strip())
             else:
                 break
+        # Remonter peut entrer dans la phrase d'avant (« de prendre en compte
+        # les surcoûts liés au marché « Alimentation… »), ou dans un tableau
+        # (« TOTAL RECETTES … ADOPTE A L'UNANIMITE »). Ces lignes rendues à
+        # l'acte d'avant, il reste l'objet ; s'il ne reste qu'un fragment, le
+        # repli numéroté l'avoue. L'identifiant prouve l'acte : on ne le perd
+        # pas pour un titre.
+        origine = None
+        while titre_lignes and titre_en_fragment(" ".join(titre_lignes)):
+            lignes.append(titre_lignes.pop(0))
+        if not titre_lignes:
+            origine = "repli_numerote"
         if precedent is not None:
             precedent["texte"] = "\n".join(lignes).strip()
         titre = re.sub(r"\s+", " ", " ".join(titre_lignes)).strip(" :;.-")
         precedent = {"regime": "acte_final", "numero_seance": None,
                      "numero_acte": m.group(1),
                      "titre": (titre or f"Délibération {m.group(1)}")[:255],
-                     "texte": ""}
+                     "texte": "",
+                     **({"titre_origine": origine} if origine else {})}
         sorties.append(precedent)
         curseur = m.end()
     if precedent is not None:
@@ -1155,6 +1795,66 @@ def _liste(texte: str, pagine: bool = True) -> list[dict]:
     return sorties
 
 
+#: Au-delà, des lignes capitales qui se suivent sont un en-tête de TABLEAU, pas
+#: un titre sur plusieurs lignes : les rejoindre en ferait un titre de plus.
+LIGNES_DE_TITRE_MAX = 3
+
+
+def _titres_rejoints(lignes: list[str]) -> list[str]:
+    """Un titre en capitales écrit sur deux ou trois lignes redevient une ligne.
+
+    Le découpeur ouvre un bloc à chaque ligne capitale et abandonne celui qui
+    n'a pas encore de corps : d'un objet sur deux lignes, il ne restait que la
+    seconde. « RENOUVELLEMENT CONVENTION DE DELEGATION PARTIELLE DE ⏎ LA
+    COMPETENCE EXTRASCOLAIRE A UNE COMMUNE » s'appelait « LA COMPETENCE
+    EXTRASCOLAIRE A UNE COMMUNE » (Lasalle, 16/12/2025). Une suite de plus de
+    `LIGNES_DE_TITRE_MAX` lignes reste telle quelle : c'est un tableau, et sa
+    dernière ligne est refusée plus loin.
+
+    Dans une suite courte, ne se rejoignent que deux lignes qui se SUIVENT :
+    celle du dessus s'arrête sur un mot qui appelle la suite, ou celle du
+    dessous commence au milieu d'une phrase sous une ligne sans virgule. Sinon la ligne capitale d'un corps
+    — « VOTE : UNANIMITE SAUF NOM » — se collait devant l'objet suivant
+    (relecture vigie-securite du 15/11/2026). Une ligne de vote ou qui nomme
+    quelqu'un ne se rejoint jamais. Limite connue : « ADHESION A LA CONVENTION
+    « PREVOYANCE » ⏎ PROPOSEE PAR LE CENTRE DE GESTION » reste coupée.
+    """
+    def se_suivent(dessus: str, dessous: str) -> bool:
+        dessus, dessous = (x.replace("\xa0", " ").strip() for x in (dessus, dessous))
+        if (_LIGNE_DE_VOTE_OU_DE_PERSONNE.search(dessus)
+                or _LIGNE_DE_VOTE_OU_DE_PERSONNE.search(dessous)):
+            return False
+        # Ou la ligne du dessous commence au milieu d'une phrase (« ET MEUBLES
+        # DE TOURISME ») : refusée seule, elle emporterait l'acte entier dans
+        # le texte du précédent. Pas sous une ligne à virgules : une liste de
+        # noms en a, un objet rarement.
+        return bool(_FIN_SUSPENDUE.search(dessus)
+                    or (titre_en_fragment(dessous) and "," not in dessus))
+
+    def rendre(suite: list[str]) -> list[str]:
+        if not 1 < len(suite) <= LIGNES_DE_TITRE_MAX:
+            return list(suite)
+        rendues = [suite[0].strip()]
+        for precedente, ligne in zip(suite, suite[1:]):
+            if se_suivent(precedente, ligne) and len(rendues[-1]) + len(ligne) < 250:
+                rendues[-1] = f"{rendues[-1]} {ligne.strip()}"
+            else:
+                rendues.append(ligne.strip())
+        return rendues
+
+    sortie: list[str] = []
+    suite: list[str] = []
+    for ligne in lignes:
+        if is_section_header(ligne.replace("\xa0", " ").strip()):
+            suite.append(ligne)
+            continue
+        sortie.extend(rendre(suite))
+        suite = []
+        sortie.append(ligne)
+    sortie.extend(rendre(suite))
+    return sortie
+
+
 def _capitales(texte: str, pagine: bool = True) -> list[dict]:
     """Dernier recours : les titres sont en capitales, le corps ne l'est pas.
 
@@ -1164,7 +1864,8 @@ def _capitales(texte: str, pagine: bool = True) -> list[dict]:
     pour cette raison.
     """
     propre = _apres_entete(_sans_entetes(texte, pagine))
-    blocs = split_into_deliberations([l for l in propre.splitlines() if l.strip()])
+    blocs = split_into_deliberations(_titres_rejoints(
+        [l for l in propre.splitlines() if l.strip()]))
     sorties = []
     for bloc in blocs:
         titre = re.sub(r"\s+", " ", bloc["titre"]).strip(" :;.-")

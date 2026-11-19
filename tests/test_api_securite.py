@@ -25,6 +25,24 @@ DOCS = "https://docs.atelier.exemple.fr"
 #: Routes hors de `/api/`, chacune avec son propre verrou et sa classe de tests.
 HORS_DU_VERROU = {"/d/{doc_id}": "lien signé — TestDocumentsSurUnAutreHote"}
 
+#: Routes de `/api/` (hors `/api/auth/`) sans garde de route, chacune avec sa
+#: raison. Vide : aucune ne tient sa protection du seul verrou global.
+SANS_GARDE: dict[str, str] = {}
+
+#: Les dépendances qui jugent un appelant. `optional_user` n'en est pas une :
+#: il rend None sans refuser.
+GARDES = {
+    ("api_auth", "require_auth"),
+    ("api_auth", "require_role.<locals>._dep"),
+    ("api_auth", "require_au_moins.<locals>._dep"),
+    ("api", "require_compte_ou_cle.<locals>._dep"),
+}
+
+
+def _gardee(dependant) -> bool:
+    return any((getattr(d.call, "__module__", None), getattr(d.call, "__qualname__", None)) in GARDES
+               or _gardee(d) for d in dependant.dependencies)
+
 
 @pytest.fixture
 def atelier(tmp_path, monkeypatch, schema_sql):
@@ -83,6 +101,37 @@ class TestSansJeton:
                     ouvertes.append(f"{methode} {route.path}")
         assert ouvertes == []
 
+    def test_chaque_route_de_l_api_porte_sa_propre_garde(self, atelier):
+        """Le verrou global ne connaît pas les rôles : un contributeur le passe.
+        Chaque route déclare donc qui peut l'appeler (brief du 14/11/2026 ; 28
+        routes n'avaient que le verrou, ou un contrôle dans leur corps)."""
+        sans = sorted(f"{'/'.join(sorted(r.methods))} {r.path}" for r in atelier["app"].routes
+                      if isinstance(r, APIRoute) and r.path.startswith("/api/")
+                      and not r.path.startswith("/api/auth/")
+                      and r.path not in SANS_GARDE and not _gardee(r.dependant))
+        assert sans == []
+        # Hors `APIRoute` (route Starlette, websocket, montage), la garde ne
+        # se lit pas : rien de tel ne doit vivre sous /api/.
+        assert [r.path for r in atelier["app"].routes if not isinstance(r, APIRoute)
+                and getattr(r, "path", "").startswith("/api/")] == []
+
+    def test_optional_user_seul_n_est_pas_une_garde(self):
+        import api
+        from fastapi import Depends, FastAPI
+        essai = FastAPI()
+
+        @essai.get("/api/ouverte")
+        def ouverte(user=Depends(api.optional_user)):
+            return user
+
+        @essai.get("/api/fermee")
+        def fermee(user=Depends(api.require_auth)):
+            return user
+
+        routes = {r.path: r for r in essai.routes if isinstance(r, APIRoute)}
+        assert not _gardee(routes["/api/ouverte"].dependant)
+        assert _gardee(routes["/api/fermee"].dependant)
+
     def test_la_documentation_de_l_api_est_eteinte(self, atelier):
         for chemin in ("/docs", "/redoc", "/openapi.json"):
             assert atelier["client"].get(chemin).status_code == 404, chemin
@@ -112,6 +161,36 @@ class TestDerriereUnMurHttp:
 
 
 class TestContenuCollecte:
+    def _page_scrapee(self, atelier):
+        import json
+        atelier["sql"](
+            "INSERT INTO events(type, title, content, source, metadata) "
+            "VALUES('scrape', 'Boulangerie du Four', 'Pain et viennoiseries', "
+            "'web_scraper', ?)",
+            (json.dumps({"emails": ["jean.dupont@exemple.fr"],
+                         "phones": ["01 99 00 11 00", "06 39 98 12 00"],
+                         "page_title": "Accueil"}),))
+
+    def test_les_courriels_et_telephones_ne_sortent_pas_des_evenements(self, atelier):
+        """C12 : l'atelier ne lit que le nombre ; aucun rôle ne lit les valeurs."""
+        self._page_scrapee(atelier)
+        h = atelier["compte"]("contrib@exemple.fr", "contributor")
+        for route, params in (("/api/events", {}),
+                              ("/api/events/search", {"q": "viennoiseries"})):
+            r = atelier["client"].get(route, params=params, headers=h)
+            assert r.status_code == 200, r.text
+            assert "jean.dupont" not in r.text and "04 66" not in r.text
+            meta = r.json()[0]["metadata"]
+            assert meta["n_emails"] == 1 and meta["n_phones"] == 2
+            assert meta["page_title"] == "Accueil"
+
+    def test_la_recherche_ne_dit_pas_si_une_adresse_est_en_base(self, atelier):
+        self._page_scrapee(atelier)
+        h = atelier["compte"]("contrib@exemple.fr", "contributor")
+        r = atelier["client"].get("/api/events/search", params={"q": "dupont"}, headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json() == []
+
     def test_une_balise_dans_un_acte_ne_sort_pas_de_l_extrait(self, atelier):
         atelier["sql"](
             "INSERT INTO events(type, title, content) VALUES('deliberation', 'Budget', ?)",
@@ -343,6 +422,13 @@ class TestDocumentsSurUnAutreHote:
         r = docs["c"].get(f"{DOCS}/d/{docs['pdf']}?exp={exp}&u=1&sig={sig}")
         assert r.status_code == 403
 
+    def test_sans_parametres_un_403_et_non_un_422_qui_nomme_les_parametres(self, docs):
+        r = docs["c"].get(f"{DOCS}/d/{docs['pdf']}")
+        assert r.status_code == 403
+        assert "query" not in r.text and "Field required" not in r.text
+        assert r.headers["x-content-type-options"] == "nosniff"
+        assert r.headers["referrer-policy"] == "no-referrer"
+
     def test_un_compte_desactive_eteint_ses_liens(self, docs):
         url = self._lien(docs, docs["pdf"])["url"]
         docs["sql"]("UPDATE users SET desactive_le=datetime('now')")
@@ -379,3 +465,49 @@ class TestCookieDepuisUneAutreOrigine:
         atelier["compte"]("une@exemple.fr", "validator")
         r = atelier["client"].post("/api/auth/refresh", headers={"Origin": "http://testserver"})
         assert r.status_code == 200, r.text
+
+
+class TestRoutesIA:
+    """Audit du 06/11/2026 : les routes qui parlent à un modèle."""
+
+    @staticmethod
+    def _exige_une_session(dependant) -> bool:
+        import api_auth
+        return any(d.call is api_auth.require_auth or TestRoutesIA._exige_une_session(d)
+                   for d in dependant.dependencies)
+
+    @pytest.mark.parametrize("chemin", [
+        "/api/synthesize", "/api/rag/ask", "/api/atelier/ia/extraire"])
+    def test_chaque_route_ia_porte_son_propre_verrou(self, atelier, chemin):
+        """Le verrou global ne dispense pas du verrou de la route (convention en
+        tête d'api.py) : `/api/synthesize` n'avait que le premier."""
+        route = next(r for r in atelier["app"].routes
+                     if isinstance(r, APIRoute) and r.path == chemin)
+        assert self._exige_une_session(route.dependant)
+
+    @pytest.mark.parametrize("demande, servie", [(10_000, 20), (0, 1), (-5, 1), (7, 7)])
+    def test_la_recherche_d_une_question_est_bornee(self, atelier, monkeypatch, demande, servie):
+        import api
+        vues = []
+        monkeypatch.setattr(api, "RAG_ENABLED", True)
+        monkeypatch.setattr(api, "RAG_ASK_ENABLED", True)
+        monkeypatch.setattr(api, "rag_search",
+                            lambda q, limit, user: vues.append(limit) or [])
+
+        def hors_ligne(*a, **k):
+            raise ConnectionError("pas de modèle dans les essais")
+        monkeypatch.setattr(api._requests, "post", hors_ligne)
+        h = atelier["compte"]("une@exemple.fr", "validator")
+        r = atelier["client"].post("/api/rag/ask", headers=h,
+                                   json={"question": "budget", "limit": demande})
+        assert r.status_code == 200, r.text
+        assert vues == [servie]
+
+    def test_une_borne_illisible_est_refusee(self, atelier, monkeypatch):
+        import api
+        monkeypatch.setattr(api, "RAG_ENABLED", True)
+        monkeypatch.setattr(api, "RAG_ASK_ENABLED", True)
+        h = atelier["compte"]("une@exemple.fr", "validator")
+        r = atelier["client"].post("/api/rag/ask", headers=h,
+                                   json={"question": "budget", "limit": "beaucoup"})
+        assert r.status_code == 400

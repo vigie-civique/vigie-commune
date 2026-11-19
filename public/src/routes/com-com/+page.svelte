@@ -105,6 +105,10 @@
           {#if c.interet_communautaire}{' '}
             <span class="comp-flag" title="Le périmètre exact de cette compétence est défini par le conseil communautaire lui-même">intérêt communautaire</span>
           {' '}{/if}
+          <!-- La précision écrite par BANATIC sous l'intitulé, telle quelle : sans
+               elle, une compétence se lit plus large qu'elle n'est. -->
+          {#if c.precision_competence}<p class="comp-precision">Précision&nbsp;: {c.precision_competence}</p>{/if}
+          {#if c.precision_interet_communautaire}<p class="comp-precision">Intérêt communautaire&nbsp;: {c.precision_interet_communautaire}</p>{/if}
         </li>
       {/each}
     </ul>
@@ -117,6 +121,10 @@
         <li>
           <span class="comp-libelle">{c.libelle}</span>
           {#if c.categorie}<span class="comp-cat">{c.categorie}</span>{/if}
+          <!-- La précision écrite par BANATIC sous l'intitulé, telle quelle : sans
+               elle, une compétence se lit plus large qu'elle n'est. -->
+          {#if c.precision_competence}<p class="comp-precision">Précision&nbsp;: {c.precision_competence}</p>{/if}
+          {#if c.precision_interet_communautaire}<p class="comp-precision">Intérêt communautaire&nbsp;: {c.precision_interet_communautaire}</p>{/if}
         </li>
       {/each}
     </ul>
@@ -215,7 +223,7 @@
     {#if events.length}
       <h2>Les actes du conseil communautaire</h2>
       <p class="chapeau">
-        Délibérations, procès-verbaux et arrêtés préfectoraux : les 40 plus récents.
+        Les 40 délibérations les plus récentes du conseil communautaire.
         Le site de la communauté de communes ne conserve pas tout en ligne : ces documents
         sont archivés à mesure de leur publication.
       </p>
@@ -237,7 +245,10 @@
       <h3>D'où viennent ces données</h3>
       <p>
         Compétences et répartition des sièges proviennent de <strong>BANATIC</strong>, la base
-        nationale de l'intercommunalité tenue par le ministère de l'Intérieur. Les délégués
+        nationale de l'intercommunalité tenue par le ministère de l'Intérieur. Une compétence se
+        lit avec sa précision, qui en borne souvent la portée. Les arrêtés listés depuis BANATIC
+        sont ceux que la fiche enregistre à sa date de mise à jour : un arrêté retiré ou
+        remplacé depuis peut y figurer encore. Les délégués
         proviennent du <strong>Répertoire National des Élus</strong>, tenu par la DGCL.
       </p>
       {#if cc.note_sources}
@@ -306,6 +317,9 @@
     font-size: .74rem; color: var(--gris); background: var(--papier);
     border: 1px solid var(--trait); border-radius: 99px; padding: .1rem .55rem;
   }
+  .comp-precision {
+    flex: 1 1 100%; margin: .1rem 0 0; font-size: .85rem; color: var(--gris);
+  }
   .comp-flag {
     font-size: .72rem; color: var(--ambre); background: var(--ambre-pale);
     border-radius: 99px; padding: .1rem .55rem;
@@ -325,7 +339,7 @@
   tr.ici td { font-weight: 600; color: var(--encre); }
   .ici-tag {
     font-size: .68rem; text-transform: uppercase; letter-spacing: .05em;
-    background: var(--ardoise); color: #fff; border-radius: 99px;
+    background: var(--ardoise); color: var(--papier); border-radius: 99px;
     padding: .05rem .45rem; margin-left: .4rem; font-weight: 600;
   }
   .barre-cell { width: 26%; min-width: 90px; }
@@ -345,7 +359,7 @@
   .delegues.autres .nom { font-weight: 400; }
   .commune { font-size: .82rem; color: var(--gris); }
   .fonction {
-    font-size: .74rem; color: var(--recette); background: #e7f0ea;
+    font-size: .74rem; color: var(--recette); background: var(--recette-pale);
     border-radius: 99px; padding: .1rem .55rem;
   }
 

@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { error } from '@sveltejs/kit'
-import { INSTITUTIONAL, instanceDe, anneeDe } from '#lib/actes.js'
+import { INSTITUTIONAL, instanceDe, anneeDe, estDecision, estSeance } from '#lib/actes.js'
 import { DATA_DIR } from '#lib/donnees.server.js'
 
 const lireActes = () => {
@@ -72,6 +72,8 @@ export function load({ params }) {
   return {
     annee: params.annee,
     items,
+    decisions: items.filter(estDecision).length,
+    seances: items.filter((e) => estSeance(e) && !estDecision(e)).length,
     nCM: items.filter((e) => instanceDe(e) === 'CM').length,
     nCC: items.filter((e) => instanceDe(e) === 'CC').length,
     precedente: annees[i + 1] ?? null,   // plus ancienne

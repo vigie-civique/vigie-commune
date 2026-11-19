@@ -15,12 +15,19 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from collectors.citations import acte_de_ligne, index_de, lignes_en_base
+from collectors.cle_acte import cle_de_ligne
+from collectors.decisions import COMPTEES as DECISIONS_COMPTEES, TYPES as TYPES_DECISION_PAR_PORTEE
+from collectors.decisions import categorie as categorie_decision
+from collectors.pv_parsers import (NUMEROTATION_DE_TETE, rubrique_de_decisions, titre_en_debris_de_tableau,
+                                   titre_en_entete_de_tampon, titre_en_fragment,
+                                   titre_en_mots_colles, titre_questions_diverses)
 from scripts.snapshot.revue import TYPES_REVUS, appliquer_revue
 from scripts.snapshot.socle import (RULES, URL_COMMUNE, URL_EPCI, rows, safe_url,
                                     write_json_compact)
 from scripts.snapshot.textes import (champ_publiable, convocation_publique,
-                                     masquer_donnees_personnelles, nettoyer_titre_evenement,
-                                     texte_publiable)
+                                     motif_sans_extrait, nettoyer_titre_evenement,
+                                     norm_nom, texte_publiable,
+                                     titre_d_acte)
 
 
 # Ce qu'un conseil a effectivement délibéré — communal et intercommunal. Sert
@@ -33,6 +40,55 @@ TYPES_DELIBERES = ("deliberation", "deliberation_cc")
 # il rassemble ce qui a été décidé ce jour-là, et porte les pièces qui
 # l'attestent — convocation, registre, procès-verbal.
 TYPES_SEANCE = ("conseil_municipal", "conseil_communautaire")
+# Les décisions prises par délégation du conseil (`collectors/decisions.py`) :
+# des actes, pas des délibérations. Titre seul, jamais de texte ; certaines
+# catégories ne sortent qu'en nombre (avis DPO du 14/11/2026, Julien le 15/11).
+TYPES_DECISION = tuple(TYPES_DECISION_PAR_PORTEE.values())
+_MONTANT_TITRE = re.compile(r"(\d{1,3}(?:[ \u00a0.]\d{3})+|\d+)(?:,\d+)?\s*(?:€|euros?\b)", re.I)
+
+
+def titre_de_preemption(objet: str | None) -> str:
+    """Le titre publié d'une préemption exercée : ni nom, ni parcelle.
+
+    L'objet d'une décision de préemption donne la parcelle cadastrale, et la
+    parcelle donne le propriétaire. On garde le fait et son montant, quand
+    l'objet l'écrit ; le lieu n'est pas extrait, faute de pouvoir le distinguer
+    d'une référence cadastrale ou d'une adresse.
+    """
+    m = _MONTANT_TITRE.search(objet or "")
+    return "Exercice du droit de préemption sur un bien" + (
+        f" ({m.group(0).strip()})" if m else "")
+
+
+_DESIGNE_UNE_PERSONNE = re.compile(r"\b(un particulier|une particuli[eè]re|un agent|une agente"
+                                   r"|une personne)\b", re.I)
+
+
+def categorie_publiee(metadata: dict, titre: str | None) -> str:
+    """La catégorie qui décide de la sortie : la plus restrictive entre celle de
+    la collecte et celle du titre relu aujourd'hui.
+
+    Une catégorie figée à la collecte survivrait à la correction des motifs : le
+    portail retire la pièce, la décision n'est plus recollectée. Une métadonnée
+    absente ne vaut pas « publiable ».
+    """
+    stockee = metadata.get("categorie_delegation")
+    if not stockee or stockee in DECISIONS_COMPTEES:
+        return stockee or "non_classee"
+    return categorie_decision(titre or "")
+
+
+def _derniere_passe(event_rows: list[dict]) -> dict[str, str]:
+    """Pour chaque type de décision, le jour de la dernière passe du collecteur."""
+    passes: dict[str, str] = {}
+    for e in event_rows:
+        if e.get("type") in TYPES_DECISION:
+            try:
+                vu = json.loads(e.get("metadata") or "{}").get("vu_le") or ""
+            except json.JSONDecodeError:
+                continue
+            passes[e["type"]] = max(passes.get(e["type"], ""), vu)
+    return passes
 
 
 # Fourchette de montants publiables pour un acte local : en dessous, c'est un
@@ -232,6 +288,8 @@ PORTEE_PAR_TYPE = {
     "conseil_municipal":     "commune",
     "deliberation_cc":       "intercommunalite",
     "conseil_communautaire": "intercommunalite",
+    "decision_delegation":   "commune",
+    "decision_delegation_cc": "intercommunalite",
 }
 
 
@@ -337,7 +395,126 @@ def bodacc_personne_physique(commercant: str | None, indice_contenu: bool) -> bo
     return bool(indice_contenu) or "," in (commercant or "")
 
 
+# L'agenda : ce qu'une commune ou une association ANNONCE au public. Son titre
+# n'est pas celui d'un acte, et le filtre des titres d'actes n'a rien à y
+# chercher.
+TYPES_AGENDA = ("local_event",)
+
+
+# Les motifs d'un titre de délibération qui n'est pas un objet. Chacun garde, à
+# l'exclusion, le renvoi à la pièce qui atteste les flux lus dans l'acte.
+MOTIFS_DE_TITRE_DOUTEUX = ("titre_fragment_de_phrase", "titre_mots_colles",
+                           "titre_debris_de_tableau", "titre_nom_de_la_commune",
+                           "titre_entete_de_tampon", "titre_questions_diverses")
+
+
+def motif_de_titre_douteux(titre: str, nom_commune: str) -> str | None:
+    """Pourquoi ce titre de délibération ne sort pas, ou None.
+
+    Un titre douteux vaut mieux écarté que faux (Julien, 16/11/2026). Le titre
+    égal au seul nom de la commune de l'instance (« SAILLANS », Saillans,
+    01/10/2024) est l'en-tête d'une page, pas un objet : le nom se lit dans la
+    configuration de l'instance, jamais en dur. Un titre court sans débris
+    (« MATERNELLES », « PLU ») n'est pas touché. L'en-tête de tampon se reconnaît
+    à sa forme, jamais à un lieu (`titre_en_entete_de_tampon`).
+    """
+    # La rubrique des décisions par délégation (règle de 686afb1) passe avant tout :
+    # un titre qu'elle reconnaît reste une rubrique, même à mots collés, et part avec
+    # ses flux (`actes_de_rubrique`), pas comme titre douteux.
+    if rubrique_de_decisions(titre):
+        return None
+    if titre_en_fragment(titre):
+        return "titre_fragment_de_phrase"
+    if titre_en_mots_colles(titre):
+        return "titre_mots_colles"
+    if titre_en_debris_de_tableau(titre):
+        return "titre_debris_de_tableau"
+    nom = norm_nom(nom_commune)
+    # Une numérotation de tête (« 2) SAILLANS ») n'y change rien.
+    sans_numero = NUMEROTATION_DE_TETE.sub("", titre)
+    if nom and norm_nom(sans_numero.strip(" \t\n:;,.|¦_()-–—")) == nom:
+        return "titre_nom_de_la_commune"
+    # L'en-tête de tampon d'un extrait scanné (« DEPARTEMENT : GARD ») et le point
+    # « Questions diverses », sans vote : ni l'un ni l'autre n'est un objet.
+    if titre_en_entete_de_tampon(titre):
+        return "titre_entete_de_tampon"
+    if titre_questions_diverses(titre):
+        return "titre_questions_diverses"
+    return None
+
+
+def titre_de_l_evenement(event_type: str | None, titre_brut: str | None, jour: str | None,
+                         noms_publics: set[str], masquages: Counter
+                         ) -> tuple[str | None, str | None]:
+    """Le titre publié d'un événement, ou `(None, motif)`.
+
+    Le filtre des titres d'actes désigne un particulier par son rôle. Appliqué à
+    tout événement, il a réécrit l'agenda : « Sur les traces de Monsieur Castor »,
+    une sortie nature, est devenu « Sur les traces d'un particulier » (Lasalle,
+    14/11/2026). Une annonce publique nomme qui elle veut faire connaître : son
+    titre sort tel que la source l'a écrit.
+    """
+    titre = nettoyer_titre_evenement(titre_brut)
+    if event_type in TYPES_AGENDA:
+        return titre, None
+    return titre_d_acte(titre, jour, noms_publics, masquages)
+
+
+# Les assemblées où le recueil fait foi sur le procès-verbal. L'intercommunalité
+# n'y est pas : ses doublons recueil / procès-verbal attendent une relecture à
+# la main (70 cas incertains, dont des budgets annexes distincts), et la règle
+# en écarterait 330 actes à Lasalle sans que personne les ait regardés.
+TYPES_OU_LE_RECUEIL_FAIT_FOI = ("deliberation",)
+
+
+def fragments_de_pv(event_rows: list[dict]) -> dict[int, str | None]:
+    """Les actes tirés du procès-verbal d'une séance dont le recueil est publié.
+
+    Une séance publiée deux fois — le recueil des délibérations, qui numérote
+    ses actes, et le procès-verbal, qui ne les numérote pas — entrait deux fois.
+    Et le découpage du procès-verbal prend les lignes d'un tableau pour des
+    actes : au conseil du 28/05/2026 de Lasalle, 63 « délibérations » publiées
+    pour 28 au registre, dont « TRANSMISSION, 10 pour, 3 contre » là où le
+    procès-verbal écrit « Aucune demande » (relevé du 14/11/2026).
+
+    Quand une séance porte des actes NUMÉROTÉS venus d'un document, ceux qui
+    n'ont pour clé que leur titre et viennent d'un AUTRE document ne sortent
+    pas : le recueil fait foi. Ils restent en base, pour l'atelier. Une séance
+    connue par son seul procès-verbal n'est pas touchée.
+
+    `event_rows` : les lignes qui peuvent sortir (source publique, non rejetées
+    à l'atelier). Rend {identifiant: URL du procès-verbal} : un flux lu dans un de ces
+    fragments renvoie à la pièce, faute de fiche.
+    """
+    seances: dict = defaultdict(lambda: {"numerotes": set(), "par_titre": []})
+    for e in event_rows:
+        try:
+            metadata = json.loads(e.get("metadata") or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+        cle = cle_de_ligne(e.get("type"), e.get("date"), metadata, e.get("title"))
+        if cle is None or e.get("type") not in TYPES_OU_LE_RECUEIL_FAIT_FOI:
+            continue
+        # Sans pièce publiable, ni recueil ni fragment : un acte numéroté dont on
+        # ne sait pas le document ne dit pas qu'un recueil existe, et un fragment
+        # sans pièce laisserait ses flux sans aucun renvoi.
+        document = safe_url(metadata.get("pdf_url") or e.get("source_url"))
+        if not document:
+            continue
+        seance = seances[(e["type"], (e["date"] or "")[:10])]
+        if cle.par == "numero":
+            seance["numerotes"].add(document)
+        elif cle.faible:
+            seance["par_titre"].append((e["id"], document))
+    return {identifiant: document
+            for seance in seances.values() if seance["numerotes"]
+            for identifiant, document in seance["par_titre"]
+            if document not in seance["numerotes"]}
+
+
 def etape_actes(conn, revue, noms_publics, redige, exclusions) -> dict:
+    from collectors.config import COMMUNE_NAME
+
     # Un acte de marché ne se publie pas si son marché n'est pas publiable.
     #
     # Le filtre de confiance posé sur `marches_publics` ne suffisait pas :
@@ -367,6 +544,21 @@ def etape_actes(conn, revue, noms_publics, redige, exclusions) -> dict:
     textes_extraits: dict[int, str] = {}
     masquages = Counter()
     revue_delib = revue.get("deliberation", {})
+    # Le recueil ne fait foi que s'il SORT : un acte numéroté rejeté à l'atelier
+    # ou venu d'une source non publique n'écarte les fragments de personne.
+    types_exclus = set(RULES["events"]["exclude_types"])
+    sources_publiques = set(RULES["events"]["public_sources"])
+    fragments = fragments_de_pv([
+        e for e in event_rows
+        if e.get("type") not in types_exclus and e.get("source") in sources_publiques
+        and not (e.get("type") in TYPES_REVUS["deliberation"]
+                 and appliquer_revue(e, revue_delib.get(e["id"])) is None)])
+    pieces_des_fragments: dict[int, str | None] = {}
+    # Les actes écartés comme rubrique des décisions par délégation : un flux
+    # lu dans leur texte est une décision du maire ou du président, et ne sort
+    # pas non plus (`etape_flux`).
+    actes_de_rubrique: set[int] = set()
+    derniere_passe = _derniere_passe(event_rows)
     for event in event_rows:
         # Verdict de l'atelier : ne s'applique qu'aux types qu'il présente
         # à la revue (`/atelier/donnees`), pour ne pas laisser un id partagé
@@ -390,7 +582,45 @@ def etape_actes(conn, revue, noms_publics, redige, exclusions) -> dict:
         elif source == "bodacc" and bodacc_personne_physique(
                 metadata.get("commercant"), event.get("bodacc_pp")):
             reason = "bodacc_personne_physique"
+        elif event["id"] in fragments:
+            reason = "fragment_de_pv_d_une_seance_numerotee"
+        elif event_type in TYPES_DELIBERES and rubrique_de_decisions(
+                nettoyer_titre_evenement(event["title"])):
+            # La rubrique du procès-verbal où l'exécutif rend compte de ses
+            # décisions par délégation : le conseil n'y délibère de rien, et
+            # ces décisions ne sont pas publiées depuis un PV (Julien, 14 et
+            # 15/11/2026). Ni titre, ni texte, ni place dans le compteur.
+            reason = "rubrique_decisions_par_delegation"
+        elif event_type in TYPES_DELIBERES and (motif_titre := motif_de_titre_douteux(
+                nettoyer_titre_evenement(event["title"]), COMMUNE_NAME)):
+            # Un morceau de phrase, des mots collés, un débris de tableau ou le
+            # nom de la commune seul ne sont pas l'objet d'un acte. Le morceau de
+            # phrase se corrige aussi au découpage : la base en garde d'avant
+            # (15/11/2026), jusqu'au redécoupage. Les mots collés, les débris et
+            # le nom de la commune ne sont écartés QU'ICI, donc pour de bon : un
+            # redécoupage ne les rend pas (`_recoller` les fondrait dans l'acte
+            # d'avant). Un titre douteux vaut mieux écarté que faux.
+            reason = motif_titre
+        elif event_type in TYPES_DECISION and categorie_publiee(
+                metadata, event["title"]) in DECISIONS_COMPTEES:
+            # Le nombre sort, par catégorie (`stats.json`, exclusions) ; ni le
+            # titre, ni la date, ni le lien.
+            exclusions["decisions_par_delegation"][categorie_publiee(
+                metadata, event["title"])] += 1
+            reason = "decision_comptee_seulement"
 
+        if reason == "fragment_de_pv_d_une_seance_numerotee":
+            # Seul un fragment écarté POUR CE MOTIF prête son procès-verbal aux
+            # flux : un acte rejeté à l'atelier ou venu d'une source non publique
+            # est sorti plus haut, et son URL ne sort pas par ce détour.
+            pieces_des_fragments[event["id"]] = fragments[event["id"]]
+        elif reason in MOTIFS_DE_TITRE_DOUTEUX:
+            # Même renvoi pour un titre douteux : sa source est publique, et
+            # le flux qu'on y a lu reste attesté par la pièce.
+            pieces_des_fragments[event["id"]] = safe_url(
+                metadata.get("pdf_url") or event.get("source_url"))
+        elif reason == "rubrique_decisions_par_delegation":
+            actes_de_rubrique.add(event["id"])
         if reason:
             exclusions["events"][reason] += 1
             event_exclusions.append({
@@ -402,10 +632,51 @@ def etape_actes(conn, revue, noms_publics, redige, exclusions) -> dict:
             })
             continue
 
+        # Un titre réduit à un nom, ou un morceau de tableau, n'est pas un
+        # acte : rien ne se publie, ni lui, ni son texte.
+        titre, refus_titre = titre_de_l_evenement(
+            event_type, event["title"], event["date"], noms_publics, masquages)
+        if refus_titre:
+            exclusions["events"][refus_titre] += 1
+            if event_type in TYPES_DECISION:
+                exclusions["decisions_par_delegation"]["titre_refuse"] += 1
+            event_exclusions.append({"id": event["id"], "type": event_type,
+                                     "title": event["title"], "source": source,
+                                     "reason": refus_titre})
+            continue
+
+        source_url, pdf_meta, piece_retiree = event["source_url"], metadata.get("pdf_url"), False
+        if event_type in TYPES_DECISION:
+            if categorie_publiee(metadata, event["title"]) == "preemption_exercee":
+                # Titre neutre, d'abord : il ne reprend de l'objet que le montant.
+                # La pièce et son numéro donnent la parcelle et le vendeur : le
+                # titre neutre ne vaut que sans eux.
+                titre = titre_de_preemption(event["title"])
+                source_url, pdf_meta = None, None
+                metadata = {**metadata, "numero_acte": None}
+            elif _DESIGNE_UNE_PERSONNE.search(redige(titre or "")):
+                # Le masque des titres, ou celui des noms que la base connaît
+                # (`redige`, appliqué à l'écriture), a remplacé quelqu'un : la
+                # décision le concernait, elle se compte (relecture du 15/11).
+                exclusions["decisions_par_delegation"]["nominative"] += 1
+                exclusions["events"]["decision_comptee_seulement"] += 1
+                continue
+            exclusions["decisions_par_delegation"]["publiee"] += 1
+            # Le portail retire la pièce après l'affichage légal : une décision
+            # que la dernière passe n'a plus vue n'a plus de lien à donner.
+            if (metadata.get("vu_le") or "") < derniere_passe.get(event_type, ""):
+                source_url, pdf_meta, piece_retiree = None, None, True
+                exclusions["decisions_par_delegation"]["piece_retiree"] += 1
+
         delibere = event_type in TYPES_DELIBERES
         if delibere and (event.get("texte_acte") or "").strip():
-            texte, refus_extrait = texte_publiable(
-                event["texte_acte"], event["date"], noms_publics, masquages)
+            # Un acte qui porte sur la situation d'une personne garde son titre,
+            # son montant et son lien ; son texte ne sort pas (14/11/2026).
+            refus_extrait = motif_sans_extrait(
+                event["title"], event["texte_acte"], noms_publics)
+            if not refus_extrait:
+                texte, refus_extrait = texte_publiable(
+                    event["texte_acte"], event["date"], noms_publics, masquages)
             if refus_extrait:
                 exclusions["extraits"][refus_extrait] += 1
             else:
@@ -416,20 +687,21 @@ def etape_actes(conn, revue, noms_publics, redige, exclusions) -> dict:
             "type": event_type,
             "date": event["date"],
             "date_end": metadata.get("date_end"),
-            # Un acte officiel cite ses particuliers (arbitré le 16/09) : le
-            # titre d'une délibération n'est pas caviardé, seuls un domicile
-            # ou une naissance y sont masqués.
-            "title": (masquer_donnees_personnelles(
-                          nettoyer_titre_evenement(event["title"]), event["date"],
-                          noms_publics, masquages)
-                      if delibere else redige(nettoyer_titre_evenement(event["title"]))),
+            # Le titre désigne un particulier par son rôle (règle du 27/10) ;
+            # `redige` rattrape ceux que la base connaît et qui sont écrits
+            # sans civilité. Le texte de l'acte, lui, reste cité (16/09).
+            "title": redige(titre),
             "source": source,
-            "source_url": safe_url(event["source_url"]),
+            "source_url": safe_url(source_url),
             "page_url": safe_url(metadata.get("page_url")),
             # Le texte de la délibération se déplie sous son titre ; il est
             # écrit à part, cf. `write_act_extracts`. Le drapeau dit à la
             # page qu'il y a quelque chose à déplier.
             **({"extrait": True} if event["id"] in textes_extraits else {}),
+            **({"piece_retiree": True} if piece_retiree else {}),
+            **({"categorie_delegation": categorie_publiee(metadata, event["title"]),
+                "numero_acte": metadata.get("numero_acte") or None}
+               if event_type in TYPES_DECISION else {}),
             # Les pièces d'une séance — registre, procès-verbal, convocation.
             # Elles n'existent que sur l'ombrelle, et c'est par elles que le
             # lecteur atteint l'archive : la fiche de séance ne peut pas
@@ -447,9 +719,9 @@ def etape_actes(conn, revue, noms_publics, redige, exclusions) -> dict:
             **({"convocation": convocation_publique(
                     metadata["convocation"], event["date"], noms_publics, masquages, redige)}
                if event_type in TYPES_SEANCE and metadata.get("convocation") else {}),
-            "pdf_url": safe_url(metadata.get("pdf_url")) or (
-                safe_url(event["source_url"])
-                if ".pdf" in (event["source_url"] or "").lower() else None
+            "pdf_url": safe_url(pdf_meta) or (
+                safe_url(source_url)
+                if ".pdf" in (source_url or "").lower() else None
             ),
             # Le détail délibératif était produit par les parsers puis jeté à
             # l'export : 493 délibérations sur 508 portent le décompte du vote
@@ -459,11 +731,11 @@ def etape_actes(conn, revue, noms_publics, redige, exclusions) -> dict:
             # Trois axes vérifiables au lieu d'un label à croire.
             **provenance(
                 event, source, event_type,
-                safe_url(metadata.get("pdf_url")) or (
-                    safe_url(event["source_url"])
-                    if ".pdf" in (event["source_url"] or "").lower() else None
+                safe_url(pdf_meta) or (
+                    safe_url(source_url)
+                    if ".pdf" in (source_url or "").lower() else None
                 ),
-                safe_url(event["source_url"]),
+                safe_url(source_url),
             ),
         })
 
@@ -487,6 +759,8 @@ def etape_actes(conn, revue, noms_publics, redige, exclusions) -> dict:
         "event_exclusions": event_exclusions,
         "textes_extraits": textes_extraits,
         "masquages": masquages,
+        "pieces_des_fragments": pieces_des_fragments,
+        "actes_de_rubrique": actes_de_rubrique,
     }
 
 

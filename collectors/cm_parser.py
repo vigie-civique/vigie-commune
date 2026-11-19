@@ -488,6 +488,15 @@ def _paragraphs_from_pdf(filepath: Path) -> list[str]:
     return paragraphs
 
 
+# Retirée par erreur le 13/08/2026 (3e74754) : les deux fonctions qui suivent
+# levaient NameError dès qu'une date en toutes lettres était trouvée.
+_MOIS = {
+    'janvier':'01','février':'02','fevrier':'02','mars':'03','avril':'04',
+    'mai':'05','juin':'06','juillet':'07','août':'08','aout':'08',
+    'septembre':'09','octobre':'10','novembre':'11','décembre':'12','decembre':'12'
+}
+
+
 def _parse_french_date(text: str) -> str | None:
     m = re.search(
         r'(\d{1,2})\s+(janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre)\s+(\d{4})',

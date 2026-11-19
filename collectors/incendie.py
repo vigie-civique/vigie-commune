@@ -42,23 +42,48 @@ import html
 import io
 import json
 import re
+import shutil
+import ssl
 import subprocess
 import tempfile
+import time
+from pathlib import Path
 import urllib.parse
 import urllib.request
 
+import certifi
+
+from . import mesure, reseau
 from .archive import _ssl_ctx
 from .config import BBOX, HEADERS, NATIONAL_STORE, communes_du_step
 from .db import get_conn
-from .national_store import ecrire_atomiquement, est_frais
+from .national_store import (CODE_INSEE, DEPARTEMENT, copier_atomiquement, departement,
+                             ecrire_atomiquement, est_frais, magasin_ecrivable,
+                             perime_lisible)
 
 WFS = "https://data.geopf.fr/wfs/ows"
 BAN = "https://adresse.data.gouv.fr/data/ban/adresses/latest/csv/adresses-{}.csv.gz"
 BDIFF = "https://bdiff.agriculture.gouv.fr/incendies"
+# L'intermédiaire que la BDIFF ne présente pas (cf. `_racines_bdiff`).
+INTERMEDIAIRE_BDIFF = Path(__file__).parent / "certificats" / "harica-geant-tls-rsa-1.pem"
 CACHE = NATIONAL_STORE / "ban"
 # La BAN se republie chaque semaine ; les adresses d'une commune, elles, bougent
 # peu. Un trimestre suffit, et le fichier d'un département sert à ses voisines.
 BAN_JOURS = 90
+# Le passage de l'écrivain du magasin : la BAN de toute la France, découpée en
+# fichiers départementaux. Le témoin dit quand elle a été lue.
+TEMOIN_FRANCE = CACHE / "france.json"
+# Moins que cela dans le fichier national, c'est qu'il n'est pas entier :
+# 101 départements, dont les cinq d'outre-mer.
+DEPARTEMENTS_MIN = 95
+# Des lignes au code INSEE invalide, il y en a peut-être une poignée ; au-delà,
+# le fichier n'est pas celui qu'on croit, et rien n'est remplacé.
+REJETS_MAX = 1000
+# Le pic de disque d'une découpe : le fichier national, ses découpes (un peu
+# plus grosses, compressées plus vite) et un `.part`. Mesuré en multiple du
+# fichier national, au-dessus de la marge de l'écrivain.
+PIC_DISQUE = 2.5
+MARGE_DISQUE = 3 << 30
 # La BDIFF commence en 2006 sur tout le territoire (1973 en zone
 # méditerranéenne seulement) : partir de 2006 rend les communes comparables.
 FEUX_DEBUT = 2006
@@ -128,7 +153,7 @@ def _lire(url: str, params: dict | None = None, delai: int = 90) -> bytes:
     if params:
         url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
     requete = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(requete, timeout=delai, context=_ssl_ctx()) as reponse:
+    with reseau.ouvrir(requete, timeout=delai, context=_ssl_ctx()) as reponse:
         return reponse.read()
 
 
@@ -151,21 +176,166 @@ def contour(insee: str) -> dict:
 
 
 def adresses_ban(insee: str) -> list[tuple[float, float]]:
-    """(lon, lat) de chaque adresse de la commune. Le fichier est départemental :
-    lu une fois pour toutes les instances du département."""
-    chemin = CACHE / f"adresses-{insee[:2]}.csv.gz"
+    """(lon, lat) de chaque adresse de la commune. Le fichier est départemental,
+    et l'écrivain du magasin les dépose tous (`remplir_magasin`).
+
+    Le repli suit la règle unique du magasin (`perime_lisible`) : un lecteur
+    qui ne peut pas écrire lit la copie de moins de 2 × `BAN_JOURS`, et le dit,
+    plutôt que d'appeler la BAN ; si l'appel échoue, même règle. Au-delà, le
+    relevé échoue : la BAN a rendu 503 du 21 au 27/10/2026, mais une copie de
+    huit mois ne se publie pas en silence."""
+    chemin = CACHE / f"adresses-{departement(insee)}.csv.gz"
     if est_frais(chemin, BAN_JOURS):
-        brut = chemin.read_bytes()
-    else:
-        brut = _lire(BAN.format(insee[:2]), delai=300)
-        ecrire_atomiquement(chemin, brut)
-    return points_de_la_commune(gzip.decompress(brut).decode("utf-8"), insee)
+        return points_de_la_commune(chemin.read_bytes(), insee)
+    ecrivable = magasin_ecrivable(CACHE, chemin.name)
+    if not ecrivable and perime_lisible(chemin, BAN_JOURS):
+        return points_de_la_commune(chemin.read_bytes(), insee)
+    try:
+        brut = _lire(BAN.format(departement(insee)), delai=300)
+    except OSError as e:
+        print(f"  [incendie] BAN {departement(insee)} injoignable ({type(e).__name__}: {e})")
+        if perime_lisible(chemin, BAN_JOURS):
+            return points_de_la_commune(chemin.read_bytes(), insee)
+        raise
+    ecrire_atomiquement(chemin, brut)
+    return points_de_la_commune(brut, insee)
 
 
-def points_de_la_commune(texte: str, insee: str) -> list[tuple[float, float]]:
-    return [(float(l["lon"]), float(l["lat"]))
-            for l in csv.DictReader(io.StringIO(texte), delimiter=";")
-            if l["code_insee"] == insee and l["lon"] and l["lat"]]
+def remplir_magasin(departements: list[str] | None = None) -> list[str]:
+    """Pour l'écrivain du magasin : la BAN de TOUTE la France, une fois par
+    `BAN_JOURS`, découpée en `adresses-<département>.csv.gz`.
+
+    Un seul téléchargement couvre tous les départements, demandés ou non : un
+    dossier n'appelle plus la BAN, et une panne de celle-ci (21-27/10, puis le
+    30/10/2026) ne touche aucune génération pendant un trimestre.
+    `departements` est ignoré ; il est là pour la signature commune.
+
+    Le travail se fait dans `.adresses-france.part`, à côté des fichiers :
+    même disque, et l'écrivain purge ce dossier s'il est abandonné. Chaque
+    fichier départemental passe `copier_atomiquement`, donc `valider_contenu`
+    et la règle de la fonte, avant de remplacer l'ancien. Un département
+    refusé garde son ancien fichier ; il est noté au témoin et rendu en échec
+    à chaque passe jusqu'au prochain téléchargement, sans retélécharger 2 Go
+    chaque nuit.
+    """
+    if est_frais(TEMOIN_FRANCE, BAN_JOURS):
+        restes = json.loads(TEMOIN_FRANCE.read_text(encoding="utf-8")).get("echecs", [])
+        print(f"  [incendie] BAN France lue il y a moins de {BAN_JOURS} jours"
+              + (f" ; départements refusés alors : {', '.join(restes)}" if restes else ""))
+        return restes
+    travail = CACHE / ".adresses-france.part"
+    shutil.rmtree(travail, ignore_errors=True)
+    travail.mkdir(parents=True)
+    echecs: list[str] = []
+    try:
+        france = travail / "adresses-france.csv.gz"
+        _telecharger_france(france)
+        _exiger_disque(france.stat().st_size, "avant la découpe")
+        decoupes = decouper_france(france, travail)
+        if len(decoupes) < DEPARTEMENTS_MIN:
+            raise RuntimeError(f"BAN France : {len(decoupes)} départements, "
+                               f"{DEPARTEMENTS_MIN} attendus au moins")
+        france.unlink()
+        for dep, (chemin, _) in sorted(decoupes.items()):
+            try:
+                with chemin.open("rb") as flux:
+                    copier_atomiquement(CACHE / f"adresses-{dep}.csv.gz", flux)
+            except ValueError as e:     # ContenuInvalide : la fonte, un fichier illisible
+                print(f"  ✗ [incendie] BAN {dep} refusée, l'ancienne reste : {e}")
+                echecs.append(dep)
+            chemin.unlink()
+        ecrire_atomiquement(TEMOIN_FRANCE, json.dumps({
+            "lueLe": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
+            "source": BAN.format("france"),
+            "adresses": {dep: n for dep, (_, n) in sorted(decoupes.items())},
+            "echecs": echecs,
+        }, ensure_ascii=False).encode())
+    finally:
+        shutil.rmtree(travail, ignore_errors=True)
+    print(f"  [incendie] BAN France découpée : {len(decoupes) - len(echecs)}"
+          f"/{len(decoupes)} départements remplacés")
+    return echecs
+
+
+def _exiger_disque(taille_france: int, quand: str) -> None:
+    """Le disque du magasin est celui des bases des ateliers : une découpe qui
+    le remplirait est un incident pour Lasalle, pas seulement pour la BAN."""
+    libre = shutil.disk_usage(CACHE).free
+    besoin = int(PIC_DISQUE * taille_france) + MARGE_DISQUE
+    if libre < besoin:
+        raise OSError(f"BAN France {quand} : {libre >> 20} Mio libres, "
+                      f"{besoin >> 20} nécessaires ; rien n'est remplacé")
+
+
+def _telecharger_france(cible: Path, essais: int = 3) -> None:
+    """Le fichier national en flux, taille annoncée vérifiée. La BAN coupe
+    parfois au bout d'une minute (30/10/2026) : trois essais espacés."""
+    for essai in range(essais):
+        try:
+            requete = urllib.request.Request(BAN.format("france"), headers=HEADERS)
+            # Un contexte VÉRIFIÉ, sans repli : ce fichier alimente tous les
+            # dossiers (`_ssl_ctx` se rabat sur un contexte non vérifié).
+            contexte = ssl.create_default_context(cafile=certifi.where())
+            with reseau.ouvrir(requete, timeout=600, context=contexte) as reponse:
+                annoncee = reponse.headers.get("Content-Length")
+                if annoncee and annoncee.isdigit():
+                    _exiger_disque(int(annoncee), "avant le téléchargement")
+                copier_atomiquement(cible, reponse)
+            return
+        except (OSError, EOFError) as e:
+            if essai == essais - 1:
+                raise
+            print(f"  [incendie] BAN France coupée ({type(e).__name__}: {e}), "
+                  f"nouvel essai dans {60 * (essai + 1)} s")
+            time.sleep(60 * (essai + 1))
+
+
+def decouper_france(france: Path, dossier: Path) -> dict[str, tuple[Path, int]]:
+    """{département: (fichier compressé, nombre d'adresses)}, en flux : le
+    fichier national ne tient jamais en mémoire, une ligne à la fois."""
+    sorties: dict[str, list] = {}
+    rejets = 0
+    with gzip.open(france, "rt", encoding="utf-8", newline="") as flux:
+        lecteur = csv.reader(flux, delimiter=";")
+        entete = next(lecteur)
+        colonne = entete.index("code_insee")
+        try:
+            for ligne in lecteur:
+                code = ligne[colonne] if len(ligne) > colonne else ""
+                # Le code vient de la source et nomme un fichier : rien d'autre
+                # qu'un code INSEE, et un département connu.
+                if not CODE_INSEE.fullmatch(code) or not DEPARTEMENT.fullmatch(departement(code)):
+                    rejets += 1
+                    if rejets > REJETS_MAX:
+                        raise RuntimeError(f"BAN France : plus de {REJETS_MAX} lignes sans "
+                                           "code INSEE valide ; rien n'est remplacé")
+                    continue
+                dep = departement(code)
+                if dep not in sorties:
+                    chemin = dossier / f"adresses-{dep}.csv.gz"
+                    fichier = gzip.open(chemin, "wt", encoding="utf-8", newline="", compresslevel=6)
+                    ecrivain = csv.writer(fichier, delimiter=";", lineterminator="\n")
+                    ecrivain.writerow(entete)
+                    sorties[dep] = [chemin, fichier, ecrivain, 0]
+                sortie = sorties[dep]
+                sortie[2].writerow(ligne)
+                sortie[3] += 1
+        finally:
+            for _, fichier, _, _ in sorties.values():
+                fichier.close()
+    if rejets:
+        print(f"  [incendie] BAN France : {rejets} ligne(s) sans code INSEE valide, ignorées")
+    return {dep: (chemin, n) for dep, (chemin, _, _, n) in sorties.items()}
+
+
+def points_de_la_commune(brut: bytes, insee: str) -> list[tuple[float, float]]:
+    """Le CSV départemental compressé, lu EN FLUX : décompressé d'un bloc, celui
+    du Nord (174 Mio) faisait monter le step à 1,5 Gio, contre 56 Mio ainsi
+    (mesuré le 27/10/2026)."""
+    with gzip.open(io.BytesIO(brut), "rt", encoding="utf-8", newline="") as flux:
+        return [(float(l["lon"]), float(l["lat"]))
+                for l in csv.DictReader(flux, delimiter=";")
+                if l["code_insee"] == insee and l["lon"] and l["lat"]]
 
 
 # ── Géométrie ────────────────────────────────────────────────────────────────
@@ -251,6 +421,8 @@ def releve_forets_publiques(conn, insee: str) -> str:
 
 def releve_debroussaillement(conn, insee: str) -> str:
     zones = wfs("DEBROUSSAILLEMENT:debroussaillement", bbox=BBOX, maxi=20000)
+    mesure.lu("ign-debroussaillement", len(zones),
+              mesure.forme_de(zones, "properties"), complete=True)
     points = adresses_ban(insee)
     if not points:
         # Une commune sans adresse n'existe pas : c'est la BAN qui n'a pas
@@ -292,21 +464,48 @@ def lire_page_bdiff(page: str, insee: str) -> list[dict]:
     return feux
 
 
+def _racines_bdiff(dossier: str) -> list[str]:
+    """Les options `curl` qui lui donnent de quoi vérifier la BDIFF.
+
+    Le serveur ne présente pas le bon intermédiaire : son certificat est signé
+    par « GEANT TLS RSA 1 » (HARICA) et il sert « GEANT OV RSA CA 4 ». Le curl
+    du Mac retrouve le bon par l'extension AIA du certificat ; celui d'un
+    Debian (OpenSSL) ne le fait pas, et sort en code 60. C'était invisible sur
+    le poste et fatal sur le VPS : le relevé « feux » échouait à chaque
+    génération du portail (constaté le 26/10/2026).
+
+    On remet donc l'intermédiaire nous-mêmes, à côté des racines de `certifi`,
+    plutôt que de désactiver la vérification. Il remonte à « HARICA TLS RSA
+    Root CA 2021 » et vaut jusqu'en 2039 ; si la BDIFF change d'émetteur, le
+    code 60 reviendra et le certificat est à relever dans l'extension AIA de
+    celui que sert le site (`openssl s_client -showcerts`).
+    """
+    try:
+        import certifi
+        racines = Path(certifi.where()).read_bytes()
+    except ImportError:
+        return []
+    paquet = Path(dossier) / "racines-bdiff.pem"
+    paquet.write_bytes(racines + b"\n" + INTERMEDIAIRE_BDIFF.read_bytes())
+    return ["--cacert", str(paquet)]
+
+
 def feux_bdiff(insee: str, debut: int, fin: int) -> list[dict]:
-    # Le serveur de la BDIFF ne présente pas sa chaîne de certificats complète :
-    # Python la refuse même avec certifi, curl la reconstitue. On passe par curl
-    # plutôt que de désactiver la vérification.
+    # Python refuse la chaîne de la BDIFF même avec certifi (intermédiaire
+    # absent) : on passe par curl, avec l'intermédiaire en main, plutôt que de
+    # désactiver la vérification.
     criteres = urllib.parse.urlencode(
         {"if[dateAlerteDeb][date]": f"01/01/{debut}", "if[dateAlerteFin][date]": f"31/12/{fin}",
          "if[commune]": insee})
     feux: dict[str, dict] = {}
-    with tempfile.NamedTemporaryFile() as pot:
+    with tempfile.NamedTemporaryFile() as pot, tempfile.TemporaryDirectory() as dossier:
+        racines = _racines_bdiff(dossier)
         # Dix lignes par page. La page 1 pose les critères, les suivantes se
         # demandent SANS eux (les renvoyer rejoue la page 1) et avec le pot à
         # cookies (sans lui, c'est la France entière).
         for numero in range(1, 60):
             page = subprocess.run(
-                ["curl", "-s", "-m", "60", "-A", HEADERS["User-Agent"], "-b", pot.name, "-c", pot.name,
+                ["curl", "-s", "-m", "60", *racines, "-A", HEADERS["User-Agent"], "-b", pot.name, "-c", pot.name,
                  f"{BDIFF}?" + (criteres if numero == 1 else f"page={numero}")],
                 capture_output=True, check=True).stdout.decode("utf-8", "replace")
             lus = lire_page_bdiff(page, insee)
@@ -314,7 +513,12 @@ def feux_bdiff(insee: str, debut: int, fin: int) -> list[dict]:
             feux.update({f["cle"]: f for f in nouveaux})
             if len(nouveaux) < 10:
                 break
-    return list(feux.values())
+    # `curl` échappe à la mesure des réponses : ce compte est la seule trace.
+    # Complet : les saisons closes ne se retirent pas de la base.
+    fiches = list(feux.values())
+    mesure.lu("bdiff-feux", len(fiches), mesure.forme_de(fiches),
+              complete=True)
+    return fiches
 
 
 def releve_feux(conn, insee: str) -> str:

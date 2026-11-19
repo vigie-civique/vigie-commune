@@ -22,6 +22,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import mesure, reseau
 from .config import HEADERS, ROOT
 
 RAW_DIR = ROOT / "data" / "raw"
@@ -125,7 +126,9 @@ def archive_fetch(source: str, url: str | None, raw: bytes,
 
 
 def fetch_json(url: str, *, source: str, headers: dict | None = None,
-               timeout: int = 30, archive_url: str | None = None):
+               timeout: int = 30, archive_url: str | None = None,
+               archiver: bool = True, complete: bool = False,
+               mesurer: bool = True):
     """
     GET une URL d'API, archive la réponse brute (dédup sha256), retourne le JSON.
     Les erreurs HTTP/réseau remontent à l'appelant (retry/fallback inchangés).
@@ -134,6 +137,16 @@ def fetch_json(url: str, *, source: str, headers: dict | None = None,
     Une réponse qui n'est pas du JSON lève AVANT l'archivage : le 22/10/2026,
     l'API de data.culture.gouv.fr redirigeait (301) vers la page d'accueil HTML
     du nouveau portail, et chaque passe archivait cette page comme pièce brute.
+
+    `archiver=False` : l'appelant archive lui-même, après son filtre
+    (`archiver_retenues`). Une source interrogée par code postal rend les
+    annonces des communes voisines, personnes physiques comprises : les
+    garder sur disque sans finalité ne tient pas (avis vigie-dpo, 02/11/2026).
+
+    `complete` : la source est relue en entier à chaque passe
+    (`mesure.lu`). `mesurer=False` : la réponse n'est pas un relevé de la
+    source (agrégat, sonde relue ensuite) et ne doit pas s'ajouter à son
+    compte.
     """
     req = urllib.request.Request(url, headers=headers or HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -146,8 +159,33 @@ def fetch_json(url: str, *, source: str, headers: dict | None = None,
     except ValueError:
         raise ValueError(f"réponse non JSON ({ct}) de {final}"
                          + (f", redirigée depuis {url}" if final != url else "")) from None
-    archive_fetch(source, archive_url or url, raw, content_type=ct, http_status=status)
+    elements, forme = mesure.compter_json(data) if mesurer else (None, None)
+    if elements is not None:
+        mesure.lu(source, elements, forme, complete=complete)
+    if archiver:
+        archive_fetch(source, archive_url or url, raw, content_type=ct, http_status=status)
     return data
+
+
+def page_reduite(page: dict, retenues: list[dict]) -> dict:
+    """La forme archivée d'une page filtrée : celle de l'API (`results`,
+    `total_count`), réduite aux seules annonces retenues."""
+    return {"total_count": page.get("total_count"), "results": retenues,
+            "archive": "réduite au périmètre (annonces hors périmètre non conservées)"}
+
+
+def archiver_retenues(source: str, url: str, page: dict, retenues: list[dict]) -> None:
+    """Archive une page d'API réduite aux annonces que le collecteur retient.
+
+    Rien n'est écrit quand aucune n'est retenue : une page entièrement hors
+    périmètre n'a rien à rejouer. Les retenues gardent la forme de l'API, la
+    collecte reste rejouable hors ligne pour le périmètre.
+    """
+    if not retenues:
+        return
+    brut = json.dumps(page_reduite(page, retenues), ensure_ascii=False,
+                      sort_keys=True).encode("utf-8")
+    archive_fetch(source, url, brut, content_type="application/json", doc_type="json")
 
 
 def archive_url(conn, url: str, *, source: str, title: str | None = None,
@@ -157,7 +195,7 @@ def archive_url(conn, url: str, *, source: str, title: str | None = None,
     raw = ct = status = None
     for ctx in (_ssl_ctx(), ssl._create_unverified_context()):  # retry SSL non-vérifié si chaîne incomplète
         try:
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            with reseau.ouvrir(req, timeout=timeout, context=ctx) as r:
                 raw = r.read()
                 ct = r.headers.get_content_type()
                 status = r.status

@@ -118,7 +118,7 @@
 
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-top: 1rem; }
   .card {
-    display: block; background: #fff; border: 1px solid var(--trait); border-radius: 12px;
+    display: block; background: var(--carte); border: 1px solid var(--trait); border-radius: 12px;
     padding: 1.1rem; color: inherit; transition: border-color .15s, box-shadow .15s, transform .15s;
   }
   .card:hover { border-color: var(--ardoise); box-shadow: 0 6px 18px rgba(14,165,233,.12); transform: translateY(-2px); text-decoration: none; }

@@ -31,8 +31,9 @@ import json
 import time
 import urllib.parse
 
+from . import mesure
 from .archive import fetch_json
-from .config import COMMUNES, REQUEST_DELAY, communes_du_step
+from .config import COMMUNES, COMMUNES_ADRESSE, REQUEST_DELAY, communes_du_step
 from .db import get_conn, upsert_entity
 
 # Ressource CSV du jeu data.gouv 5af120e5b595087cfabcde81 (mise à jour par le
@@ -53,6 +54,10 @@ def _fetch(insee: str) -> list[dict]:
         url = (data.get("links") or {}).get("next")
         if url:
             time.sleep(REQUEST_DELAY)
+    # Les communes du périmètre s'additionnent : un zéro communal est ordinaire,
+    # un zéro du périmètre entier ne l'est pas.
+    mesure.lu("culture-mh", len(lignes), mesure.forme_de(lignes),
+              complete=True)
     return lignes
 
 
@@ -69,8 +74,44 @@ def _first(v):
     return v[0] if isinstance(v, list) and v else v
 
 
+def _commune_de(insee: str) -> str | None:
+    """Nom de la commune ACTUELLE, y compris pour le code d'une ancienne commune."""
+    fiche = COMMUNES_ADRESSE.get(insee, {})
+    return COMMUNES.get(fiche.get("commune") or insee, {}).get("nom")
+
+
+def _poser_protection(conn, eid: int, ref: str, protection: str | None) -> None:
+    """La protection MH vit dans les tags de `places`, sous `monuments_historiques`.
+
+    `upsert_entity` fusionne un monument avec une fiche OSM du même nom, et
+    l'`INSERT OR IGNORE` garde alors la catégorie OSM : la Chapelle
+    Saint-Sébastien de Vallouise (PA00080648) sortait « lieu de culte », sans
+    protection, et la notice ne vivait que dans `entity_notes`, que rien ne
+    publie (02/11/2026). La protection s'ajoute donc aux tags existants, quels
+    qu'ils soient, une entrée par référence Mérimée.
+    """
+    ligne = conn.execute("SELECT tags, osm_value FROM places WHERE entity_id=?",
+                         (eid,)).fetchone()
+    try:
+        tags = json.loads((ligne[0] if ligne else None) or "{}")
+    except ValueError:
+        tags = {}
+    if not isinstance(tags, dict):
+        tags = {}
+    if ligne and ligne[1] == "monument_historique":
+        # Les lignes MH d'avant portaient `reference` et `protection` à la racine.
+        tags.pop("reference", None)
+        tags.pop("protection", None)
+    entrees = [m for m in tags.get("monuments_historiques") or []
+               if isinstance(m, dict) and m.get("reference") != ref]
+    entrees.append({"reference": ref, "protection": protection})
+    tags["monuments_historiques"] = sorted(entrees, key=lambda m: m.get("reference") or "")
+    conn.execute("UPDATE places SET tags=? WHERE entity_id=?",
+                 (json.dumps(tags, ensure_ascii=False), eid))
+
+
 def import_mh(conn, insee: str, results: list[dict]) -> int:
-    commune = COMMUNES.get(insee, {}).get("nom")
+    commune = _commune_de(insee)
     n = 0
     for r in results:
         name = (_first(r.get("Titre_editorial_de_la_notice"))
@@ -86,10 +127,8 @@ def import_mh(conn, insee: str, results: list[dict]) -> int:
             confidence="verified", commune=commune)
         conn.execute(
             "INSERT OR IGNORE INTO places (entity_id, osm_category, osm_value, tags)"
-            " VALUES (?, 'patrimoine', 'monument_historique', ?)",
-            (eid, json.dumps({"reference": ref,
-                              "protection": _first(r.get("Typologie_de_la_protection"))},
-                             ensure_ascii=False)))
+            " VALUES (?, 'patrimoine', 'monument_historique', '{}')", (eid,))
+        _poser_protection(conn, eid, ref, _first(r.get("Typologie_de_la_protection")))
         exists = conn.execute(
             "SELECT id FROM entity_notes WHERE entity_id=? AND note LIKE ?",
             (eid, f"%{ref}%")).fetchone() if ref else None
@@ -114,13 +153,21 @@ def import_mh(conn, insee: str, results: list[dict]) -> int:
 def run(insee_list: list[str] | None = None):
     conn = get_conn()
     total, echecs = 0, []
-    for insee in (insee_list or communes_du_step("patrimoine")):
-        commune = COMMUNES.get(insee, {}).get("nom", insee)
+    # Le champ interrogé est le code INSEE « lors de la protection » : les
+    # monuments d'une commune fusionnée restent sous l'ancien code. Les trois
+    # de Vallouise (05175) manquaient au relevé de Vallouise-Pelvoux (05101).
+    for insee in (insee_list or communes_du_step("patrimoine", adresse=True)):
+        commune = _commune_de(insee) or insee
         try:
             results = _fetch(insee)
         except Exception as e:
-            print(f"[patrimoine] {commune} : erreur — {e}")
-            echecs.append(commune)
+            # La ligne `[step] INSEE nom : échec → Type: motif` est celle que le
+            # service local du portail classe : `: erreur —` n'y était pas lu,
+            # le résumé non plus, et un 503 ou un délai dépassé sur UNE commune
+            # devenait un défaut jamais rejoué (Lus-la-Croix-Haute le 26/10,
+            # Montselgues le 27/10 ; la même requête répondait le 01/11).
+            print(f"  [patrimoine] {insee} {commune} : échec → {type(e).__name__}: {e}")
+            echecs.append(f"{insee} {commune}")
             continue
         n = import_mh(conn, insee, results)
         conn.commit()
@@ -133,8 +180,11 @@ def run(insee_list: list[str] | None = None):
     # « OK » ferait passer le step pour abouti, et la source pour fraîche,
     # jusqu'au bout de son TTL (même piège que `guichets`, 20/10/2026).
     if echecs:
-        raise RuntimeError(f"Mérimée non relevée pour {len(echecs)} commune(s) : "
-                           f"{', '.join(echecs)} ({total} élément(s) pour les autres)")
+        # Le résumé au format que le portail relit (`relevés en échec : …`) ;
+        # le total des autres communes part sur sa propre ligne.
+        print(f"[patrimoine] Mérimée non relevée pour {len(echecs)} commune(s) "
+              f"({total} élément(s) pour les autres)")
+        raise RuntimeError(f"relevés en échec : {', '.join(echecs)}")
     print(f"[patrimoine] OK — {total} éléments")
 
 

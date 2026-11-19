@@ -12,6 +12,7 @@ son rôle, et seul le porteur du lien d'invitation crée le compte.
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -19,10 +20,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 try:
@@ -77,8 +79,15 @@ if not _SECRET:
     raise SystemExit(1)
 _ACCESS_MINUTES  = 60
 _REFRESH_MINUTES = 60 * 24 * 7
+# Chaque rotation repartait pour sept jours, sans fin : une session volée se
+# renouvelait indéfiniment. Elle a maintenant un âge, compté depuis la connexion
+# (`auth_time` dans le jeton) et que la rotation ne remet pas à zéro.
+SESSION_MAX_JOURS = 30
+# Deux onglets qui rafraîchissent au même instant présentent le même jeton : le
+# second arrive juste après la révocation. Refusé, mais sans y voir un vol.
+REUTILISATION_TOLERANCE_S = 10
 
-router  = APIRouter(prefix="/api/auth", tags=["auth"])
+router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 # Le jeton de session voyage dans SON en-tête, et non plus seulement dans
 # `Authorization: Bearer`. Un atelier en ligne se place derrière un mur HTTP
@@ -147,7 +156,8 @@ def _get(conn, sql, params=()):
     return dict(r) if r else None
 
 
-def _make_token(sub: str, kind: str, minutes: int, version: int = 0) -> str:
+def _make_token(sub: str, kind: str, minutes: int, version: int = 0,
+                origine: Optional[int] = None) -> str:
     if not _SECRET:
         raise RuntimeError("JWT_SECRET absent : le renseigner dans .env "
                            "(cp deploy/env.exemple .env, puis openssl rand -hex 32)")
@@ -158,7 +168,11 @@ def _make_token(sub: str, kind: str, minutes: int, version: int = 0) -> str:
     # date (`iat`, à la seconde) laissait passer les jetons de la même seconde.
     # `jti` : deux jetons de la même seconde seraient sinon identiques, et
     # révoquer l'ancien à la rotation (`/refresh`) révoquerait aussi le neuf.
-    return jwt.encode({"sub": sub, "kind": kind, "exp": exp, "iat": int(maintenant.timestamp()),
+    # `auth_time` : l'instant de la CONNEXION, recopié de jeton en jeton par la
+    # rotation. `iat` date le jeton, pas la session.
+    iat = int(maintenant.timestamp())
+    return jwt.encode({"sub": sub, "kind": kind, "exp": exp, "iat": iat,
+                       "auth_time": iat if origine is None else origine,
                        "sv": version, "jti": secrets.token_hex(8)}, _SECRET, algorithm=_ALGO)
 
 
@@ -220,10 +234,16 @@ def utilisateur_du_jeton(jeton: str, kind: str = "access") -> dict:
     try:
         if _revoked(jeton, conn):
             raise HTTPException(401, "Token révoqué")
-        user = _get(conn, "SELECT id, email, role, desactive_le, sessions_version "
-                          "FROM users WHERE email=?", (payload.get("sub"),))
+        return _compte_du_jeton(conn, payload)
     finally:
         conn.close()
+
+
+def _compte_du_jeton(conn, payload: dict) -> dict:
+    """Le compte que désigne un jeton déjà décodé, ou 401 : il existe, il n'est
+    pas désactivé, et le jeton est de sa génération de sessions courante."""
+    user = _get(conn, "SELECT id, email, role, desactive_le, sessions_version "
+                      "FROM users WHERE email=?", (payload.get("sub"),))
     if not user:
         raise HTTPException(401, "Utilisateur introuvable")
     if user.pop("desactive_le"):
@@ -417,8 +437,11 @@ def login(req: LoginRequest, request: Request, response: Response):
             _noter_echec(cle)
             raise HTTPException(401, "Email ou mot de passe incorrect")
 
+        # Même réponse qu'un mot de passe faux : un 403 « désactivé » disait
+        # que le mot de passe était juste (audit du 15/11/2026).
         if user.get("desactive_le"):
-            raise HTTPException(403, "Compte désactivé — voir un administrateur de l'atelier.")
+            _noter_echec(cle)
+            raise HTTPException(401, "Email ou mot de passe incorrect")
 
         conn.execute(
             "UPDATE users SET failed_attempts=0, locked_until=NULL, last_login=datetime('now') WHERE id=?",
@@ -438,28 +461,66 @@ def login(req: LoginRequest, request: Request, response: Response):
 @router.post("/refresh")
 def refresh_token(request: Request, response: Response,
                   req: Optional[RefreshRequest] = None):
-    """Rotation : le jeton présenté est révoqué, un neuf part dans le cookie. Un
-    jeton volé ne sert qu'une fois, et son usage coupe la session légitime — ce
-    qui se voit, au lieu de durer sept jours en silence."""
+    """Rotation : le jeton présenté est révoqué, un neuf part dans le cookie.
+
+    Un jeton ne sert qu'une fois. Le présenter une SECONDE fois, c'est qu'il en
+    existe deux copies : toutes les sessions du compte sont alors closes, celle
+    du voleur comprise. Jusqu'au 13/11/2026 la seconde présentation n'était que
+    refusée : si le voleur passait le premier, la personne légitime était
+    déconnectée et lui gardait une session renouvelable sans fin.
+    """
     _origine_admise(request)
     jeton = (req.refresh_token if req else None) or request.cookies.get(COOKIE_SESSION)
     if not jeton:
         raise HTTPException(401, "Session absente : se reconnecter.")
     payload = _decode(jeton)
-    user = utilisateur_du_jeton(jeton, "refresh")
+    if payload.get("kind") != "refresh":
+        raise HTTPException(401, "Token de rafraîchissement requis")
     conn = _db()
     try:
-        conn.execute("INSERT OR IGNORE INTO revoked_tokens(jti, expires_at) VALUES(?,?)",
+        # Lire et révoquer dans UNE transaction d'écriture : sur deux connexions,
+        # deux requêtes simultanées lisaient toutes deux « pas révoqué » et
+        # repartaient chacune avec une session.
+        conn.execute("BEGIN IMMEDIATE")
+        deja = _get(conn, "SELECT strftime('%s','now') - strftime('%s', revoked_at) AS age "
+                          "FROM revoked_tokens WHERE jti=?", (jeton,))
+        if deja:
+            _reutilisation(conn, payload, deja["age"])
+            conn.commit()
+            raise HTTPException(401, "Token révoqué")
+        conn.execute("INSERT INTO revoked_tokens(jti, expires_at) VALUES(?,?)",
                      (jeton, datetime.fromtimestamp(payload["exp"], tz=timezone.utc).isoformat()))
         conn.commit()
+        user = _compte_du_jeton(conn, payload)
     finally:
         conn.close()
+    # Un jeton d'avant `auth_time` date sa session de sa propre émission.
+    origine = int(payload.get("auth_time") or payload.get("iat") or 0)
+    if time.time() - origine > SESSION_MAX_JOURS * 86400:
+        raise HTTPException(401, f"Session ouverte depuis plus de {SESSION_MAX_JOURS} "
+                                 f"jours : se reconnecter.")
     sv = payload.get("sv", 0)
-    _poser_cookie(response, request, _make_token(user["email"], "refresh", _REFRESH_MINUTES, sv))
+    _poser_cookie(response, request,
+                  _make_token(user["email"], "refresh", _REFRESH_MINUTES, sv, origine))
     return {
-        "access_token": _make_token(user["email"], "access", _ACCESS_MINUTES, sv),
+        "access_token": _make_token(user["email"], "access", _ACCESS_MINUTES, sv, origine),
         "token_type":   "bearer",
     }
+
+
+def _reutilisation(conn, payload: dict, age_s) -> None:
+    """Un jeton de rafraîchissement déjà révoqué revient : clore les sessions du
+    compte, sauf si la révocation date de quelques secondes (deux onglets) ou si
+    les sessions de cette génération sont déjà closes."""
+    if age_s is not None and age_s <= REUTILISATION_TOLERANCE_S:
+        return
+    user = _get(conn, "SELECT id, email, COALESCE(sessions_version, 0) AS v "
+                      "FROM users WHERE email=?", (payload.get("sub"),))
+    if not user or user["v"] != payload.get("sv", 0):
+        return
+    _clore_sessions(conn, user["id"])
+    _journal_compte(conn, None, "sessions_closes", user["email"], None,
+                    "jeton de rafraîchissement présenté deux fois")
 
 
 @router.post("/logout")
@@ -829,6 +890,8 @@ def modifier_compte(compte_id: int, req: CompteModifie,
             _journal_compte(conn, user["id"], "role", cible["email"], cible["role"], req.role)
         if req.actif is False and cible["desactive_le"] is None:
             conn.execute("UPDATE users SET desactive_le=datetime('now') WHERE id=?", (compte_id,))
+            # Réactivé, le compte retrouvait ses anciennes sessions.
+            _clore_sessions(conn, compte_id)
             _journal_compte(conn, user["id"], "desactivation", cible["email"])
         elif req.actif is True and cible["desactive_le"] is not None:
             conn.execute("UPDATE users SET desactive_le=NULL WHERE id=?", (compte_id,))
@@ -861,3 +924,253 @@ def lien_mot_de_passe(compte_id: int, user=Depends(require_au_moins("admin", _AD
     finally:
         conn.close()
     return {"invitation": inv, "jeton": jeton}
+
+
+# ─── L'aperçu du site, derrière les comptes ─────────────────────────────────────
+# L'hôte d'aperçu (`VIGIE_APERCU_URL`) n'était gardé que par le mur `auth_basic`,
+# un identifiant commun : un bénévole parti gardait l'aperçu tant que le mot de
+# passe de tous n'avait pas changé (audit du 15/11/2026, B3). Le compte montré
+# par le serveur d'aperçu venait en outre d'un cookie que le visiteur écrit.
+#
+# Le jeton de session de l'atelier voyage dans `X-Atelier-Session`, qu'une
+# navigation vers un autre hôte n'envoie pas. Le passage :
+#
+#   1. l'aperçu, sans témoin valide, renvoie (nginx : `auth_request` → 403 →
+#      `error_page`) vers `/api/auth/apercu/ouvrir<chemin>` sur l'ATELIER ;
+#   2. là, le cookie de rafraîchissement de l'atelier (HttpOnly, SameSite=Strict,
+#      chemin `/api/auth`) dit qui est là ; on frappe un CODE à usage unique,
+#      valable une minute, et on renvoie vers l'entrée de l'aperçu ;
+#   3. l'entrée (`/__vigie/entree` sur l'hôte d'aperçu) consomme le code et pose
+#      un témoin propre à cet hôte (sans `Domain`), d'un quart d'heure ;
+#   4. à chaque requête, nginx fait juger ce témoin (`/api/auth/apercu/controle`)
+#      et transmet au serveur d'aperçu le compte qu'il désigne (`X-Vigie-Compte`).
+#
+# Le témoin porte la génération de sessions du compte (`sv`) et il est rejugé à
+# chaque requête : `_clore_sessions` (mot de passe changé, jeton volé) et la
+# désactivation le ferment à la requête suivante, sans attendre son heure.
+# Une clé dérivée de JWT_SECRET par usage : un code ne vaut pas témoin, et ni
+# l'un ni l'autre ne vaut jeton de session ou lien de document.
+
+APERCU_PASSAGE_S = 60
+#: Court : la déconnexion de l'atelier ne le ferme pas, et le renouveler ne
+#: demande rien à la personne (un renvoi vers l'atelier et retour).
+APERCU_SESSION_S = 15 * 60
+MARQUE_PASSAGE = "__vigie_passage"
+COOKIE_APERCU = "vigie_apercu_session"
+EN_TETE_COMPTE_APERCU = "X-Vigie-Compte"
+#: Le rôle qui génère un aperçu (api.py, « Générer un aperçu »). Rejugé à chaque
+#: requête : un compte rétrogradé perd l'aperçu aussitôt.
+ROLE_APERCU = "validator"
+
+# Un chemin du site : une barre en tête, pas deux (`//ailleurs` est un autre
+# site), ni barre inverse, ni espace, ni caractère de contrôle (en-tête `Location`).
+_SUITE_PERMISE = re.compile(r"/(?![/\\])[A-Za-z0-9\-._~!$&'()*+,;=:@%/?]*")
+_SURS_DANS_UN_CHEMIN = "/%:@!$&'()*+,;=-._~"
+
+
+def _signer_apercu(usage: bytes, corps: str) -> str:
+    cle = hmac.new(_SECRET.encode(), b"vigie-apercu-" + usage, hashlib.sha256).digest()
+    return hmac.new(cle, corps.encode(), hashlib.sha256).hexdigest()
+
+
+def _adresse_apercu() -> Optional[str]:
+    """L'hôte d'aperçu en ligne, ou None. Un aperçu en `http://localhost` n'a ni
+    nginx ni témoin à poser : le passage n'y a pas de sens."""
+    url = os.environ.get("VIGIE_APERCU_URL", "").strip().rstrip("/")
+    morceaux = urlsplit(url)
+    return url if morceaux.scheme == "https" and morceaux.hostname else None
+
+
+def _compte_apercu(conn, uid: int, sv: int) -> Optional[dict]:
+    """Le compte, s'il peut voir un aperçu MAINTENANT : actif, de la même
+    génération de sessions, au rôle voulu."""
+    compte = _get(conn, "SELECT id, role, desactive_le, COALESCE(sessions_version, 0) AS sv "
+                        "FROM users WHERE id=?", (uid,))
+    if not compte or compte["desactive_le"] or compte["sv"] != sv \
+            or not au_moins(compte, ROLE_APERCU):
+        return None
+    return compte
+
+
+def _champs(valeur: str, n: int) -> Optional[list[str]]:
+    """Les `n` champs d'un code ou d'un témoin ; les trois premiers sont des
+    entiers (compte, génération, échéance)."""
+    morceaux = (valeur or "").split(".")
+    if len(valeur or "") > 512 or len(morceaux) != n \
+            or not all(m.isascii() and m.isdigit() for m in morceaux[:3]):
+        return None
+    return morceaux
+
+
+def compte_du_temoin_apercu(valeur: str) -> Optional[dict]:
+    """Le compte que désigne le témoin de l'hôte d'aperçu, ou None."""
+    champs = _champs(valeur, 4)
+    if not champs or not _SECRET:
+        return None
+    uid, sv, exp, sig = champs
+    attendue = _signer_apercu(b"session", f"{uid}.{sv}.{exp}")
+    if not hmac.compare_digest(attendue.encode(), sig.encode()):
+        return None
+    if not time.time() <= int(exp) <= time.time() + APERCU_SESSION_S + 60:
+        return None
+    conn = _db()
+    try:
+        return _compte_apercu(conn, int(uid), int(sv))
+    finally:
+        conn.close()
+
+
+_ENTETES_APERCU = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+                   "X-Robots-Tag": "noindex, nofollow", "X-Content-Type-Options": "nosniff",
+                   "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; "
+                                              "frame-ancestors 'none'"}
+
+_PAGE_REFUS = """<!doctype html><html lang="fr"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aperçu fermé</title>
+<p style="font:16px system-ui;margin:2rem;max-width:36rem">{texte}</p>
+{lien}</html>"""
+
+
+def _refus_apercu(texte: str, status: int, lien_atelier: Optional[str]) -> HTMLResponse:
+    """La même page quelle que soit la raison : elle ne dit pas si le compte
+    existe, s'il est désactivé ou si son mot de passe a changé."""
+    lien = (f'<p style="font:16px system-ui;margin:2rem"><a href="{lien_atelier}">'
+            "Ouvrir l'atelier</a></p>" if lien_atelier else "")
+    return HTMLResponse(_PAGE_REFUS.format(texte=texte, lien=lien), status_code=status,
+                        headers=_ENTETES_APERCU)
+
+
+@router.get("/apercu/ouvrir{suite:path}")
+def ouvrir_apercu(request: Request, suite: str = ""):
+    """Sur l'ATELIER : la session ouverte ici devient un passage vers l'aperçu.
+
+    Une navigation (lien de l'atelier, ou renvoi de nginx depuis l'aperçu)
+    n'emporte pas `X-Atelier-Session` : la personne est reconnue au cookie de
+    rafraîchissement, LU sans être consommé — la rotation reste à `/refresh`.
+    """
+    _origine_admise(request)
+    # Une navigation seulement : un `fetch` depuis une page du même site
+    # (l'hôte des documents, par exemple) n'a rien à faire ici.
+    if request.headers.get("sec-fetch-mode", "navigate") != "navigate":
+        raise HTTPException(403, "Navigation attendue.")
+    adresse = _adresse_apercu()
+    if not adresse:
+        raise HTTPException(404, "Pas d'hôte d'aperçu en ligne (VIGIE_APERCU_URL).")
+    # Revenu ici avec la marque de l'entrée : le témoin vient d'être posé et le
+    # navigateur ne l'a pas renvoyé. Frapper un nouveau code ferait tourner la
+    # boucle jusqu'à la limite du navigateur, en consommant la borne de débit.
+    if MARQUE_PASSAGE in request.query_params:
+        return _refus_apercu("Votre navigateur n'a pas gardé le témoin de l'aperçu "
+                             "(cookies bloqués pour cette adresse ?). Autorisez-les, puis "
+                             "rouvrez l'aperçu depuis l'atelier.", 403, "/")
+    # 403 et non 401 : l'atelier est derrière le mur, et un 401 pourrait
+    # toucher aux identifiants que le navigateur garde pour lui.
+    refus = _refus_apercu("Pour voir l'aperçu, ouvrez d'abord votre session de l'atelier, "
+                          "avec un compte qui a accès aux aperçus.", 403, "/")
+    jeton = request.cookies.get(COOKIE_SESSION)
+    if not jeton:
+        return refus
+    try:
+        payload = _decode(jeton)
+    except HTTPException:
+        return refus
+    origine = int(payload.get("auth_time") or payload.get("iat") or 0)
+    if payload.get("kind") != "refresh" or time.time() - origine > SESSION_MAX_JOURS * 86400:
+        return refus
+    sv = payload.get("sv", 0)
+    conn = _db()
+    try:
+        if _revoked(jeton, conn):
+            return refus
+        try:
+            user = _compte_du_jeton(conn, payload)
+        except HTTPException:
+            return refus
+        if not _compte_apercu(conn, user["id"], sv):
+            return refus
+    finally:
+        conn.close()
+
+    chemin = quote(suite or "/", safe=_SURS_DANS_UN_CHEMIN)
+    if request.url.query:
+        chemin += "?" + quote(request.url.query, safe=_SURS_DANS_UN_CHEMIN + "?")
+    corps = f"{user['id']}.{sv}.{int(time.time()) + APERCU_PASSAGE_S}.{secrets.token_urlsafe(16)}"
+    code = f"{corps}.{_signer_apercu(b'passage', corps)}"
+    return RedirectResponse(f"{adresse}/__vigie/entree?" + urlencode({"code": code, "suite": chemin}),
+                            status_code=303, headers=_ENTETES_APERCU)
+
+
+@router.get("/apercu/entree")
+def entree_apercu(request: Request, code: str = "", suite: str = "/"):
+    """Sur l'hôte d'APERÇU (nginx : `/__vigie/entree`) : consomme le code et pose
+    le témoin de cet hôte. Un code ne sert qu'une fois, une minute."""
+    adresse = _adresse_apercu()
+    if not adresse or request.url.hostname != urlsplit(adresse).hostname:
+        raise HTTPException(404, "introuvable")
+    atelier = os.environ.get("ATELIER_URL", "").strip().rstrip("/") or None
+    refus = _refus_apercu("Ce passage vers l'aperçu n'est plus valable. "
+                          "Rouvrez l'aperçu depuis l'atelier.", 403,
+                          f"{atelier}/" if atelier else None)
+    # Le parcours légitime vient de l'atelier, donc du même site. Un lien
+    # d'entrée envoyé d'ailleurs (courriel, messagerie, barre d'adresse) ferait
+    # porter à son destinataire le témoin, donc l'aperçu, de celui qui l'a
+    # frappé. Arbitré par Julien le 15/11/2026 : seuls `same-site` et
+    # `same-origin` passent ; `none` (lien collé), `cross-site` et l'en-tête
+    # absent sont refusés AVANT de consommer le code.
+    if request.headers.get("sec-fetch-site") not in ("same-site", "same-origin"):
+        return refus
+    champs = _champs(code, 5)
+    if not champs or not _SECRET:
+        return refus
+    uid, sv, exp, nonce, sig = champs
+    corps = f"{uid}.{sv}.{exp}.{nonce}"
+    if not hmac.compare_digest(_signer_apercu(b"passage", corps).encode(), sig.encode()):
+        return refus
+    if not time.time() <= int(exp) <= time.time() + APERCU_PASSAGE_S + 30:
+        return refus
+    conn = _db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Usage unique : la table des jetons révoqués tient déjà ce registre.
+            conn.execute("INSERT INTO revoked_tokens(jti, expires_at) VALUES(?,?)",
+                         ("apercu:" + _empreinte(code),
+                          datetime.fromtimestamp(int(exp), tz=timezone.utc).isoformat()))
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return refus
+        conn.commit()
+        if not _compte_apercu(conn, int(uid), int(sv)):
+            return refus
+    finally:
+        conn.close()
+
+    if not _SUITE_PERMISE.fullmatch(suite or ""):
+        suite = "/"
+    # La marque : si le témoin ne revient pas, `ouvrir` la verra et s'arrêtera.
+    # Le serveur d'aperçu la retire de l'adresse.
+    suite += ("&" if "?" in suite else "?") + f"{MARQUE_PASSAGE}=1"
+    temoin = f"{uid}.{sv}.{int(time.time()) + APERCU_SESSION_S}"
+    reponse = RedirectResponse(suite, status_code=303, headers=_ENTETES_APERCU)
+    # Sans `Domain` : le témoin ne part que vers l'hôte d'aperçu — ni vers
+    # l'atelier, ni vers le site public, ni vers l'hôte des documents.
+    reponse.set_cookie(COOKIE_APERCU, f"{temoin}.{_signer_apercu(b'session', temoin)}",
+                       max_age=APERCU_SESSION_S, path="/", httponly=True, samesite="lax",
+                       secure=request.url.scheme == "https")
+    return reponse
+
+
+@router.get("/apercu/controle")
+def controle_apercu(request: Request):
+    """Pour nginx (`auth_request`) : 204 et le compte, ou 403.
+
+    403 et non 401 : sur l'hôte d'aperçu, 401 est la réponse du mur
+    `auth_basic`, qui doit garder sa demande de mot de passe ; le 403 renvoie
+    vers l'atelier (`error_page 403` du gabarit).
+    """
+    compte = compte_du_temoin_apercu(request.cookies.get(COOKIE_APERCU, ""))
+    if not compte:
+        return Response(status_code=403, headers={"Cache-Control": "no-store"})
+    return Response(status_code=204, headers={"Cache-Control": "no-store",
+                                              EN_TETE_COMPTE_APERCU: str(compte["id"])})

@@ -3,6 +3,8 @@
   import { cleLocale } from './brouillon.js'
 
   export let contacts = []
+  // Fiche réservée (personne, compte non validateur) : le serveur ne rend aucun contact.
+  export let reserves = false
   export let brouillon            // { ajouts, suppr }
 
   const CONTACT_TYPES = ['website','phone','email','other']
@@ -23,6 +25,10 @@
 </script>
 
 <section class="card">
+  {#if reserves}
+  <h2>Contacts</h2>
+  <p class="muted">Contacts réservés aux validateurs.</p>
+  {:else}
   <h2>Contacts <span class="count-badge">{contacts.length}</span></h2>
   {#if contacts.length || brouillon.ajouts.length}
     <ul class="contact-list">
@@ -37,10 +43,11 @@
           {' '}{/if}
           {#if c.label}<span class="contact-label">{c.label}</span>{/if}
           {#if brouillon.suppr.includes(c.id)}{' '}
-            <span class="tag-attente">supprimé à l'enregistrement</span>
+            <span class="tag-attente">sera effacé quand vous enregistrerez la fiche</span>
             <button class="lien-annuler" on:click={() => basculerSuppr(c.id)}>rétablir</button>
           {' '}{:else}{' '}
-            <button class="contact-del" title="Supprimer" on:click={() => basculerSuppr(c.id)}>✕</button>
+            <button class="btn-texte danger" title="Efface le contact de la base"
+                    aria-label="Supprimer ce contact : l'effacer de la base" on:click={() => basculerSuppr(c.id)}>Supprimer</button>
           {' '}{/if}
         </li>
       {/each}
@@ -69,6 +76,7 @@
       + Ajouter à la fiche
     </button>
   </div>
+  {/if}
 </section>
 
 <style>
@@ -83,8 +91,6 @@
   .contact-value { flex: 1; color: var(--info); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .contact-value:is(a):hover { text-decoration: underline; }
   .contact-label { color: var(--texte-doux); font-size: .72rem; }
-  .contact-del { margin-left: auto; color: var(--danger); font-size: .78rem; cursor: pointer; padding: 0 .2rem; }
-  .contact-del:hover { color: var(--danger-texte); }
 
   .add-contact { display: flex; gap: .4rem; flex-wrap: wrap; }
   .add-contact select { width: 100px; }
