@@ -28,8 +28,8 @@
   <section class="card">
     <h2>Entreprise</h2>
     <div class="grid2">
-      <label class:modifie={m('naf_code')}>Code NAF<input bind:value={form.naf_code} placeholder="ex: 6820B" /></label>
-      <label class:modifie={m('naf_label')}>Libellé NAF<input bind:value={form.naf_label} /></label>
+      <label class:modifie={m('naf_code')}>Code d'activité (NAF)<input bind:value={form.naf_code} placeholder="Par exemple : 6820B" /></label>
+      <label class:modifie={m('naf_label')}>Activité<input bind:value={form.naf_label} /></label>
       <label class:modifie={m('legal_form')}>Forme juridique<input bind:value={form.legal_form} /></label>
       <label class:modifie={m('biz_status')}>
         Statut
@@ -40,9 +40,9 @@
         </select>
       </label>
       <label class:modifie={m('capital')}>Capital (€)<input type="number" bind:value={form.capital} /></label>
-      <label class:modifie={m('employees_range')}>Tranche effectif<input bind:value={form.employees_range} placeholder="ex: 1-2" /></label>
-      <label class:modifie={m('biz_creation')}>Date création<input bind:value={form.biz_creation} placeholder="AAAA-MM-JJ" /></label>
-      <label class:modifie={m('closing_date')}>Date fermeture<input bind:value={form.closing_date} placeholder="AAAA-MM-JJ" /></label>
+      <label class:modifie={m('employees_range')}>Tranche d'effectif<input bind:value={form.employees_range} placeholder="Par exemple : 1-2" /></label>
+      <label class:modifie={m('biz_creation')}>Date de création<input bind:value={form.biz_creation} placeholder="AAAA-MM-JJ" /></label>
+      <label class:modifie={m('closing_date')}>Date de fermeture<input bind:value={form.closing_date} placeholder="AAAA-MM-JJ" /></label>
     </div>
   </section>
 
@@ -50,7 +50,7 @@
   <section class="card">
     <h2>Association</h2>
     <div class="grid2">
-      <label class:modifie={m('rna_id')}>N° RNA<input bind:value={form.rna_id} placeholder="W30..." /></label>
+      <label class:modifie={m('rna_id')}>N° d'association (RNA)<input bind:value={form.rna_id} placeholder="W30..." /></label>
       <label class:modifie={m('asso_status')}>
         Statut
         <select bind:value={form.asso_status}>
@@ -63,8 +63,8 @@
         Objet social
         <textarea bind:value={form.asso_object} rows="3"></textarea>
       </label>
-      <label class:modifie={m('asso_creation')}>Date création<input bind:value={form.asso_creation} placeholder="AAAA-MM-JJ" /></label>
-      <label class:modifie={m('dissolution_date')}>Date dissolution<input bind:value={form.dissolution_date} placeholder="AAAA-MM-JJ" /></label>
+      <label class:modifie={m('asso_creation')}>Date de création<input bind:value={form.asso_creation} placeholder="AAAA-MM-JJ" /></label>
+      <label class:modifie={m('dissolution_date')}>Date de dissolution<input bind:value={form.dissolution_date} placeholder="AAAA-MM-JJ" /></label>
     </div>
   </section>
 
@@ -72,8 +72,8 @@
   <section class="card">
     <h2>Lieu</h2>
     <div class="grid2">
-      <label class:modifie={m('osm_category')}>Catégorie OSM<input bind:value={form.osm_category} placeholder="ex: amenity" /></label>
-      <label class:modifie={m('osm_value')}>Valeur OSM<input bind:value={form.osm_value} placeholder="ex: restaurant" /></label>
+      <label class:modifie={m('osm_category')}>Catégorie (OpenStreetMap)<input bind:value={form.osm_category} placeholder="Par exemple : amenity" /></label>
+      <label class:modifie={m('osm_value')}>Valeur (OpenStreetMap)<input bind:value={form.osm_value} placeholder="Par exemple : restaurant" /></label>
     </div>
   </section>
 

@@ -1,11 +1,13 @@
 <script>
   import ChoixTheme from '#lib/components/ChoixTheme.svelte'
+  import RechercheBandeau from './fiches/RechercheBandeau.svelte'
   import { onMount } from 'svelte'
   import { goto } from '$app/navigation'
   import { pageStore } from '#lib/etat-app'
   const page = pageStore()
   import { currentUser, logout, rafraichir, authFetch } from '#lib/stores/auth.js'
   import { LIBELLE_ROLE, auMoins } from '#lib/roles.js'
+  import { menuPour } from '#lib/menu.js'
 
   let ready = false
 
@@ -52,33 +54,9 @@
     goto('/atelier/login')
   }
 
-  // `min` : le rôle à partir duquel la page sert à quelque chose. L'API tient
-  // le droit ; le menu évite seulement d'ouvrir une page qui refuserait tout.
-  // 23/09/2026 — le menu suit les files (`collectors/files.py`). Avant, il
-  // ouvrait sur la liste des 5 484 fiches, ne nommait aucune des files de
-  // travail, et deux d'entre elles n'y figuraient pas du tout : `/atelier/geo`
-  // existait sans entrée, et les liens présumés n'avaient aucune page.
-  const NAV = [
-    { href: '/atelier',                        label: "Aujourd'hui" },
-    { href: '/atelier/relations',              label: 'Liens présumés', min: 'validator', grise: true },
-    { href: '/atelier/queue/websites',         label: 'Adresses de sites' },
-    { href: '/atelier/geo',                    label: 'Points sur la carte' },
-    { href: '/atelier/donnees',                label: 'Chiffres à confirmer' },
-    { href: '/atelier/propositions',           label: 'Propositions' },
-    { href: '/atelier/conseils',               label: 'Conseils en clair' },
-    { href: '/atelier/dossiers',               label: 'Dossiers' },
-    { href: '/atelier/taches',                 label: 'Ce que les dossiers ne savent pas' },
-    { href: '/atelier/fiches',                 label: 'Toutes les fiches' },
-    { href: '/atelier/saisie',                 label: 'Saisir une donnée' },
-    { href: '/atelier/analyses',               label: 'Analyses croisées', min: 'validator' },
-    { href: '/atelier/ia',                     label: 'Recherche IA', ia: true },
-    { href: '/atelier/publication',            label: 'Publication', min: 'validator', grise: true },
-    { href: '/atelier/journal',                label: 'Journal', min: 'validator', grise: true },
-    { href: '/atelier/comptes',                label: 'Comptes', min: 'admin' },
-  ]
-  // `grise` : l'entrée reste au menu, éteinte, avec sa raison — le contributeur
-  // sait que la page existe et à qui la demander. Sans `grise`, elle disparaît.
-  // La recherche IA s'éteint de même tant qu'aucun modèle n'est branché ;
+  // Le menu (groupes, rôle minimal, entrées éteintes) vit dans lib/menu.js : l'accueil
+  // s'en sert aussi pour ne pas envoyer quelqu'un vers une page fermée.
+  // La recherche par sens s'éteint tant qu'aucun modèle n'est branché ;
   // `null` = on ne sait pas encore, et on n'éteint pas sur une ignorance.
   let iaBranchee = null
   $: if (ready && $currentUser && iaBranchee === null) lireIA()
@@ -89,16 +67,12 @@
       if (r.ok) iaBranchee = (await r.json()).enabled === true
     } catch { /* API muette : l'entrée reste ouverte, la page dira pourquoi */ }
   }
-  function raison(n, user, ia) {
-    if (n.min && !auMoins(user, n.min)) {
-      return n.grise ? `Réservé au rôle ${LIBELLE_ROLE[n.min].toLowerCase()} et au-dessus` : null
-    }
-    // L'admin garde l'entrée : c'est de cette page qu'il branche un modèle.
-    if (n.ia && ia === false && !auMoins(user, 'admin')) return "Aucune IA n'est branchée sur cet atelier"
-    return ''
-  }
-  $: nav = NAV.map(n => ({ ...n, raison: raison(n, $currentUser, iaBranchee) }))
-          .filter(n => n.raison !== null)
+  $: groupes = menuPour($currentUser, iaBranchee)
+
+  // Sur téléphone le menu se replie : un bouton l'ouvre, un clic sur une entrée
+  // (ou un changement de page) le referme.
+  let ouvert = false
+  $: $page.url.pathname, ouvert = false
 </script>
 
 {#if isLogin}
@@ -111,24 +85,41 @@
         <span class="role-badge" class:admin={$currentUser.role === 'admin'}>{LIBELLE_ROLE[$currentUser.role] ?? $currentUser.role}</span>
       </div>
 
-      <nav class="sidebar-nav">
-        {#each nav as n}
-          {#if n.raison}{' '}
-            <span class="eteint" title={n.raison} aria-disabled="true">{n.label}</span>
-          {' '}{:else}{' '}
-            <a href={n.href} class:active={$page.url.pathname === n.href}>{n.label}</a>
-          {' '}{/if}
-        {/each}
-      </nav>
+      <button class="menu-bouton" aria-expanded={ouvert} aria-controls="menu-atelier"
+              on:click={() => ouvert = !ouvert}>
+        {ouvert ? 'Fermer le menu' : 'Menu'}
+      </button>
 
-      <div class="sidebar-footer">
-        <a class="user-email" href="/atelier/mon-compte" title="Mon compte">{$currentUser.email}</a>
-        <ChoixTheme />
-        <button class="logout-btn" on:click={handleLogout}>Déconnexion</button>
+      <div class="menu" id="menu-atelier" class:ouvert>
+        <nav class="sidebar-nav" aria-label="Atelier">
+          {#each groupes as g}
+            <div class="groupe">
+              {#if g.titre}<p class="groupe-titre">{g.titre}</p>{/if}
+              {#each g.entrees as n}
+                {#if n.raison}{' '}
+                  <span class="eteint" aria-disabled="true">
+                    <span class="eteint-nom">{n.label}</span>
+                    <span class="eteint-raison">{n.raison}</span>
+                  </span>
+                {' '}{:else}{' '}
+                  <a href={n.href} class:active={$page.url.pathname === n.href}
+                     aria-current={$page.url.pathname === n.href ? 'page' : undefined}>{n.label}</a>
+                {' '}{/if}
+              {/each}
+            </div>
+          {/each}
+        </nav>
+
+        <div class="sidebar-footer">
+          <a class="user-email" href="/atelier/mon-compte" title="Mon compte">{$currentUser.email}</a>
+          <ChoixTheme />
+          <button class="logout-btn" on:click={handleLogout}>Déconnexion</button>
+        </div>
       </div>
     </aside>
 
     <div class="atelier-content">
+      <div class="bandeau"><RechercheBandeau /></div>
       <slot />
     </div>
   </div>
@@ -178,12 +169,20 @@
   }
   .role-badge.admin { background: var(--accent-fort); color: var(--sur-accent); }
 
+  .menu { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
+  .menu-bouton { display: none; }
+
   .sidebar-nav {
     flex: 1;
     display: flex;
     flex-direction: column;
     padding: .25rem .5rem;
-    gap: 2px;
+    gap: .55rem;
+  }
+  .groupe { display: flex; flex-direction: column; gap: 2px; }
+  .groupe-titre {
+    font-size: .66rem; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--texte-doux); padding: 0 .65rem; margin: .1rem 0 .1rem;
   }
 
   .sidebar-nav a, .sidebar-nav .eteint {
@@ -193,7 +192,10 @@
     color: var(--texte-doux);
     transition: background .12s;
   }
-  .sidebar-nav .eteint { opacity: .4; cursor: not-allowed; }
+  /* Une entrée éteinte garde sa raison à l'écran : un survol n'existe pas au toucher. */
+  .sidebar-nav .eteint { display: flex; flex-direction: column; cursor: not-allowed; }
+  .eteint-nom { opacity: .55; }
+  .eteint-raison { font-size: .68rem; color: var(--texte-doux); line-height: 1.3; }
   .sidebar-nav a.active { background: var(--accent); color: var(--sur-accent); }
   .sidebar-nav a:hover:not(.active) { background: var(--fond); color: var(--texte); }
 
@@ -228,22 +230,44 @@
     flex: 1;
     overflow-y: auto;
     background: var(--fond);
+    scroll-padding-top: 3.5rem;   /* le bandeau collant ne masque pas ce qui prend le focus */
   }
 
-  /* Sur un portable étroit (820 px), le menu latéral mangeait le quart de la
-     largeur et les tableaux débordaient : il devient une bande en haut, qui
-     défile de côté. */
+  /* Le champ de recherche reste sous les yeux quand la page défile. */
+  .bandeau {
+    position: sticky; top: 0; z-index: 40;
+    padding: .45rem 1.1rem;
+    background: var(--fond);
+    border-bottom: 1px solid var(--bordure);
+  }
+
+  /* Sur un portable ou un téléphone (≤ 900 px) le menu latéral mangeait la
+     largeur : il devient une barre d'une ligne, et le menu s'ouvre dessous, en
+     colonne, à la demande. Chaque entrée fait au moins 44 px de haut. */
   @media (max-width: 900px) {
     .atelier-shell { flex-direction: column; }
     .atelier-sidebar {
-      width: 100%; flex-direction: row; align-items: center;
-      padding: .3rem .5rem; border-right: none; border-bottom: 1px solid var(--bordure);
-      overflow-x: auto; gap: .5rem;
+      width: 100%; flex-direction: row; flex-wrap: wrap; align-items: center;
+      padding: .25rem .6rem; border-right: none; border-bottom: 1px solid var(--bordure);
+      gap: .5rem; position: relative; flex: none;
     }
-    .sidebar-header { border-bottom: none; margin: 0; padding: 0 .4rem; gap: .4rem; }
-    .sidebar-nav { flex-direction: row; flex: none; padding: 0; }
-    .sidebar-nav a, .sidebar-nav .eteint { white-space: nowrap; }
-    .sidebar-footer { flex-direction: row; align-items: center; border-top: none; padding: 0 .4rem; }
-    .user-email { display: none; }
+    .sidebar-header { border-bottom: none; margin: 0; padding: 0; gap: .5rem; justify-content: flex-start; }
+    .menu-bouton {
+      display: inline-flex; align-items: center; margin-left: auto;
+      min-height: 44px; padding: 0 .9rem; border-radius: 6px;
+      border: 1px solid var(--bordure-forte); color: var(--texte); font-size: .85rem;
+    }
+    .menu {
+      display: none; flex: 0 0 100%; max-height: calc(100vh - 7rem);
+      border-top: 1px solid var(--bordure); padding-top: .3rem;
+    }
+    .menu.ouvert { display: flex; }
+    .sidebar-nav { padding: 0; }
+    .sidebar-nav a { display: flex; align-items: center; min-height: 44px; font-size: .9rem; }
+    .sidebar-nav .eteint { min-height: 44px; justify-content: center; }
+    .sidebar-footer { flex-direction: column; align-items: stretch; padding: .5rem .4rem; gap: .3rem; }
+    .user-email { display: flex; align-items: center; min-height: 44px; font-size: .8rem; }
+    .logout-btn { min-height: 44px; text-align: left; font-size: .9rem; }
+    .bandeau { padding: .35rem .6rem; }
   }
 </style>

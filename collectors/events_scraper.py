@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 
+from . import mesure
 from .config import COMMUNE_NAME
 from .connecteurs import charger
 from .db import transaction
@@ -79,6 +80,8 @@ def main(dry_run: bool = False, depuis: str | None = None,
     articles = []
     for portee in portees:
         lot = list(connecteur.articles(portee, depuis))
+        # Le step tourne sans `depuis` : tout le fil du site, à chaque passe.
+        mesure.lu(f"vie-locale-{portee}", len(lot), None, complete=depuis is None)
         print(f"  [{portee}] {len(lot)} articles de vie locale")
         articles += lot
     if limit:

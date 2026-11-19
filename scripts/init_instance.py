@@ -8,7 +8,7 @@ interrogeant les référentiels nationaux :
   geo.api.gouv.fr                     commune, code postal, population, EPCI,
                                       communes membres, contour, centroïde
   recherche-entreprises.api.gouv.fr   SIREN et SIRET de la collectivité,
-                                      SIREN de l'EPCI, communes déléguées
+                                      SIREN de l'EPCI, anciennes communes
                                       encore inscrites au répertoire
 
 Ce que le script NE devine pas, et qu'il laisse à renseigner :
@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -62,11 +63,12 @@ REGLES_EXEMPLE = ROOT / "config" / "publication_rules.exemple.json"
 
 GEO = "https://geo.api.gouv.fr"
 ENTREPRISES = "https://recherche-entreprises.api.gouv.fr/search"
+COG = "https://api.insee.fr/metadonnees/geo/commune"
 UA = {"User-Agent": "VigieCivique/1.0 (amorçage d'instance, données publiques)"}
 
 
 def _get(url: str, timeout: int = 20):
-    req = urllib.request.Request(url, headers=UA)
+    req = urllib.request.Request(url, headers={**UA, "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8", errors="replace"))
@@ -103,41 +105,224 @@ def _bbox(contour: dict) -> list[float]:
             round(max(lats) + marge, 4), round(max(lngs) + marge, 4)]
 
 
-def _sirens(insee: str, nom: str) -> tuple[str, str]:
-    """SIREN et SIRET de la collectivité, depuis le répertoire des entreprises.
+def _prefixe_siren(code: str) -> str:
+    """Le SIREN d'une commune historique, sans sa clé finale.
 
-    Le SIREN d'une commune est construit : « 21 », puis le département sur deux
-    chiffres, puis le numéro de commune sur quatre (complété d'un zéro), puis
-    une clé. Vérifié sur trois communes de trois départements :
+    « 21 », puis le département sur deux chiffres, puis le numéro de commune
+    sur quatre (complété d'un zéro). Vérifié sur trois communes de trois
+    départements :
 
         30140 → 213001407      81037 → 218100378      26289 → 212602890
 
-    On le calcule et on le cherche en priorité, parce que le répertoire peut
-    contenir DEUX « COMMUNE DE X » — c'est le cas d'au moins une commune
-    rencontrée, dont un enregistrement récent côtoie l'historique. Prendre le
-    premier résultat, c'était fausser ensuite tout le filtrage des marchés
-    publics par SIREN acheteur, sans qu'aucun contrôle ne s'en aperçoive.
-
     La règle ne vaut pas pour la Corse ni l'outre-mer, dont les codes ne
-    s'alignent pas ainsi : on y retombe sur le premier résultat, en le signalant.
+    s'alignent pas ainsi : vide.
     """
-    attendu = ("21" + insee[:2] + "0" + insee[2:]
-               if insee[:2].isdigit() and not insee.startswith(("97", "98"))
-               else "")
+    if not code[:2].isdigit() or code.startswith(("97", "98")):
+        return ""
+    return "21" + code[:2] + "0" + code[2:]
+
+
+_PETITS_MOTS = {"de", "du", "des", "la", "le", "les", "sur", "sous", "en", "et",
+                "aux", "au", "l", "d"}
+
+
+def _nom_commune(nom_complet: str) -> str:
+    """« COMMUNE DE SAINT-MARTIN-DE-LA-PLAINE » → « Saint-Martin-de-la-Plaine ».
+
+    Le répertoire écrit en capitales sans accents : le nom obtenu est
+    approché, et marqué « à confirmer » par l'appelant. Les collecteurs le
+    comparent sous forme normalisée (sans accents ni casse), où il suffit.
+    """
+    nom = nom_complet.strip()
+    for prefixe in ("COMMUNE DE ", "COMMUNE D'", "COMMUNE D’", "COMMUNE "):
+        if nom.upper().startswith(prefixe):
+            nom = nom[len(prefixe):]
+            break
+    morceaux = []
+    for i, mot in enumerate(re.split(r"([ \-'’])", nom.lower())):
+        if i and mot in _PETITS_MOTS:
+            morceaux.append(mot)
+        else:
+            morceaux.append(mot[:1].upper() + mot[1:])
+    return "".join(morceaux)
+
+
+def _est_la_commune(r: dict, insee: str, nom: str) -> bool:
+    """L'entité du répertoire est-elle la commune elle-même ?"""
+    if (r.get("siege") or {}).get("commune") == insee:
+        return True
+    return _nom_commune(r.get("nom_complet", "")).lower() == nom.lower()
+
+
+def _noms_cog(insee: str) -> dict[str, str]:
+    """Code → nom de chaque commune qui a précédé celle-ci, au COG de l'Insee.
+
+    geo.api ne connaît que les communes actuelles : il rend les `anciensCodes`,
+    pas leur nom. Le COG les garde (« Véronne », « Le Margnès »), accents
+    compris. Vide si l'API ne répond pas : rien n'est deviné.
+    """
+    data = _get(f"{COG}/{urllib.parse.quote(insee)}/precedents")
+    if not isinstance(data, list):
+        return {}
+    return {d["code"]: d["intitule"] for d in data
+            if isinstance(d, dict) and d.get("code") and d.get("intitule")}
+
+
+def _siren_par_ancien_nom(code: str, nom_ancien: str) -> str:
+    """Le SIREN d'une absorbée cherché sous SON nom, quand le répertoire ne la
+    rend pas sous celui de la commune actuelle (Véronne, sortie seulement sous
+    « commune de Véronne »).
+
+    Seule une entité CESSÉE dont le SIREN porte le préfixe calculé du code est
+    retenue, et seulement si elle est seule : sinon rien, jamais deviner.
+    """
+    prefixe = _prefixe_siren(code)
+    if not prefixe:
+        return ""
+    q = urllib.parse.urlencode({"q": f"commune de {nom_ancien}"})
+    data = _get(f"{ENTREPRISES}?{q}") or {}
+    trouves = {r["siren"] for r in data.get("results", [])
+               if r.get("etat_administratif") == "C"
+               and r.get("siren", "").startswith(prefixe)
+               and r.get("nom_complet", "").upper().startswith("COMMUNE")}
+    return trouves.pop() if len(trouves) == 1 else ""
+
+
+def _sirens(insee: str, nom: str, anciens_codes: list[str] | tuple = (),
+            siren_geo: str = ""
+            ) -> tuple[str, str, dict[str, str], list[str], dict[str, str]]:
+    """SIREN et SIRET de la collectivité, noms des communes qu'elle a absorbées,
+    ses anciens SIREN, et le SIREN de chaque absorbée d'un autre code.
+
+    On calcule le SIREN attendu (`_prefixe_siren`) et on le cherche en
+    priorité, parce que le répertoire peut contenir DEUX « COMMUNE DE X » :
+    prendre le premier résultat, c'était fausser ensuite tout le filtrage des
+    marchés publics par SIREN acheteur, sans qu'aucun contrôle ne s'en aperçoive.
+
+    Une commune NOUVELLE (fusion) reçoit un SIREN en 200…, hors de la règle,
+    et les communes fusionnées restent au répertoire, CESSÉES, avec leur siège
+    réadressé dans la commune nouvelle. Quand la commune nouvelle a gardé le
+    code INSEE d'une ancienne, le SIREN « attendu » est celui de l'ancienne :
+    Vallouise-Pelvoux (05101) recevait celui de Pelvoux, cessée en 2017, et
+    l'OFGL, les balances DGFiP et les marchés de la commune revenaient vides
+    (relevé national du 01/11/2026). Une entité cessée n'est donc jamais
+    retenue ; si une seule entité active reste, c'est la commune.
+
+    Les cessées servent à deux choses :
+      - leur nom est l'ancien nom que le JO des associations et BODACC écrivent
+        encore. Rendu par code INSEE, celui de la commune elle-même compris
+        (Pelvoux sous 05101) ;
+      - celles du MÊME code INSEE sont la même collectivité sous un SIREN
+        antérieur : Saillans, 212602890 jusqu'en 2024, 938438454 depuis la
+        fusion du 01/01/2025. Ses comptes et ses marchés d'avant y restent
+        (`commune_sirens_anciens`). Une commune absorbée sous un autre code
+        (Vallouise, 05175) n'en est pas : ses comptes ne sont pas ceux de la
+        commune actuelle. Son SIREN est rendu à part (code → SIREN) : ses
+        comptes se relèvent à côté, jamais additionnés (tranché le 02/11/2026).
+
+    `siren_geo` est le SIREN que geo.api.gouv.fr rend pour la commune : il fait
+    foi AVANT le calcul, qui ne sait rien d'une fusion (26289 → 938438454,
+    05101 → 200064657, 30140 → 213001407). Il est cherché actif au répertoire ;
+    s'il n'y est pas, on le dit et on retombe sur le calcul. Vide (geo.api
+    passe par des 504), rien ne change : un échec de lecture n'est pas un écart.
+    """
+    attendu = _prefixe_siren(insee)
     q = urllib.parse.urlencode({"q": f"commune de {nom}", "code_commune": insee})
     data = _get(f"{ENTREPRISES}?{q}") or {}
     candidats = [r for r in data.get("results", [])
                  if r.get("nom_complet", "").upper().startswith("COMMUNE")]
+    actifs = [r for r in candidats if r.get("etat_administratif") != "C"]
+    cessees = [r for r in candidats if r.get("etat_administratif") == "C"]
 
-    for r in candidats:
-        if attendu and r.get("siren", "").startswith(attendu):
-            return r["siren"], (r.get("siege") or {}).get("siret", "")
-    if len(candidats) > 1:
-        print(f"  ⚠ {len(candidats)} entités « COMMUNE DE … » au répertoire, "
-              "aucune au format attendu : SIREN à vérifier à la main")
-    for r in candidats:
-        return r.get("siren", ""), (r.get("siege") or {}).get("siret", "")
-    return "", ""
+    meme_code = _prefixe_siren(insee)
+    sirens_anciens = [r["siren"] for r in cessees
+                      if meme_code and r.get("siren", "").startswith(meme_code)]
+    anciens_noms, sirens_absorbees = {}, {}
+    for code in (insee, *anciens_codes):
+        prefixe = _prefixe_siren(code)
+        for r in cessees:
+            if prefixe and r.get("siren", "").startswith(prefixe):
+                anciens_noms[code] = _nom_commune(r["nom_complet"])
+                if code != insee:
+                    sirens_absorbees[code] = r["siren"]
+
+    # Une absorbée que la recherche sous le nom actuel n'a pas rendue : on la
+    # cherche sous son propre nom, lu au COG (point 5 du chantier, 02/11/2026).
+    manquantes = [c for c in anciens_codes if c != insee and c not in sirens_absorbees]
+    noms_cog = _noms_cog(insee) if manquantes else {}
+    for code in manquantes:
+        if not noms_cog.get(code):
+            continue
+        siren_ancien = _siren_par_ancien_nom(code, noms_cog[code])
+        if siren_ancien:
+            sirens_absorbees[code] = siren_ancien
+            anciens_noms.setdefault(code, noms_cog[code])
+
+    choisi = _actif_par_siren(siren_geo, actifs) if siren_geo else None
+    if choisi is None:
+        choisi = next((r for r in actifs
+                       if attendu and r.get("siren", "").startswith(attendu)), None)
+        if choisi is not None and siren_geo:
+            print(f"  ⚠ SIREN de geo.api ({siren_geo}) écarté, calcul retenu "
+                  f"({choisi['siren']}) : à vérifier à la main")
+    if choisi is None:
+        # Hors de la règle de calcul (commune nouvelle, Corse, outre-mer), une
+        # entité n'est retenue que si elle EST la commune : son siège dans ce
+        # code INSEE, ou son nom exact. La recherche est plein texte : une
+        # autre collectivité y figure dès qu'elle a un établissement ici, et
+        # ses marchés seraient publiés comme ceux de la commune (revue
+        # sécurité de la PR #195). Avant, l'erreur vidait la collecte.
+        surs = [r for r in actifs if _est_la_commune(r, insee, nom)]
+        if len(surs) > 1:
+            print(f"  ⚠ {len(surs)} entités actives se disent la commune : "
+                  "SIREN à vérifier à la main")
+        choisi = surs[0] if surs else None
+        if choisi is None and actifs:
+            print(f"  ⚠ {len(actifs)} entité(s) « COMMUNE … » active(s), aucune "
+                  f"dont le siège ou le nom désigne {nom} : SIREN à renseigner")
+    if choisi is None:
+        if cessees and not actifs:
+            print(f"  ⚠ seules des entités cessées au répertoire pour {nom} : "
+                  "SIREN à renseigner à la main")
+        return "", "", anciens_noms, sirens_anciens, sirens_absorbees
+    return (choisi.get("siren", ""), (choisi.get("siege") or {}).get("siret", ""),
+            anciens_noms, [s for s in sirens_anciens if s != choisi.get("siren")],
+            sirens_absorbees)
+
+
+def _actif_par_siren(siren: str, actifs: list[dict]) -> dict | None:
+    """L'entité active du répertoire qui porte ce SIREN, ou None (avec un avertissement).
+
+    Parmi les candidats de la recherche « commune de <nom> » d'abord, puis par
+    une recherche sur le SIREN lui-même : le nom courant d'une commune nouvelle
+    n'est pas toujours celui du répertoire.
+    """
+    r = next((r for r in actifs if r.get("siren") == siren), None)
+    if r is not None:
+        return r
+    data = _get(f"{ENTREPRISES}?{urllib.parse.urlencode({'q': siren})}")
+    if data is None:
+        return None  # répertoire injoignable : le calcul prend le relais
+    r = next((r for r in data.get("results", []) if r.get("siren") == siren), None)
+    if r is None:
+        print(f"  ⚠ SIREN de geo.api ({siren}) absent du répertoire des entreprises")
+        return None
+    if r.get("etat_administratif") == "C":
+        print(f"  ⚠ SIREN de geo.api ({siren}) cessé au répertoire des entreprises")
+        return None
+    return r
+
+
+def _autres_cp(codes: list[str] | None) -> dict:
+    """`codes_postaux` quand la commune en a plusieurs, rien sinon.
+
+    `cp` reste le premier, pour tout ce qui n'en attend qu'un. Les collecteurs
+    qui INTERROGENT par code postal (RNA, BODACC) les prennent tous : une
+    commune nouvelle garde souvent ceux de ses anciennes communes, et le JO ne
+    rangeait sous le premier code de Vallouise-Pelvoux (05290) aucune
+    association écrite « Vallouise-Pelvoux » (relevé du 01/11/2026).
+    """
+    return {"codes_postaux": list(codes)} if codes and len(codes) > 1 else {}
 
 
 def _candidats_site(nom: str) -> list[str]:
@@ -153,7 +338,7 @@ def _candidats_site(nom: str) -> list[str]:
 def construire(insee: str) -> dict:
     print(f"[init] commune {insee}")
     commune = _get(f"{GEO}/communes/{insee}?fields=nom,code,codesPostaux,"
-                   f"population,centre,contour,epci,anciensCodes")
+                   f"population,centre,contour,epci,anciensCodes,siren")
     if not commune:
         raise SystemExit(f"Code INSEE inconnu : {insee}")
 
@@ -179,14 +364,30 @@ def construire(insee: str) -> dict:
                 "nom": c["nom"],
                 "cp": (c.get("codesPostaux") or [""])[0],
                 "population": c.get("population"),
+                **_autres_cp(c.get("codesPostaux")),
             }
+        # Une liste vide (geo.api muet, 16/11/2026) ou sans la commune écrirait
+        # une configuration que `collectors/config.py` refuse ensuite à chaque
+        # step : on s'arrête ici, en échec, plutôt que de l'écrire.
+        if insee not in membres:
+            raise SystemExit(
+                f"Communes de l'EPCI {epci['code']} illisibles ou sans {insee} "
+                f"({len(membres)} reçue(s)) : configuration non écrite.")
         print(f"  {len(membres)} communes membres")
     else:
         membres[insee] = {"nom": nom, "cp": cp,
-                          "population": commune.get("population")}
+                          "population": commune.get("population"),
+                          **_autres_cp(commune.get("codesPostaux"))}
         print("  commune isolée : aucun EPCI déclaré")
 
-    siren, siret = _sirens(insee, nom)
+    siren, siret, anciens_noms, sirens_anciens, sirens_absorbees = _sirens(
+        insee, nom, commune.get("anciensCodes") or [], commune.get("siren") or "")
+    if anciens_noms.get(insee) and insee in membres \
+            and anciens_noms[insee].lower() != nom.lower():
+        # L'ancien nom porté par le code de la commune elle-même : il
+        # n'a pas d'entrée parmi les anciennes communes, dont les clés sont des
+        # codes INSEE distincts.
+        membres[insee]["anciens_noms"] = [anciens_noms[insee]]
     # Le « code » d'un EPCI chez geo.api.gouv.fr EST son SIREN : inutile
     # d'interroger le répertoire des entreprises pour le retrouver, et risqué
     # (deux intercommunalités peuvent porter des noms proches).
@@ -205,14 +406,23 @@ def construire(insee: str) -> dict:
         detail = (_get(f"{GEO}/communes/{code_membre}?fields=nom,anciensCodes")
                   or {})
         for ancien in detail.get("anciensCodes") or []:
+            # Le nom ne se lit que pour la commune de collecte, au répertoire
+            # des entreprises (`_sirens`) ; ailleurs il reste à renseigner.
+            lu = anciens_noms.get(ancien, "") if code_membre == insee else ""
+            # Le SIREN fait d'une ancienne commune une absorbée relevée à part
+            # (OFGL, balances, marchés) : seulement pour la commune de collecte.
+            siren_ancien = sirens_absorbees.get(ancien) if code_membre == insee else None
             deleguees[ancien] = {
-                "nom": "", "cp": membres[code_membre]["cp"], "population": 0,
+                "nom": lu, "cp": membres[code_membre]["cp"], "population": 0,
                 "commune": code_membre,
+                **({"siren": siren_ancien} if siren_ancien else {}),
                 "_a_confirmer": f"ancienne commune fusionnée dans "
-                                f"{detail.get('nom', code_membre)}",
+                                f"{detail.get('nom', code_membre)}"
+                                + (" ; nom lu au répertoire SIRENE (sans ses "
+                                   "accents) ou au COG" if lu else ""),
             }
     if deleguees:
-        print(f"  {len(deleguees)} commune(s) déléguée(s) détectée(s) — "
+        print(f"  {len(deleguees)} ancienne(s) commune(s) détectée(s) — "
               "nom à confirmer, cf. _a_faire")
 
     centre = commune.get("centre", {}).get("coordinates", [None, None])
@@ -229,8 +439,9 @@ def construire(insee: str) -> dict:
         "departement_nom": dept_nom,
         "commune_siren": siren,
         "commune_siret": siret,
+        "commune_sirens_anciens": sirens_anciens,
         "communes": membres,
-        "communes_deleguees": deleguees,
+        "anciennes_communes": deleguees,
         "epci_nom": epci.get("nom", ""),
         "epci_siren": epci_siren,
         "commune_url": sites[0] if sites else "",
@@ -266,7 +477,7 @@ def construire(insee: str) -> dict:
             *([] if dept_nom else
               ["renseigner departement_nom (le nom, pas le code) — sans lui, "
                "crc ne peut pas rapprocher un rapport de la collectivité"]),
-            "confirmer le nom des communes déléguées, s'il y en a",
+            "confirmer le nom des anciennes communes, s'il y en a",
             "renseigner depot_url si le code est publié quelque part",
             "déclarer le statut de l'instance (« statut ») dès qu'un "
             "collectif la tient sur place : le site annonce « portage de "

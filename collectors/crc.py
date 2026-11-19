@@ -55,8 +55,9 @@ import urllib.parse
 import ssl
 import urllib.request
 
+from . import mesure, reseau
 from .archive import HEADERS, archive_fetch
-from .config import (COMMUNE_INSEE, COMMUNE_NAME, DEPARTEMENT,
+from .config import (COMMUNE_INSEE, COMMUNE_NAME, COMMUNES, DEPARTEMENT,
                      DEPARTEMENT_NOM, EPCI_NOM, PREFECTURE_NOM, REQUEST_DELAY)
 from .db import get_conn
 from .erreurs import ConfigurationManquante
@@ -149,8 +150,8 @@ def _fetch(terme: str) -> str:
     url = f"{RECHERCHE}?{urllib.parse.urlencode({'search': terme})}"
     requete = urllib.request.Request(url, headers=HEADERS)
     try:
-        with urllib.request.urlopen(requete, timeout=30,
-                                    context=ssl.create_default_context()) as reponse:
+        with reseau.ouvrir(requete, timeout=30,
+                           context=ssl.create_default_context()) as reponse:
             brut = reponse.read()
             statut = reponse.status
     except Exception as erreur:
@@ -202,7 +203,28 @@ def extraire(html: str) -> list[dict]:
     return trouvees
 
 
-def correspond(titre: str, nom_attendu: str, departement: str, *, epci: bool) -> bool:
+def _sans_siege(nom: str, membres) -> str:
+    """Le nom d'un EPCI sans la commune de son siège écrite à la suite.
+
+    Le site écrit « Communauté de communes Pays des Écrins - Argentière-la-Bessée
+    (Hautes-Alpes) » : le nom, puis le siège. Les mots du siège manquent au nom
+    déclaré, et le bon rapport était écarté (relevé de Vallouise-Pelvoux,
+    02/11/2026). Le suffixe ne tombe que s'il nomme EXACTEMENT une commune
+    membre du registre : « La station des Arcs - Commune de Bourg-Saint-Maurice »
+    ou un siège hors de l'intercommunalité restent dans le nom, et l'écartent.
+    """
+    # L'article de tête seul est ignoré : le COG écrit « L'Argentière-la-Bessée »,
+    # le site « Argentière-la-Bessée ». Rien d'autre n'est relâché.
+    sans_article = lambda n: re.sub(r"^(?:l|le|la|les) ", "", _plat(n))
+    plats = {sans_article(m) for m in membres if m}
+    trouve = re.match(r"^(.*\S)\s+(?:-|–|à)\s+(.+?)\s*$", nom)
+    if trouve and sans_article(trouve.group(2)) in plats:
+        return trouve.group(1)
+    return nom
+
+
+def correspond(titre: str, nom_attendu: str, departement: str, *, epci: bool,
+               membres=None) -> bool:
     """Le titre désigne-t-il BIEN cette collectivité-ci ?
 
     Deux conditions qui doivent tenir ENSEMBLE, et non l'une ou l'autre : le
@@ -228,7 +250,13 @@ def correspond(titre: str, nom_attendu: str, departement: str, *, epci: bool) ->
     if _plat(entre_parentheses.group(1)) != _plat(departement):
         return False
 
-    mots_titre = _mots_utiles(titre[: entre_parentheses.start()])
+    nom_titre = titre[: entre_parentheses.start()]
+    if epci:
+        # `membres` : les noms des communes de l'EPCI (le registre `communes`
+        # de l'instance par défaut), seules admises comme siège à retirer.
+        nom_titre = _sans_siege(nom_titre, (c["nom"] for c in COMMUNES.values())
+                                if membres is None else membres)
+    mots_titre = _mots_utiles(nom_titre)
     mots_attendus = _mots_utiles(nom_attendu)
     if not mots_titre or not mots_attendus:
         return False
@@ -271,7 +299,11 @@ def run_crc() -> dict:
     with get_conn() as conn:
         for terme, type_event, epci in cibles:
             page = _fetch(terme)
-            for publication in extraire(page):
+            publications = extraire(page)
+            # Les résultats de la recherche, avant le rapprochement. `_fetch`
+            # rend "" sur une erreur, et le step reste `ok` : ce zéro alerte.
+            mesure.lu(f"ccomptes-{type_event}", len(publications), complete=True)
+            for publication in publications:
                 if correspond(publication["titre"], terme, departement, epci=epci):
                     releve["trouves"] += 1
                     if _enregistrer(conn, publication, type_event):

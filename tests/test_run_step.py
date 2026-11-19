@@ -88,6 +88,7 @@ def test_une_interruption_au_clavier_remonte_et_se_note(run_all, monkeypatch):
 SORTIES_ADMISES = {
     ("config.py", "<module>"):  "à l'import, avant tout step : sans instance.json rien ne peut tourner",
     ("config.py", "_exiger"):   "idem — clé obligatoire d'instance.json, lue à l'import",
+    ("config.py", "_sirens_valides"): "idem — SIREN mal formé dans instance.json, lu à l'import",
     ("config.py", "registre_du_step"): "réglage d'instance incohérent ; rattrapé par run_step",
     ("connecteurs/__init__.py", "charger"): "connecteur déclaré inconnu ; rattrapé par run_step",
     ("cm_ocr.py", "_check_ocr_tooling"): "outil en ligne de commande : ocrmypdf absent du poste",

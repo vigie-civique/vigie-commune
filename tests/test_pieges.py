@@ -66,11 +66,12 @@ def _pieger_la_base(db: Path) -> None:
                  (f"Subvention à la Boulangerie — Mme PIEGE_DEPORT, {NE}",
                   json.dumps({"conflit_interet": "Élue de Testonville ne participe pas"})))
 
-    # Un acte publié, lui : le nom reste, la naissance et le domicile non.
+    # Un acte publié, lui : la décision reste ; le particulier y est désigné
+    # par son rôle (règle du 27/10/2026), sa naissance et son domicile masqués.
     acte = conn.execute(
         "INSERT INTO events (type, date, title, content, source) VALUES ('deliberation',"
         " '2026-02-01', ?, 'Le conseil décide.', 'interieur')",
-        (f"Aide à M. Jean TEMOIN_ACTE, {NE}, demeurant 5 rue PIEGE_TITRE",)).lastrowid
+        (f"Aide TEMOIN_ACTE à M. Jean PIEGENOMME, {NE}, demeurant 5 rue PIEGE_TITRE",)).lastrowid
     # Une note de travail sur cet acte, sans rien y corriger.
     conn.execute("INSERT INTO annotations (object_type, object_id, review_status, note)"
                  " VALUES ('deliberation', ?, 'retenu', 'voir M. PIEGE_NOTE, 5 rue des Lilas')",
@@ -101,6 +102,39 @@ def _pieger_la_base(db: Path) -> None:
         "UPDATE relations SET metadata = ? WHERE relation_type = 'maire'",
         (json.dumps({"precision": "élue domiciliée 5 rue PIEGE_LIEN", "birth_year": 1961,
                      "note": "PIEGE_META"}),))
+
+    # Quatre données de personnes que la fiche publiée (liste fermée de champs)
+    # ne reprend pas aujourd'hui : chacune est posée sur un objet PUBLIÉ (l'élue,
+    # la boulangerie, une association du périmètre), sinon le piège ne prouverait rien.
+    asso = conn.execute(
+        "INSERT INTO entities (type, name, commune, perimetre, confidence)"
+        " VALUES ('association', 'Association TEMOIN_ASSO', 'Testonville', 'C1', 'verified')"
+    ).lastrowid
+    conn.execute("INSERT INTO relations (from_id, to_id, relation_type, confidence)"
+                 " VALUES (?, ?, 'subventionné', 'verified')", (asso, mairie))
+    # 1. adresse et mois de naissance d'une personne publiée
+    conn.execute("UPDATE entities SET address = '5 rue PIEGE_ADRESSE' WHERE id = ?", (elue,))
+    conn.execute("INSERT OR REPLACE INTO persons (entity_id, firstname, lastname, birth_month)"
+                 " VALUES (?, 'Élue', 'ÉPREUVE', 7)", (elue,))
+    # 2. note d'association au format de collectors/rna.py
+    conn.execute(
+        "INSERT INTO entity_notes (entity_id, note, source, confidence) VALUES (?, ?, 'rna',"
+        " 'probable')",
+        (asso, json.dumps({"responsable": "PIEGE_RESPONSABLE",
+                           "contacts": ["PIEGE_TEL_RNA", "PIEGE_MEL_RNA@exemple.fr"],
+                           "url": "https://exemple.fr/PIEGE_RNA"}, ensure_ascii=False)))
+    # 3. note d'une décision sur une relation dont un bout est une personne
+    rel = un("SELECT id FROM relations WHERE relation_type = 'maire'")
+    conn.execute("INSERT INTO annotations (object_type, object_id, review_status, note)"
+                 " VALUES ('relation', ?, 'retenu', 'PIEGE_NOTE_RELATION')", (rel,))
+    # 4. contacts et sites, sur une personne et sur une structure publiées
+    for eid, tag in ((elue, "PERS"), (boulangerie, "STRUCT")):
+        for type_, valeur in (("phone", f"PIEGE_TEL_{tag}"), ("email", f"PIEGE_MEL_{tag}@exemple.fr"),
+                              ("website", f"https://exemple.fr/PIEGE_CONTACT_{tag}")):
+            conn.execute("INSERT INTO contacts (entity_id, type, value) VALUES (?, ?, ?)",
+                         (eid, type_, valeur))
+        conn.execute("INSERT INTO entity_websites (entity_id, url, status) VALUES (?, ?,"
+                     " 'validated')", (eid, f"https://exemple.fr/PIEGE_SITE_{tag}"))
     conn.commit()
     conn.close()
 
@@ -125,6 +159,22 @@ def test_le_snapshot_piege_nest_pas_vide(piege):
                             ("TEMOIN_FLUX", "flows.json"),
                             ("TEMOIN_APPROBATION", "approbations.json")):
         assert temoin in textes[fichier], f"{temoin} absent de {fichier}"
+    assert "Aide TEMOIN_ACTE à un particulier" in textes["events.json"]
+    assert not [nom for nom, texte in textes.items() if "PIEGENOMME" in texte]
+    # Les objets qui portent les pièges de personnes sont bien publiés : sans
+    # cela, un piège rattaché à rien de publié ne prouverait rien.
+    for nom in ("Association TEMOIN_ASSO", "Élue de Testonville", "Boulangerie d'épreuve"):
+        assert nom in textes["entities.json"], f"{nom} absent de entities.json"
+    assert "Élue de Testonville" in textes["relations.json"]
+
+
+def test_ni_mois_de_naissance_ni_adresse_dune_personne(piege):
+    """`birth_month` est un entier (7) et `address` est semée : aucune sortie ne
+    porte ces deux clés. L'adresse (PIEGE_ADRESSE) est aussi couverte par
+    `test_aucun_piege_ne_sort` ; le mois ne l'est que par ici."""
+    for nom, texte in _textes(piege[0]).items():
+        assert "birth_month" not in texte, f"birth_month dans {nom}"
+        assert not re.search(r'"(address|adresse)"\s*:\s*"[^"]*PIEGE', texte), nom
 
 
 def test_aucun_piege_ne_sort(piege):

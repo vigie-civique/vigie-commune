@@ -3,6 +3,7 @@
 
     python3 scripts/redecouper_pv.py              # relit et montre ce qui périme
     python3 scripts/redecouper_pv.py --appliquer  # relit ET retire les périmés
+    python3 scripts/redecouper_pv.py --tout       # liste chaque périmé, sans « … N autres »
 
 La relecture écrit dans les deux cas — c'est une collecte, et elle est
 idempotente. `--appliquer` ne commande que la SUPPRESSION des actes périmés,
@@ -218,6 +219,9 @@ def main() -> int:
                     help="reconnaissance optique des PDF scannés")
     ap.add_argument("--portee", choices=["commune", "epci"], action="append",
                     help="par défaut : les deux")
+    ap.add_argument("--tout", action="store_true",
+                    help="liste tous les actes périmés et conservés, titre plus long : "
+                         "à lire avant --appliquer quand la liste dépasse l'écran")
     args = ap.parse_args()
     portees = args.portee or ["commune", "epci"]
 
@@ -240,18 +244,21 @@ def main() -> int:
         TYPES).fetchone()[0]
 
     print(f"\n{apres} actes après relecture, dont {len(a_retirer)} périmés à retirer")
-    for eid, date, titre, type_, _ in a_retirer[:12]:
-        print(f"   {date or '?':<11} [{type_}] {(titre or '')[:60]}")
-    if len(a_retirer) > 12:
-        print(f"   … {len(a_retirer) - 12} autres")
+    # Sans --tout, la liste s'arrête à douze : le 17/11/2026, Lasalle comptait
+    # 106 périmés, et --appliquer en aurait retiré 94 que personne n'avait lus.
+    n_retirer, n_retenus, largeur = (None, None, 120) if args.tout else (12, 10, 60)
+    for eid, date, titre, type_, _ in a_retirer[:n_retirer]:
+        print(f"   {date or '?':<11} [{type_}] {(titre or '')[:largeur]}")
+    if n_retirer and len(a_retirer) > n_retirer:
+        print(f"   … {len(a_retirer) - n_retirer} autres (--tout pour les lire)")
 
     if retenus:
         print(f"\n{len(retenus)} acte(s) périmé(s) mais PORTANT quelque chose "
               f"— conservés, à trancher dans l'atelier :")
-        for eid, date, titre, type_, n in retenus[:10]:
-            print(f"   {date or '?':<11} {(titre or '')[:52]}  ({n} rattachement(s))")
-        if len(retenus) > 10:
-            print(f"   … {len(retenus) - 10} autres")
+        for eid, date, titre, type_, n in retenus[:n_retenus]:
+            print(f"   {date or '?':<11} {(titre or '')[:largeur]}  ({n} rattachement(s))")
+        if n_retenus and len(retenus) > n_retenus:
+            print(f"   … {len(retenus) - n_retenus} autres (--tout pour les lire)")
 
     if not args.appliquer:
         with conn:

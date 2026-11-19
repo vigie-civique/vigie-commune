@@ -143,6 +143,13 @@ export function load() {
     // Qualifié au build (`export_guichets`) : chaque type retenu, même sans
     // guichet — l'annuaire ne rattache pas tout.
     guichets: fichier.guichets || null,
+    // Qualifiés au build (`sources_data_gouv.py`) : la mention imposée des
+    // loyers, le total seul des logements sociaux sous trois logements, les
+    // seules cantines publiques nommées (avis DPO du 29/10/2026).
+    loyers: fichier.loyers || null,
+    rpls: fichier.rpls || null,
+    enaf: fichier.enaf || null,
+    cantines: fichier.cantines || null,
     // Section → dossier thématique publié sur le même sujet (lot 8).
     dossiers: dossiersDeLaPage('/territoire'),
   }

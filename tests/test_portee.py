@@ -180,3 +180,20 @@ class TestDerniereTrace:
         assert _annee_de_trace(None) is None
         assert _annee_de_trace("") is None
         assert _annee_de_trace("sans date") is None
+
+
+# ─── La portée d'un marché : son acheteur, pas son périmètre ──────────────────
+
+def test_un_marche_de_la_commune_et_de_l_epci():
+    from scripts.snapshot.argent import portee_marche
+    assert portee_marche(10, 10, 20) == "commune"
+    assert portee_marche(20, 10, 20) == "intercommunalite"
+
+
+def test_une_commune_voisine_n_est_pas_l_intercommunalite():
+    """Défaut du 28/10/2026 à Saillans : une commune voisine (C2) passait pour
+    l'EPCI, un syndicat qui siège dans la commune (C1) pour la commune."""
+    from scripts.snapshot.argent import portee_marche
+    assert portee_marche(30, 10, 20) == "territoire"
+    assert portee_marche(None, 10, 20) == "territoire"
+    assert portee_marche(None, None, None) == "territoire"

@@ -13,7 +13,10 @@ on:
   # (minutes Actions comptées tant que le dépôt est privé).
   push:
     branches: [main]
+  # `ready_for_review` en plus des trois types par défaut : une PR ouverte en
+  # brouillon ne joue rien (cf. `tests-deps`), et passer « prête » la contrôle.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
   # Cadence plancher des jobs lourds sur le moteur : allégée le 20/10, la CI ne
   # les jouait plus qu'à la main, et personne ne l'a fait — 30 commits déployés
@@ -26,13 +29,26 @@ on:
 # part tel quel dans le miroir public `vigie-commune`, où tout est gratuit — et
 # chaque synchro y passe par une PR. D'où deux régimes, décidés par le dépôt :
 #   - sur le moteur, une PR comme un push sur main ne jouent que `tests-deps`
-#     (la suite entière) et `generique` ; le reste se lance à la main
-#     (workflow_dispatch) et chaque lundi (schedule). Le push sur main DOIT
+#     (la suite entière, précédée de deux étapes de garde : la construction
+#     de l'archive du kit et la collecte des essais sans dépendances, pour ne
+#     pas attendre le lundi) et `generique` ; le reste se lance à la main
+#     (workflow_dispatch) et chaque lundi (schedule), où `kit` et `tests`
+#     jouent en entier. Le push sur main DOIT
 #     jouer quelque chose : `vigie_atelier_deployer.sh` exige « completed
 #     success » sur la révision qu'il déploie, et un passage tout sauté
 #     conclut « skipped » ;
 #   - partout ailleurs (miroir, fork, clone), tout tourne, comme avant.
 # Le test est `!= moteur`, pas `== vigie-commune` : un fork joue tout.
+#
+# Deux économies de plus sur le moteur (01/11/2026 : ~2 500 min par mois, dont
+# 40 % rejouaient au push sur main ce que la PR venait de valider) :
+#   - une PR en BROUILLON ne joue ni `tests-deps` ni `generique`. On empile les
+#     commits en brouillon, on la passe « prête » une fois : un seul passage ;
+#   - au push sur main, `deja-vu` cherche la PR fusionnée et ne fait sauter les
+#     deux jobs que si son passage vert a éprouvé EXACTEMENT l'arbre poussé
+#     (conditions dans le job). Le passage conclut alors « success » par
+#     `deja-vu` seul, et la porte des déployeurs reste la même. Au moindre
+#     doute (rebase, branche en retard sur main, API muette), tout rejoue.
 concurrency:
   group: controles-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -52,7 +68,7 @@ jobs:
         python: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: ${{ matrix.python }}
       - name: Dépendances de test
@@ -64,6 +80,85 @@ jobs:
       - name: Tests
         run: python -m pytest -ra
 
+  deja-vu:
+    # Au push sur main du moteur seulement. Sort `vert=true` si, et seulement si :
+    #   1. le commit poussé M est le `merge_commit_sha` d'une PR fusionnée de ce
+    #      dépôt (pas d'un fork), de tête H ;
+    #   2. M^1 (main avant la fusion) est un ancêtre de H : la branche était à
+    #      jour. Comme main n'avance qu'en avance rapide (ruleset), la base B
+    #      contre laquelle la PR a été éprouvée est elle aussi un ancêtre de H,
+    #      donc l'arbre éprouvé (fusion de H dans B) est celui de H ;
+    #   3. l'arbre de M est celui de H : la fusion n'a rien ajouté ;
+    #   4. un passage `pull_request` de ce workflow sur H a `tests-deps` ET
+    #      `generique` en « success » (pas « skipped » : un brouillon ne compte pas).
+    # Une fusion par rebase de plusieurs commits échoue à 2 : tout rejoue (un
+    # rebase d'un seul commit passe, à raison : même arbre). Une PR dont la base
+    # a changé en cours de route est écartée : son passage vert a pu éprouver
+    # une autre base. Toute erreur rend false ; et si le job lui-même tombe
+    # (checkout, runner), `continue-on-error` laisse une sortie vide : les deux
+    # jobs rejouent et le passage conclut sur eux, pas sur cette panne.
+    if: github.repository == 'vigie-civique/moteur' && github.event_name == 'push'
+    continue-on-error: true
+    timeout-minutes: 5
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      vert: ${{ steps.verdict.outputs.vert }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # L'historique des commits sans leurs arbres : assez pour `merge-base`
+          # et `^{tree}`, presque rien à télécharger.
+          fetch-depth: 0
+          filter: tree:0
+      - id: verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          M: ${{ github.sha }}
+        run: |
+          vert=false
+          trap 'echo "vert=$vert" >> "$GITHUB_OUTPUT"; echo "deja-vu : vert=$vert"' EXIT
+          non() { echo "→ on rejoue : $1"; exit 0; }
+
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$M/pulls" \
+                 --jq "[.[] | select(.merged_at != null and .merge_commit_sha == \"$M\"
+                        and .head.repo.full_name == \"$GITHUB_REPOSITORY\")][0]
+                       | select(. != null) | \"\(.number) \(.head.sha)\"") \
+            || non "API des PR muette"
+          [ -n "$pr" ] || non "$M n'est la fusion d'aucune PR de ce dépôt"
+          read -r num H <<< "$pr"
+          echo "PR #$num, tête $H"
+
+          git fetch -q --filter=tree:0 origin "+refs/pull/$num/head:refs/remotes/pr/$num" \
+            || non "tête de la PR introuvable"
+          git merge-base --is-ancestor "$M^1" "$H" || non "la branche était en retard sur main"
+          tm=$(git rev-parse --verify "$M^{tree}") && th=$(git rev-parse --verify "$H^{tree}") \
+            || non "arbre illisible"
+          [ "$tm" = "$th" ] || non "l'arbre poussé n'est pas celui de la PR"
+
+          # En deux temps : sans pipefail, `gh | awk` rendrait le statut d'awk,
+          # et une API muette passerait pour « aucun changement de base ».
+          ev=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$num/events" \
+                 --jq '.[] | select(.event == "base_ref_changed") | .id') \
+            || non "événements de la PR muets"
+          [ -z "$ev" ] || non "la base de la PR a changé en cours de route"
+
+          for run in $(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/controles.yml/runs?event=pull_request&head_sha=$H&status=success" \
+                         --jq '.workflow_runs[].id'); do
+            ok=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs" \
+                   --jq '[.jobs[] | select((.name == "tests-deps" or .name == "generique") and .conclusion == "success")] | length') \
+              || continue
+            if [ "$ok" = 2 ]; then
+              echo "passage $run : tests-deps et generique verts sur cet arbre"
+              vert=true
+              exit 0
+            fi
+          done
+          non "aucun passage de PR vert (tests-deps + generique) sur $H"
+
   tests-deps:
     # Le job précédent saute ce qui exige l'API ou les collecteurs. Celui-ci
     # installe tout et rejoue la suite ENTIÈRE : sans lui, un fichier sauté
@@ -71,12 +166,39 @@ jobs:
     # d'origine — l'interface grise ce qu'elle interdit, mais elle ne protège
     # que celui qui l'utilise. Rien ne sort sur le réseau pour autant : le
     # client de test de FastAPI appelle l'application dans le même processus.
+    #
+    # `!cancelled()` : sans lui, `deja-vu` sauté (tout sauf un push du moteur)
+    # ferait sauter ce job. Sauté aussi sur une PR en brouillon.
+    needs: deja-vu
+    if: ${{ !cancelled() && needs.deja-vu.outputs.vert != 'true' && github.event.pull_request.draft != true }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.13"
+      - name: L'archive du kit se construit
+        # Ce que `kit` joue le lundi, joué aussi sur chaque PR prête : sans cela,
+        # un défaut entré par une PR n'apparaît que le lundi suivant. Placée
+        # AVANT « Dépendances » : `build_kit.py` n'en demande aucune (le job
+        # `kit` n'en installe pas) et doit voir un dépôt propre, avant que la
+        # suite n'y écrive quoi que ce soit.
+        env:
+          VIGIE_INSTANCE: tests/instance_test.json
+        run: python scripts/build_kit.py
+      - name: Les essais se collectent sans dépendances
+        # Ce que `tests` joue le lundi, réduit à la collecte : un import de
+        # numpy, de pdfplumber ou d'un collecteur en tête d'un essai casse un
+        # poste qui n'a que pytest, et la collecte suffit à le voir, sans
+        # exécuter la suite. Placée AVANT « Dépendances » : elle n'a de sens
+        # que sans les paquets. Dans un venv à part : un `pip install pytest`
+        # dans l'environnement du job tirerait `packaging` sans empreinte, et
+        # le `--require-hashes` suivant répondrait « déjà installé » sans rien
+        # contrôler (avis vigie-securite).
+        run: |
+          python -m venv "$RUNNER_TEMP/collecte"
+          "$RUNNER_TEMP/collecte/bin/pip" install pytest
+          "$RUNNER_TEMP/collecte/bin/python" -m pytest --collect-only -q
       - name: Dépendances
         # Deux appels : le mode empreintes s'étend à tout ce qu'un appel
         # installe, et pytest n'a pas d'empreinte dans requirements.txt.
@@ -87,11 +209,13 @@ jobs:
         # Un test SAUTÉ ici est un défaut, pas une information : tout est
         # installé, donc un skip dénonce un paquet absent de requirements.txt.
         # Deux collecteurs ont vécu des mois dans cet angle mort.
+        # Seule exception : les essais des gardes de .claude/, qui ne part pas
+        # dans le miroir public ; leur saut dit « (miroir public) ».
         run: |
           python -m pytest -ra | tee resultat.txt
           statut=${PIPESTATUS[0]}
           if [ "$statut" -ne 0 ]; then exit "$statut"; fi
-          if grep -q '^SKIPPED' resultat.txt; then
+          if grep '^SKIPPED' resultat.txt | grep -qv '(miroir public)$'; then
             echo "::error::un test sauté alors que les dépendances sont installées"
             exit 1
           fi
@@ -112,7 +236,7 @@ jobs:
         python: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: ${{ matrix.python }}
       - name: Dépendances
@@ -134,17 +258,28 @@ jobs:
   generique:
     # Séparé des tests : ce contrôle est l'admission du kit. Le voir échouer
     # seul dit immédiatement qu'une particularité locale est entrée dans le
-    # moteur, sans avoir à lire un rapport de suite.
+    # moteur, sans avoir à lire un rapport de suite. Mêmes sauts que `tests-deps`.
+    needs: deja-vu
+    if: ${{ !cancelled() && needs.deja-vu.outputs.vert != 'true' && github.event.pull_request.draft != true }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.13"
       - name: Le moteur ne nomme aucune commune
         env:
           VIGIE_INSTANCE: tests/instance_test.json
         run: python scripts/verifier_generique.py
+      - name: Aucun nom indéfini dans le code Python
+        # Un nom indéfini ne casse qu'à l'exécution, et seulement sur la branche
+        # qui le porte : `len(COMMUNES)` dans le message d'échec d'osm, `_MOIS`
+        # dans les dates de PV de cm_parser (retiré le 13/08). Trouvés le
+        # 26/10/2026 sur le VPS, pas par la suite. Seulement F821-F823 : les
+        # autres règles de pyproject ont un passif à solder d'abord.
+        run: |
+          pip install ruff==0.17.2
+          ruff check --select F821,F822,F823 --output-format github .
 
   kit:
     # Fabrique l'archive distribuable sur un dépôt sans instance ni base : c'est
@@ -154,7 +289,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.13"
       - name: L'archive se construit et ne contient rien d'interdit
@@ -171,7 +306,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413  # v6.1.0
         with:
           # La version vient du champ `packageManager` du paquet.
           package_json_file: public/package.json
@@ -182,7 +317,7 @@ jobs:
           node-version: "22"
           cache: pnpm
           cache-dependency-path: public/pnpm-lock.yaml
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.13"
       - name: Base d'épreuve
@@ -347,10 +482,12 @@ jobs:
         # qu'on éprouve, pas le site en ligne, et ils ne s'écrivent pas pareil.
         # Chrome est préinstallé sur ubuntu-24.04.
         #
-        # La mise en forme d'archive (chemins relatifs, LISEZ-MOI, lanceurs)
-        # vit dans le dépôt du portail, absent d'ici : la condition `file://`
-        # n'est donc pas éprouvée par cette CI, et le contrôle le dit. Elle
-        # l'est sur le portail, après chaque `prepare_offline_export`.
+        # Depuis le 01/11/2026, le double-clic est éprouvé ICI aussi : chaque
+        # page doit s'hydrater en `file://`, le sélecteur répondre, la recherche
+        # et la carte recevoir leurs fichiers (scripts/pour_le_double_clic.mjs).
+        # Seuls les LIENS en `file://` attendent la mise en forme d'archive
+        # (chemins relatifs, LISEZ-MOI), qui vit dans le dépôt du portail : le
+        # contrôle le dit, et le portail les éprouve après `prepare_offline_export`.
         working-directory: public
         env:
           VIGIE_HORS_LIGNE: "1"
@@ -369,7 +506,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413  # v6.1.0
         with:
           # La version vient du champ `packageManager` du paquet.
           package_json_file: dashboard/package.json
@@ -378,7 +515,7 @@ jobs:
           node-version: "22"
           cache: pnpm
           cache-dependency-path: dashboard/pnpm-lock.yaml
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.13"
       - name: Libellés de l'instance factice
@@ -433,10 +570,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.13"
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413  # v6.1.0
         with:
           # La version vient du champ `packageManager` du paquet.
           package_json_file: public/package.json

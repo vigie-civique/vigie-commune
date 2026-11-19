@@ -29,7 +29,7 @@ from datetime import date
 from .archive import fetch_json
 from .db import get_conn
 
-from .config import COMMUNE_NAME, COMMUNE_SIREN as SIREN_COMMUNE, HEADERS
+from .config import COMMUNE_NAME, COMMUNES_ABSORBEES, HEADERS, releve_et_siren
 DATASET = "ofgl-base-communes"
 API_BASE = "https://data.ofgl.fr/api/explore/v2.1/catalog/datasets"
 # OFGL publie les comptes exécutés avec ~1 an de décalage. On balaie jusqu'à
@@ -56,25 +56,36 @@ PAGE = 100
 
 
 def fetch_year(year: int) -> list[dict]:
-    """Tous les budgets de la commune pour l'exercice (principal et annexes).
+    """Tous les budgets de la commune pour l'exercice (principal et annexes)."""
+    return fetch_year_siren(year)[1]
 
-    Plusieurs budgets multiplient les lignes par agrégat : on pagine.
-    """
+
+def fetch_year_siren(year: int) -> tuple[str | None, list[dict]]:
+    """`(SIREN qui a répondu, lignes)`. Plusieurs budgets multiplient les
+    lignes par agrégat : on pagine."""
+    # `None` (erreur de lecture) ne passe pas à l'ancien SIREN ; l'appelant
+    # n'attend qu'une liste.
+    siren, lignes = releve_et_siren(lambda s: _fetch_year(year, s))
+    return siren, lignes or []
+
+
+def _fetch_year(year: int, siren: str) -> list[dict] | None:
     results: list[dict] = []
     offset = 0
     while True:
         params = urllib.parse.urlencode({
-            "where": f'siren="{SIREN_COMMUNE}" AND year(exer)={year}',
+            "where": f'siren="{siren}" AND year(exer)={year}',
             "order_by": "type_de_budget, agregat",
             "limit": PAGE,
             "offset": offset,
         })
         url = f"{API_BASE}/{DATASET}/records?{params}"
         try:
-            data = fetch_json(url, source="ofgl", timeout=30, headers=HEADERS)
+            data = fetch_json(url, source="ofgl", timeout=30, headers=HEADERS,
+                              complete=True)
         except Exception as e:
             print(f"  [erreur] {year} : {e}")
-            return []
+            return None
         page = data.get("results", [])
         results.extend(page)
         if len(page) < PAGE:
@@ -82,18 +93,27 @@ def fetch_year(year: int) -> list[dict]:
         offset += PAGE
 
 
-def fetch_consolide(year: int) -> list[dict]:
-    """Les agrégats consolidés de la commune pour l'exercice (une ligne par agrégat)."""
+def fetch_consolide(year: int, siren: str | None = None) -> list[dict]:
+    """Les agrégats consolidés de la commune pour l'exercice (une ligne par agrégat).
+
+    `siren` : celui sous lequel les budgets de l'exercice ont été lus — le
+    consolidé se prend sous le même, jamais sous un autre."""
+    if siren:
+        return _fetch_consolide(year, siren) or []
+    return releve_et_siren(lambda s: _fetch_consolide(year, s))[1] or []
+
+
+def _fetch_consolide(year: int, siren: str) -> list[dict] | None:
     params = urllib.parse.urlencode({
-        "where": f'siren="{SIREN_COMMUNE}" AND year(exer)={year}',
+        "where": f'siren="{siren}" AND year(exer)={year}',
         "limit": PAGE,
     })
     try:
         data = fetch_json(f"{API_BASE}/{DATASET_CONSOLIDE}/records?{params}",
-                          source="ofgl", timeout=30, headers=HEADERS)
+                          source="ofgl", timeout=30, headers=HEADERS, complete=True)
     except Exception as e:
         print(f"  [erreur] consolidé {year} : {e}")
-        return []
+        return None
     return data.get("results", [])
 
 
@@ -157,39 +177,81 @@ def ensure_table(conn):
             rural               TEXT,
             source              TEXT DEFAULT 'ofgl',
             created_at          TEXT DEFAULT (datetime('now')),
+            siren               TEXT,
             UNIQUE(year, agregat)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ofgl_agregats_absorbees (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            siren               TEXT NOT NULL,
+            year                INTEGER NOT NULL,
+            agregat             TEXT NOT NULL,
+            montant             REAL,
+            euros_par_habitant  REAL,
+            population          INTEGER,
+            tranche_population  TEXT,
+            rural               TEXT,
+            source              TEXT DEFAULT 'ofgl',
+            created_at          TEXT DEFAULT (datetime('now')),
+            UNIQUE(siren, year, agregat)
+        )
+    """)
+    # Une base d'avant le 02/11/2026 n'a pas la colonne `siren`.
+    from .db import _rattraper_colonnes
+    _rattraper_colonnes(conn)
     conn.commit()
 
 
+def _agregats(year: int, siren: str | None, records: list[dict]) -> list[dict]:
+    records = separer_budgets(records)
+    # Sans annexe, le consolidé redit le principal : rien à ajouter.
+    if records and any(r["agregat"].endswith(SUFFIXE_ANNEXES) for r in records):
+        records += consolides(fetch_consolide(year, siren))
+    return records
+
+
 def import_year(conn, year: int, dry_run: bool = False) -> int:
-    records = separer_budgets(fetch_year(year))
+    siren, lus = fetch_year_siren(year)
+    records = _agregats(year, siren, lus)
     if not records:
         print(f"  {year} : aucune donnée")
         return 0
-    # Sans annexe, le consolidé redit le principal : rien à ajouter.
-    if any(r["agregat"].endswith(SUFFIXE_ANNEXES) for r in records):
-        records += consolides(fetch_consolide(year))
 
-    print(f"  {year} : {len(records)} agrégats")
+    print(f"  {year} : {len(records)} agrégats (SIREN {siren})")
     if dry_run:
         for r in sorted(records, key=lambda x: x["agregat"]):
             print(f"    {r['agregat']:50s} {r['montant']:>12,.0f} €  {r.get('euros_par_habitant', 0):>7.1f} €/hab")
         return len(records)
 
-    return _insert_records(conn, year, records)
+    return _insert_records(conn, year, records, siren)
 
 
-def _insert_records(conn, year: int, records: list[dict]) -> int:
-    """Insert idempotent des agrégats d'une année (UNIQUE(year, agregat))."""
+def import_absorbees(conn, year: int, dry_run: bool = False) -> int:
+    """Les agrégats de chaque commune absorbée d'un autre code, sous SON SIREN,
+    dans `ofgl_agregats_absorbees` : jamais additionnés à la commune."""
+    total = 0
+    for siren, d in COMMUNES_ABSORBEES.items():
+        records = _agregats(year, siren, _fetch_year(year, siren) or [])
+        if not records:
+            continue
+        print(f"  {year} : {d['nom']} (absorbée, SIREN {siren}) : {len(records)} agrégats")
+        if not dry_run:
+            total += _insert_records(conn, year, records, siren, table="ofgl_agregats_absorbees")
+    return total
+
+
+def _insert_records(conn, year: int, records: list[dict], siren: str | None = None,
+                    table: str = "ofgl_agregats") -> int:
+    """Insert idempotent des agrégats d'une année (UNIQUE(year, agregat),
+    ou (siren, year, agregat) pour une absorbée)."""
     inserted = 0
     for r in records:
         try:
             conn.execute(
-                "INSERT OR REPLACE INTO ofgl_agregats"
-                " (year, agregat, montant, euros_par_habitant, population, tranche_population, rural)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT OR REPLACE INTO {table}"
+                " (year, agregat, montant, euros_par_habitant, population, tranche_population, rural, siren)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     year,
                     r["agregat"],
@@ -198,6 +260,7 @@ def _insert_records(conn, year: int, records: list[dict]) -> int:
                     r.get("ptot"),
                     r.get("tranche_population"),
                     r.get("rural"),
+                    siren,
                 )
             )
             inserted += 1
@@ -238,6 +301,7 @@ def run(year: int | None = None, dry_run: bool = False, stats_only: bool = False
     total = 0
     for y in years:
         total += import_year(conn, y, dry_run=dry_run)
+        total += import_absorbees(conn, y, dry_run=dry_run)
         if not dry_run:
             time.sleep(0.3)
 

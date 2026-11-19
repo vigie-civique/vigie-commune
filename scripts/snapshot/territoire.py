@@ -12,6 +12,8 @@ import re
 from collectors.guichets import PAGE_JEU as GUICHETS_PAGE_JEU, TYPES as GUICHETS_TYPES
 from collectors.lovac import PAGE_JEU, RUPTURES, SECRET
 from scripts.snapshot.fiches import domain_for
+from scripts.snapshot.sources_data_gouv import (export_cantines, export_enaf, export_loyers,
+                                                export_odre, export_rpls, export_vigieau)
 from scripts.snapshot.socle import (DEPARTEMENT, EPCI_SIREN_C2, INSEE_C1, RULES,
                                     TELECOMS_RAYON_KM, URL_COMMUNE, row, rows, table_exists,
                                     write_json)
@@ -524,6 +526,60 @@ def exploitant_designe(raison_sociale: str | None, siret: str | None,
     return bool(_FORME_MORALE.search(nom))
 
 
+# ── Qui gère l'eau : l'opérateur d'un service SISPEA ─────────────────────────
+#
+# ⚖️ Avis vigie-dpo du 26/10/2026 sur les 465 couples (statut, opérateur) des
+# fichiers nationaux : aucun ne désigne une personne physique. Les régies sans
+# personnalité morale n'ont jamais de nom ; les patronymes (BERTRAND, RUAS,
+# Fayolle…) sont des sociétés au SIRENE. La règle ne tient donc pas à la
+# qualité de la source mais à un filtre :
+#   - le nom ne sort que sous un statut de personne morale, liste FERMÉE : un
+#     statut nouveau du producteur tombe dehors par défaut ;
+#   - les « noms » qui n'en sont pas (« ? », « Inconnu », « procédure en
+#     cours »…) ne sortent pas : ce serait un fait faux ;
+#   - une adresse collée au nom (« SAUR - 71100 … ») est coupée ;
+#   - « délégataire » seulement en délégation : en régie, c'est un prestataire ;
+#   - une fin de contrat ne sort que si elle est postérieure à l'année de la
+#     déclaration, et toujours avec cette année.
+_STATUTS_NOM_PUBLIABLE = {
+    "entreprise privee", "spl", "semop", "seml", "etablissement public",
+    "regie a autonomie financiere et dotee de la personne morale",
+    "convention de gestion", "entente",
+}
+# « régie » seul n'est pas un faux nom : « Régie de l'Eau Bordeaux Métropole »
+# est une régie personnalisée, personne morale. Ce sont les PHRASES qui le sont.
+_FAUX_NOM = re.compile(
+    r"^\?$|^communes?$|inconnu|proc[ée]dure en cours|diff[ée]rents d[ée]l[ée]gataires"
+    r"|gestion (?:connue )?en r[ée]gie|^r[ée]gie interne$|prestations? de service", re.I)
+_ADRESSE_COLLEE = re.compile(r"\s+-\s+.*\b\d{5}\b.*$")
+
+
+def _plat(texte: str) -> str:
+    import unicodedata
+    sans = unicodedata.normalize("NFD", texte)
+    return " ".join("".join(c for c in sans if unicodedata.category(c) != "Mn").lower().split())
+
+
+def gestionnaire_publiable(service: dict) -> dict | None:
+    """L'opérateur d'un service d'eau tel qu'il peut sortir, ou None.
+
+    Rend {role, nom, fin, annee} : `role` vaut « delegataire » ou
+    « prestataire », `fin` est None quand elle n'est pas publiable.
+    """
+    nom, statut = (service.get("operateur") or "").strip(), service.get("statut_operateur")
+    if not nom or not statut or _plat(statut) not in _STATUTS_NOM_PUBLIABLE:
+        return None
+    nom = _ADRESSE_COLLEE.sub("", nom).strip()
+    if not nom or _FAUX_NOM.search(nom) or _EXPLOITANT_INDIVIDUEL.search(nom):
+        return None
+    annee = service.get("annee_operateur")
+    fin = service.get("fin_gestion")
+    if not (fin and annee and fin[:4] > str(annee)):
+        fin = None
+    return {"role": "delegataire" if service.get("mode_gestion") == "Délégation" else "prestataire",
+            "nom": nom, "fin": fin, "annee": annee}
+
+
 def export_icpe(conn) -> tuple[list[dict], int]:
     """Les installations classées, et le nombre d'exploitants non désignés."""
     if not table_exists(conn, "icpe_installations"):
@@ -613,11 +669,24 @@ def etape_environnement(conn, out) -> None:
     # contre-visite du 30/08. Tout sort publiable : un prix de l'eau et un
     # rendement de réseau sont des données de service public, sans la
     # moindre personne derrière.
-    sispea_services = rows(conn, """
+    # `derniere_composition` : la dernière année où la composition SISPEA
+    # rattache le service à la commune. La tuile de l'accueil n'en garde que
+    # les services d'aujourd'hui. Absente d'une base que le collecteur n'a pas
+    # revue depuis le 09/11/2026 : la tuile garde alors tous les services.
+    colonnes = {r[1] for r in conn.execute("PRAGMA table_info(sispea_services)")}
+    composition = ", derniere_composition" if "derniere_composition" in colonnes else ""
+    sispea_services = rows(conn, f"""
         SELECT code_service, competence, nom, libelle, type_collectivite,
-               mode_gestion, siren, communes
+               mode_gestion, siren, communes{composition}
           FROM sispea_services ORDER BY competence, code_service
     """) if table_exists(conn, "sispea_services") else []
+    # L'opérateur sort par `gestionnaire_publiable`, jamais en colonnes brutes.
+    if "operateur" in colonnes:
+        operateurs = {r["code_service"]: r for r in rows(conn, """
+            SELECT code_service, mode_gestion, operateur, statut_operateur,
+                   fin_gestion, annee_operateur FROM sispea_services""")}
+        for s in sispea_services:
+            s["gestionnaire"] = gestionnaire_publiable(operateurs[s["code_service"]])
     sispea_indicateurs = rows(conn, """
         SELECT code_service, annee, code, libelle, unite, valeur, origine
           FROM sispea_indicateurs ORDER BY code_service, annee, code
@@ -666,6 +735,8 @@ def etape_environnement(conn, out) -> None:
         "eau_controle": export_eau_potable(conn, INSEE_C1),
         "dechets": export_dechets(conn, INSEE_C1),
         "incendie": export_incendie(conn, INSEE_C1),
+        "vigieau": export_vigieau(conn, INSEE_C1),
+        "electricite": export_odre(conn, INSEE_C1),
     })
 
 
@@ -723,6 +794,10 @@ def etape_territoire(conn, out) -> None:
         "telecoms": export_telecoms(conn, INSEE_C1, DEPARTEMENT, TELECOMS_RAYON_KM),
         "enfance": export_enfance(conn, INSEE_C1, EPCI_SIREN_C2, DEPARTEMENT),
         "lovac": export_lovac(conn, INSEE_C1),
+        "loyers": export_loyers(conn, INSEE_C1),
+        "rpls": export_rpls(conn, INSEE_C1),
+        "enaf": export_enaf(conn, INSEE_C1),
+        "cantines": export_cantines(conn, INSEE_C1),
         "guichets": export_guichets(conn, INSEE_C1),
     })
 
@@ -730,11 +805,26 @@ def etape_territoire(conn, out) -> None:
 def etape_fiscalite(conn, out) -> dict:
     # `portee` distingue la part votée par la commune du total acquitté :
     # attribuer le taux global au conseil municipal serait faux.
+    # Avant 2021, à part : cette année-là la part départementale de foncier bâti
+    # est passée aux communes, et le taux communal « bondit » sans hausse pour le
+    # contribuable. Mêlées à `taux`, les années d'avant feraient lire ce bond
+    # comme un relèvement par les pages qui lisent `taux` (accueil, /impots).
+    # `source` : la page du jeu d'où vient chaque valeur. La clé ne sort que si
+    # elle a des lignes : `fiscalite.json` reste inchangé sans elles.
+    existe = table_exists(conn, "fiscalite_taux")
     fiscalite = rows(conn, """
         SELECT insee, commune, annee, indicateur, libelle, portee, taux, epci
-        FROM fiscalite_taux ORDER BY annee DESC, commune, indicateur
-    """) if table_exists(conn, "fiscalite_taux") else []
-    write_json(out / "fiscalite.json", {"taux": fiscalite, "total": len(fiscalite),
-                                        "reperes": export_reperes_fiscaux(conn)})
+        FROM fiscalite_taux WHERE annee >= 2021 ORDER BY annee DESC, commune, indicateur
+    """) if existe else []
+    avant_2021 = rows(conn, """
+        SELECT insee, commune, annee, indicateur, libelle, portee, taux,
+               'https://data.economie.gouv.fr/explore/dataset/' || source || '/' AS source
+        FROM fiscalite_taux WHERE annee < 2021 ORDER BY annee DESC, commune, indicateur
+    """) if existe else []
+    sortie = {"taux": fiscalite, "total": len(fiscalite),
+              "reperes": export_reperes_fiscaux(conn)}
+    if avant_2021:
+        sortie["avant_2021"] = avant_2021
+    write_json(out / "fiscalite.json", sortie)
 
     return {"fiscalite": fiscalite}

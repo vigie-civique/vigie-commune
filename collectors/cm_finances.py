@@ -693,6 +693,27 @@ def flow_exists(conn, ftype, year, amount, to_id, from_id=None) -> bool:
     return conn.execute(sql, args).fetchone() is not None
 
 
+def lu_par_ocr(conn, eid: int | None) -> bool:
+    """L'acte a-t-il été lu par reconnaissance optique ?
+
+    Le drapeau est posé sur l'ACTE lu dans une pièce océrisée
+    (`conseils._marquer_ocr`) et sur sa séance : on le cherche sur toute ligne
+    de même `source_url`, l'acte compris. La séance seule ne suffit pas dès
+    qu'elle a deux pièces, ou qu'elle vient d'un portail d'actes.
+
+    Décision du 23/10/2026 (D5) : un montant lu dans un texte océrisé n'est pas
+    `verified` tant qu'un humain ne l'a pas relu. Le doublon de 2 380 € publié
+    pour 2024 venait d'une ligne de tableau océrisée, au nom illisible, écrite
+    `verified` d'office — et son bénéficiaire créé avec elle.
+    """
+    if not eid:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM events d JOIN events s ON s.source_url = d.source_url "
+        "WHERE d.id = ? AND json_extract(s.metadata, '$.ocr') = 1 LIMIT 1",
+        (eid,)).fetchone() is not None
+
+
 def run_subventions(commit: bool):
     conn = get_conn()
     res = Resolver(conn)
@@ -756,16 +777,19 @@ def run_subventions(commit: bool):
         marque = "CC" if qui == "epci" else "CM"
         libelle = ("Subvention intercommunale" if qui == "epci"
                    else "Subvention communale")
+        # La relation suit le flux : `verified` à côté d'un flux `probable`
+        # publierait le lien sans le montant qui le fonde.
+        confiance = "probable" if lu_par_ocr(w, eid) else "verified"
         w.execute(
             "INSERT INTO financial_flows (type,year,amount,from_id,to_id,event_id,description,source,confidence) "
-            "VALUES ('subvention',?,?,?,?,?,?,?, 'verified')",
+            "VALUES ('subvention',?,?,?,?,?,?,?,?)",
             (year, amount, from_id, to_id, eid,
-             f"{libelle} {year} (extraite du CR)", f"CR {marque} {year}"),
+             f"{libelle} {year} (extraite du CR)", f"CR {marque} {year}", confiance),
         )
         w.execute(
             "INSERT OR IGNORE INTO relations (from_id,to_id,relation_type,source,confidence,metadata) "
-            "VALUES (?,?,'subventionné','cm_finances','verified',?)",
-            (from_id, to_id, f'{{"year": {year}, "amount": {amount}}}'),
+            "VALUES (?,?,'subventionné','cm_finances',?,?)",
+            (from_id, to_id, confiance, f'{{"year": {year}, "amount": {amount}}}'),
         )
         # Qui reçoit une subvention votée par une délibération est cité PAR
         # cette délibération : c'est vrai par construction, et c'est pourtant
@@ -798,8 +822,11 @@ def run_subventions(commit: bool):
             nom = _clean_benef(benef)
             new_id, _ = res.resolve(nom)
             if new_id is None:
+                # Un nom lu par OCR n'est pas une preuve d'existence : c'est
+                # ainsi qu'est née l'association « MO Aller OMC pEIEME ».
                 new_id = upsert_entity(w, type="association", name=nom,
-                                       confidence="verified")
+                                       confidence="probable" if lu_par_ocr(w, eid)
+                                       else "verified")
                 res.add(new_id, nom, "association")
                 created += 1
             w.execute("INSERT OR IGNORE INTO associations (entity_id) VALUES (?)", (new_id,))

@@ -1,0 +1,30 @@
+/* Téléphone : des cibles d'au moins 44 px (WCAG 2.5.5, niveau AAA ; Apple et
+   Google recommandent 44 et 48). Posé une fois ici plutôt que page par page.
+
+   `!important` sur les minimums seulement : les styles de composant, plus
+   spécifiques, fixent des hauteurs de 20 ou 24 px pour une présentation de
+   bureau ; sur un écran étroit, le minimum doit gagner.
+
+   Exclus : le lien dans une phrase (il ne peut pas grandir sans casser la
+   ligne ; WCAG 2.5.8 le dispense), et la case à cocher dont l'étiquette,
+   elle, fait 44 px. */
+@media (max-width: 900px) {
+  button, [role="button"], summary, select,
+  input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]) {
+    min-height: 44px !important;
+  }
+  button, [role="button"] { min-width: 44px !important; }
+  summary { display: flex; align-items: center; min-width: 44px; }
+  input, select, textarea { font-size: 1rem; max-width: 100%; }   /* sous 16 px, iOS zoome au focus */
+  input[type="checkbox"], input[type="radio"] { width: 22px; height: 22px; }
+  label:has(> input[type="checkbox"]), label:has(> input[type="radio"]) {
+    display: inline-flex; align-items: center; gap: .5rem; min-height: 44px;
+  }
+  /* Un tableau sans mise en cartes défile de côté dans son cadre, au lieu de
+     pousser la page entière. */
+  table { max-width: 100%; }
+  main table:not(.cartes) { display: block; overflow-x: auto; }
+  .premier-jour li > a, .leaflet-control-layers label { display: flex; align-items: center; min-height: 44px; }
+  a.act, a.entity-link, td > a, li > a:only-child, .brand, a.retour, a.tool-link, a.bouton,
+  a.discret-lien, a.lien-bloc { display: inline-flex; align-items: center; min-height: 44px; }
+}

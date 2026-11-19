@@ -5,12 +5,13 @@
 // jusqu'à 2016. Le découpage par année donne aussi à chaque millésime une URL
 // stable, citable et archivable, ce qui est le point d'un site de vigie.
 //
-// Cette page-ci ne porte que le sommaire et un index compact des titres (~57 Ko)
-// pour que la recherche reste transverse aux années — c'était la seule chose que
-// le découpage faisait perdre.
+// Cette page-ci ne porte que le sommaire. La recherche, transverse aux années,
+// lit l'index des titres dans `/deliberations-index.json`, chargé à la première
+// frappe : embarqué ici, il pesait 583 Ko de script d'hydratation sur 615 Ko de
+// page (audit UX du 25/10/2026).
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { INSTITUTIONAL, anneeDe, ancreActe, estSeance, instanceDe } from '#lib/actes.js'
+import { INSTITUTIONAL, anneeDe, ancreActe, estDecision, estSeance, instanceDe } from '#lib/actes.js'
 import { DATA_DIR, lireJSON } from '#lib/donnees.server.js'
 import { etatSource } from '#lib/couverture.js'
 
@@ -29,6 +30,9 @@ export function load() {
     const a = anneeDe(e)
     if (!parAnnee.has(a)) parAnnee.set(a, { annee: a, total: 0, cm: 0, cc: 0 })
     const g = parAnnee.get(a)
+    // Une décision par délégation n'est pas un acte d'assemblée : elle a sa
+    // tuile, pas sa place dans « délibérations et séances en {année} ».
+    if (estDecision(e)) continue
     g.total++
     if (instanceDe(e) === 'CM') g.cm++
     else g.cc++
@@ -39,17 +43,6 @@ export function load() {
   const annees = [...parAnnee.values()].sort((a, b) =>
     a.annee === 'sans-date' ? 1 : b.annee === 'sans-date' ? -1 : b.annee.localeCompare(a.annee))
 
-  // Index de recherche : strictement ce qu'affiche une ligne de résultat.
-  const index = actes.map((e) => ({
-    id: e.id,
-    ancre: ancreActe(e),
-    date: e.date || null,
-    titre: e.title || '',
-    annee: anneeDe(e),
-    instance: instanceDe(e),
-    label: INSTITUTIONAL[e.type].label,
-  })).sort((a, b) => (b.date || '').localeCompare(a.date || ''))
-
   // Constat sur les votes.
   //
   // Attention au piège : `vote.unanimite` n'est vrai que lorsque le compte rendu
@@ -58,7 +51,7 @@ export function load() {
   // passer 104 délibérations pour contestées alors qu'aucune ne l'est. Un vote
   // n'est divisé que s'il y a au moins un contre ou une abstention.
   const divise = (v) => Boolean(v && (v.contre || v.abstention))
-  const avecVote = actes.filter((e) => e.vote)
+  const avecVote = actes.filter((e) => e.vote && !estSeance(e) && !estDecision(e))
   const divises = avecVote.filter((e) => divise(e.vote))
 
   const anneeCourante = new Date().toISOString().slice(0, 4)
@@ -68,12 +61,12 @@ export function load() {
     // cette information la page affichait « 0 acte » comme un résultat.
     source: etatSource(lireJSON('couverture.json', {}), 'deliberations'),
     annees,
-    index,
-    total: actes.length,
+    total: actes.filter((e) => !estDecision(e)).length,
     nCM: actes.filter((e) => instanceDe(e) === 'CM').length,
     nCC: actes.filter((e) => instanceDe(e) === 'CC').length,
-    delibCM: actes.filter((e) => instanceDe(e) === 'CM' && !estSeance(e)).length,
-    delibCC: actes.filter((e) => instanceDe(e) === 'CC' && !estSeance(e)).length,
+    delibCM: actes.filter((e) => instanceDe(e) === 'CM' && !estSeance(e) && !estDecision(e)).length,
+    delibCC: actes.filter((e) => instanceDe(e) === 'CC' && !estSeance(e) && !estDecision(e)).length,
+    decisions: actes.filter(estDecision).length,
     seances: actes.filter(estSeance).length,
     anneeCourante,
     nCourante: parAnnee.get(anneeCourante)?.total ?? 0,

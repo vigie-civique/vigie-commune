@@ -20,6 +20,39 @@ from scripts.snapshot.perimetre import publiable_dans_perimetre
 from scripts.snapshot.socle import ROOT, RULES, rows, write_json_compact
 
 
+POP_NOTICE = "https://www.pop.culture.gouv.fr/notice/merimee/{ref}"
+
+
+def monuments_historiques(osm_value, tags_json) -> list[dict]:
+    """Les protections MH d'un lieu, lues dans `places.tags` : type, référence, notice POP.
+
+    Deux formes en base : `monuments_historiques` (liste, depuis le 02/11/2026,
+    posée même sur une fiche fusionnée avec OSM) et, avant, `reference` et
+    `protection` à la racine des tags d'une ligne `monument_historique`. Rien
+    d'autre des tags ne sort : ceux d'OSM ou de Pappers portent téléphones et
+    adresses de courriel.
+    """
+    try:
+        tags = json.loads(tags_json or "{}")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(tags, dict):
+        return []
+    entrees = tags.get("monuments_historiques")
+    if not isinstance(entrees, list):
+        entrees = ([{"reference": tags.get("reference"), "protection": tags.get("protection")}]
+                   if osm_value == "monument_historique" and tags.get("reference") else [])
+    sortie = []
+    for m in entrees:
+        ref = str((m or {}).get("reference") or "").strip() if isinstance(m, dict) else ""
+        if not ref:
+            continue
+        sortie.append({"reference": ref,
+                       "protection": (m.get("protection") or None),
+                       "notice": POP_NOTICE.format(ref=ref)})
+    return sortie
+
+
 def in_commune_bbox(lat, lng) -> bool:
     if lat is None or lng is None:
         return False
@@ -261,6 +294,9 @@ def public_entity(
             "osm_category": row_data.get("osm_category"),
             "osm_value": row_data.get("osm_value"),
         })
+        mh = monuments_historiques(row_data.get("osm_value"), row_data.get("place_tags"))
+        if mh:
+            public["monuments_historiques"] = mh
     elif entity_type == "service":
         public.update({
             "category": row_data.get("service_category"),
@@ -277,7 +313,9 @@ def public_entity(
 
 
 def comptes_syndicats_par_entite(conn) -> dict[int, list[dict]]:
-    """Les comptes d'un syndicat, par exercice puis par budget.
+    """Les comptes d'un syndicat — ou de l'intercommunalité —, par exercice
+    puis par budget. `de` dit lequel : la source `dgfip-gfp` est la balance
+    des groupements à fiscalité propre, l'EPCI de l'instance.
 
     Écrits par `collectors/syndicats_comptes` depuis les balances DGFiP. Deux
     budgets d'un même syndicat (principal, annexe) restent SÉPARÉS : les
@@ -288,18 +326,20 @@ def comptes_syndicats_par_entite(conn) -> dict[int, list[dict]]:
     try:
         rows = conn.execute(
             "SELECT entity_id, year, budget, libelle_budget, nomenclature, poste,"
-            " montant FROM comptes_syndicats WHERE entity_id IS NOT NULL"
+            " montant, source FROM comptes_syndicats WHERE entity_id IS NOT NULL"
             " ORDER BY entity_id, year DESC, budget").fetchall()
     except sqlite3.OperationalError:
         return {}
     par: dict[int, dict[int, dict[str, dict]]] = defaultdict(lambda: defaultdict(dict))
+    epci = {r["entity_id"] for r in rows if r["source"] == "dgfip-gfp"}
     for r in rows:
         bloc = par[r["entity_id"]][r["year"]].setdefault(r["budget"], {
             "libelle": r["libelle_budget"], "nomenclature": r["nomenclature"],
             "postes": {}})
         bloc["postes"][r["poste"]] = round(r["montant"] or 0)
     return {
-        eid: [{"year": an, "budgets": list(budgets.values())}
+        eid: [{"year": an, "de": "epci" if eid in epci else "syndicat",
+               "budgets": list(budgets.values())}
               for an, budgets in sorted(annees.items(), reverse=True)]
         for eid, annees in par.items()
     }
@@ -400,7 +440,7 @@ def etape_fiches(conn, revue, public_person_ids, ids_conseil_communautaire,
             a.rna_id, a.object AS asso_object,
             a.status AS asso_status, a.dissolution_date,
             a.creation_date AS asso_creation_date,
-            pl.osm_category, pl.osm_value,
+            pl.osm_category, pl.osm_value, pl.tags AS place_tags,
             s.category AS service_category, s.operator, s.opening_hours
         FROM entities e
         LEFT JOIN persons p ON p.entity_id = e.id
@@ -417,8 +457,9 @@ def etape_fiches(conn, revue, public_person_ids, ids_conseil_communautaire,
     ids_retenus = ids_retenus_par_un_fait(conn)
     public_entities: list[dict] = []
     entity_exclusions: list[dict] = []
-    # Les entités MORALES écartées pour le seul périmètre : leurs flux
-    # d'argent public se publient déliés (cf. `statut_extremites`).
+    # Les entités MORALES écartées pour le seul périmètre, ou par un verdict
+    # de l'atelier : leurs flux d'argent public se publient déliés (cf.
+    # `statut_extremites`). Le nom de l'ensemble date du premier cas.
     ecartees_du_perimetre: set[int] = set()
     location_quality = Counter()
     revue_fiches = revue.get("entity", {})
@@ -430,6 +471,15 @@ def etape_fiches(conn, revue, public_person_ids, ids_conseil_communautaire,
         verdict = revue_fiches.get(entity["id"])
         if verdict and ecarte(verdict["statut"]):
             exclusions["entities"]["rejete_en_atelier"] += 1
+            # Écarter une ORGANISATION retire sa fiche, pas l'argent public
+            # qu'elle a reçu ou versé : ses flux sortaient des totaux (−264 009 €
+            # sur la base fictive, audit du 15/11/2026). Ils se publient déliés,
+            # le nom gardé, comme ceux d'une fiche hors périmètre (Julien,
+            # 15/11). Une PERSONNE écartée n'est pas concernée : ses flux restent
+            # retirés, comme ceux de toute personne non publiable
+            # (`private_person_endpoint`, `argent.py`).
+            if entity["type"] != "person":
+                ecartees_du_perimetre.add(entity["id"])
             entity_exclusions.append({
                 "id": entity["id"],
                 "type": entity["type"],

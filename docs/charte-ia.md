@@ -82,7 +82,10 @@ mis à l'épreuve par d'autres modèles de pointe américains — GPT (OpenAI), 
 dans une moindre mesure Grok (xAI) —, par des offres payantes souscrites le
 temps de ces essais. Ils n'ont travaillé que sur ce qui est public : les
 données publiées des sites, le portail et le dépôt public du moteur. Un défaut
-qu'un modèle ne voit pas, un autre le trouve parfois.
+qu'un modèle ne voit pas, un autre le trouve parfois. Depuis le 28/10/2026, plus
+aucune relecture ne leur est confiée : même publiées, des données restent
+personnelles, et leur envoi hors de l'Union demandait une base de transfert que
+ces essais n'avaient pas.
 
 ## 3. Où elle n'intervient pas
 

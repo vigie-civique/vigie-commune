@@ -123,6 +123,51 @@ def calculer(formule: str, valeurs: dict):
         raise FormuleRefusee(f"calcul impossible ({type(e).__name__} : {e})")
 
 
+# Une anomalie de CARTOUCHE ou de NUMÉROTATION se lit dans l'OCR, et l'OCR se
+# trompe (relecture à l'aveugle de 5 séances : plusieurs « anomalies » étaient
+# des erreurs de lecture, pas de la pièce). Elle ne part donc dans la page que
+# si quelqu'un a regardé l'image de la pièce.
+#
+# Forme d'une anomalie, dans `anomalies_seance` comme sur un acte (`anomalie`) :
+#   "texte"                                  ancienne forme : nature « autre »,
+#                                            rendue comme avant ;
+#   {"texte": "...", "nature": "cartouche" | "numerotation" | "autre",
+#    "vu_sur_image": "p. 3 de data/pv.pdf, cartouche relu à l'image"}
+# `vu_sur_image` : texte non vide qui dit QUELLE image a été regardée. Exigé
+# pour « cartouche » et « numerotation » ; sans lui l'anomalie est à vérifier :
+# le rendu ne l'affiche pas, le vérificateur la signale (avis, sans bloquer).
+NATURES_A_VOIR_SUR_IMAGE = ("cartouche", "numerotation")
+NATURES = NATURES_A_VOIR_SUR_IMAGE + ("autre",)
+
+
+def trier_anomalies(releve: dict) -> tuple[list[str], list[str], list[str]]:
+    """(retenues, à vérifier, fautes) — retenues = ce que le rendu peut afficher.
+
+    Les textes des anomalies d'acte sont préfixés « Délibération n°N : »."""
+    retenues: list[str] = []
+    a_verifier: list[str] = []
+    fautes: list[str] = []
+    brutes = [(None, x) for x in releve.get("anomalies_seance", [])]
+    brutes += [(a["n"], a["anomalie"]) for a in releve.get("actes", []) if a.get("anomalie")]
+    for n, x in brutes:
+        lieu = "séance" if n is None else f"n°{n}"
+        if isinstance(x, str):
+            texte, nature, vu = x, "autre", None
+        elif isinstance(x, dict) and isinstance(x.get("texte"), str) and x["texte"].strip():
+            texte, nature, vu = x["texte"], x.get("nature", "autre"), x.get("vu_sur_image")
+        else:
+            fautes.append(f"ANOMALIE {lieu} : forme illisible (chaîne, ou objet avec « texte »)")
+            continue
+        if nature not in NATURES:
+            fautes.append(f"ANOMALIE {lieu} : nature « {nature} » inconnue ({', '.join(NATURES)})")
+            continue
+        if nature in NATURES_A_VOIR_SUR_IMAGE and not (isinstance(vu, str) and vu.strip()):
+            a_verifier.append(f"{lieu} ({nature}) : {texte}")
+            continue
+        retenues.append(texte if n is None else f"Délibération n°{n} : {texte}")
+    return retenues, a_verifier, fautes
+
+
 def _jours(a: str, b: str) -> int:
     """Écart en jours entre deux dates ISO — pour un délai calculé, jamais tapé."""
     from datetime import date
@@ -181,6 +226,12 @@ def verifier(chemin: Path) -> list[str]:
             re.finditer(releve["marque_acte_ordinale"], pv, re.I), 1)}
     else:
         avis.append("complétude NON vérifiable : la pièce ne marque pas ses actes")
+    if not marques and any(releve.get(k) for k in
+                           ("marque_acte", "marque_acte_regex", "marque_acte_ordinale")):
+        # Une marque `(?m)^…` ne trouve rien ici : la pièce est lue aux blancs
+        # fondus, sans fins de ligne. Complétude et bornes sautaient en silence.
+        avis.append("marque déclarée INTROUVABLE dans la pièce : complétude et bornes "
+                    "NON vérifiées")
     releves = [a["n"] for a in actes]
     if doublons := {n for n in releves if releves.count(n) > 1}:
         fautes.append(f"COMPLÉTUDE numéros relevés deux fois : {sorted(doublons)}")
@@ -243,7 +294,10 @@ def verifier(chemin: Path) -> list[str]:
         if total > votants:
             alertes.append(f"n°{a['n']} : {total} voix pour {votants} votants")
     # Une incohérence DU PV n'est pas une faute du relevé, si le relevé la dit.
-    dite = " ".join(releve.get("anomalies_seance", []))
+    retenues, a_verifier, fautes_anomalies = trier_anomalies(releve)
+    fautes += fautes_anomalies
+    avis += [f"ANOMALIE à vérifier sur l'image, non rendue : {x}" for x in a_verifier]
+    dite = " ".join(retenues)
     for al in alertes:
         n = al.split(" ")[0]
         if n not in dite:
@@ -395,11 +449,9 @@ def main() -> int:
           f"{len(releve['actes'])} actes relevés")
     for f in fautes:
         print(f"  ✗ {f}")
-    for a in releve["actes"]:
-        if "anomalie" in a:
-            print(f"  ⚠ n°{a['n']} (source) : {a['anomalie']}")
-    for an in releve.get("anomalies_seance", []):
-        print(f"  ⚠ séance (source) : {an}")
+    retenues, _, _ = trier_anomalies(releve)
+    for an in retenues:
+        print(f"  ⚠ (source) : {an}")
     for av in getattr(verifier, "avis", []):
         print(f"  ℹ {av}")
     print("  ✓ tout est sourcé" if not fautes else f"  {len(fautes)} faute(s) : ne pas publier")

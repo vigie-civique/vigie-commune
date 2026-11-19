@@ -185,7 +185,9 @@ python3 -m venv venv && venv/bin/pip install -r requirements.txt
 #    config/instance.json n'est pas versionné : le recopier, ou réamorcer.
 cp deploy/env.exemple .env && chmod 600 .env
 #    → remplir JWT_SECRET, ALLOWED_ORIGINS ; ADMIN_KEY seulement si un script
-#      appelle l'API sans session humaine.
+#      publie sans session humaine. Elle n'est admise que depuis la machine,
+#      et n'ouvre que la publication et le tri des relations candidates : ni
+#      les lectures de l'atelier, ni ses écritures (un compte pour cela).
 
 #    Les saisies de l'atelier : un répertoire à elles, hors de config/.
 mkdir -p saisies

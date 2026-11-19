@@ -171,11 +171,11 @@
           <tbody>
             {#each enAttente as inv (inv.id)}
               <tr>
-                <td>{inv.email}{#if inv.nature === 'mot_de_passe'}{' '} <span class="muted">(mot de passe)</span>{/if}</td>
-                <td>{LIBELLE_ROLE[inv.role]}</td>
-                <td>{inv.invite_par ?? '—'}</td>
-                <td>{heureLocale(inv.expire_le)}</td>
-                <td class="droite">
+                <td data-label="Adresse">{inv.email}{#if inv.nature === 'mot_de_passe'}{' '} <span class="muted">(mot de passe)</span>{/if}</td>
+                <td data-label="Rôle">{LIBELLE_ROLE[inv.role]}</td>
+                <td data-label="Invitée par">{inv.invite_par ?? '—'}</td>
+                <td data-label="Expire le">{heureLocale(inv.expire_le)}</td>
+                <td class="droite" data-label="">
                   <button class="secondaire" on:click={() => renouveler(inv)}>Nouveau lien</button>
                   <button class="secondaire danger" on:click={() => annuler(inv)}>Annuler</button>
                 </td>
@@ -193,16 +193,16 @@
         <tbody>
           {#each donnees.comptes as c (c.id)}
             <tr class:inactif={c.desactive_le}>
-              <td class="adresse-cell">{c.email}{#if c.id === $currentUser?.id}&nbsp;<span class="muted">(vous)</span>{/if}</td>
-              <td>
+              <td class="adresse-cell" data-label="Adresse">{c.email}{#if c.id === $currentUser?.id}&nbsp;<span class="muted">(vous)</span>{/if}</td>
+              <td data-label="Rôle">
                 <select value={c.role} disabled={!!c.desactive_le}
                         on:change={(e) => modifier(c, { role: e.target.value })}>
                   {#each ROLES as r}<option value={r}>{LIBELLE_ROLE[r]}</option>{/each}
                 </select>
               </td>
-              <td class="date">{c.last_login ? heureLocale(c.last_login) : 'jamais'}</td>
-              <td>{c.desactive_le ? `Désactivé le ${heureLocale(c.desactive_le)}` : 'Actif'}</td>
-              <td class="droite">
+              <td class="date" data-label="Dernière connexion">{c.last_login ? heureLocale(c.last_login) : 'jamais'}</td>
+              <td data-label="État">{c.desactive_le ? `Désactivé le ${heureLocale(c.desactive_le)}` : 'Actif'}</td>
+              <td class="droite" data-label="">
                 {#if c.desactive_le}{' '}
                   <button class="secondaire" on:click={() => modifier(c, { actif: true })}>Réactiver</button>
                 {' '}{:else}{' '}
@@ -229,7 +229,7 @@
           <thead><tr><th>Adresse</th><th>Rôle</th><th>Créée le</th><th>État</th></tr></thead>
           <tbody>
             {#each passees as inv (inv.id)}
-              <tr><td>{inv.email}</td><td>{LIBELLE_ROLE[inv.role]}</td><td>{heureLocale(inv.cree_le)}</td><td>{ETATS[inv.etat]}</td></tr>
+              <tr><td data-label="Adresse">{inv.email}</td><td data-label="Rôle">{LIBELLE_ROLE[inv.role]}</td><td data-label="Créée le">{heureLocale(inv.cree_le)}</td><td data-label="État">{ETATS[inv.etat]}</td></tr>
             {/each}
           </tbody>
         </table>
@@ -273,4 +273,15 @@
   .muted { color: var(--texte-doux); }
   .petit { font-size: .8rem; margin-top: .6rem; }
   summary { cursor: pointer; color: var(--texte-2); }
+
+  @media (max-width: 900px) {
+    .page { padding: .8rem; }
+    table, tbody, tr, td { display: block; width: 100%; }
+    thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    tr { border: 1px solid var(--bordure); border-radius: 8px; padding: .4rem .6rem; margin-bottom: .6rem; }
+    td { display: flex; gap: .6rem; align-items: center; padding: .25rem 0; border: none; flex-wrap: wrap; }
+    td[data-label]::before { content: attr(data-label); flex: 0 0 8rem; font-size: .72rem; text-transform: uppercase; color: var(--texte-doux); }
+    td[data-label=""]::before { display: none; }
+    .droite { justify-content: flex-start; }
+  }
 </style>

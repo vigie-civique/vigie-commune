@@ -81,3 +81,47 @@ def test_la_sonde_refuse(base, args):
     commande, table, *reste = args
     r = lancer(SONDE, commande, base, table, *reste)
     assert r.returncode != 0, r.stdout
+
+
+@pytest.mark.parametrize("taille, graine", [(400, 1), (2000, 1), (2000, 7)])
+def test_le_generateur_passe_aux_grandes_tailles(tmp_path, taille, graine):
+    """À 400 personnes les noms se recoupaient (`entities` est unique sur type +
+    nom) et la base ne se générait plus ; à 2000, aucune graine ne passait."""
+    chemin = tmp_path / "grande-synth.db"
+    r = lancer(GENERATEUR, chemin, "--taille", taille, "--graine", graine)
+    assert r.returncode == 0, r.stderr[-500:]
+    conn = sqlite3.connect(chemin)
+    assert conn.execute("SELECT COUNT(*) FROM entities WHERE type='person'").fetchone()[0] == taille
+    assert conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0] == max(8, taille // 3)
+
+
+def test_la_sonde_compte_les_fiches_atelier_attestees_par_un_registre(tmp_path):
+    chemin = tmp_path / "essai-synth.db"
+    assert lancer(GENERATEUR, chemin).returncode == 0
+    conn = sqlite3.connect(chemin)
+    # 7 fiches nées d'une saisie sans registre, 6 d'origine `atelier` portant un SIREN
+    # (le défaut d'avant #276), 6 d'origine `atelier` portant un RNA, une d'origine
+    # `institutionnel` : seules les 12 premières comptent.
+    def fiche(type_, nom, origine):
+        return conn.execute("INSERT INTO entities(type, name, origine) VALUES(?,?,?)",
+                            (type_, nom, origine)).lastrowid
+    for i in range(7):
+        fiche("service", f"Saisie libre {i}", "atelier")
+    for i in range(6):
+        conn.execute("INSERT INTO businesses(entity_id, siren) VALUES(?,?)",
+                     (fiche("business", f"Entreprise renommée {i}", "atelier"), f"9990000{i:02d}"))
+        conn.execute("INSERT INTO associations(entity_id, rna_id) VALUES(?,?)",
+                     (fiche("association", f"Asso renommée {i}", "atelier"), f"W99{i:07d}"))
+    conn.execute("INSERT INTO businesses(entity_id, siren) VALUES(?,?)",
+                 (fiche("business", "Entreprise intacte", "institutionnel"), "999999999"))
+    conn.commit()
+    conn.close()
+    r = lancer(SONDE, "atelier-sur-collecte", chemin)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip().endswith(" 12"), r.stdout
+    assert "Entreprise" not in r.stdout and "Asso" not in r.stdout   # un nombre, aucune ligne
+
+
+def test_la_sonde_masque_un_petit_effectif_de_fiches_atelier_attestees(base):
+    r = lancer(SONDE, "atelier-sur-collecte", base)
+    assert r.returncode == 0 and r.stdout.strip().endswith("<5"), r.stdout

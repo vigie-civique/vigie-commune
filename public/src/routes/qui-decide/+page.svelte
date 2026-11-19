@@ -27,11 +27,11 @@
       sub: `Délégués ${COMMUNE_DE}, compétences, délibérations communautaires.`,
       valeur: nombre(data.deliberationsInterco), unite: 'actes votés par la CC' },
     { icone: 'conseil', titre: 'Les conseils en clair', href: '/conseils', bloc: 'qui-decide.conseils-en-clair',
-      sub: 'Chaque séance relue en trois feuilles : ce qui était annoncé, ce qui a été décidé, ce que les documents ont de faux.',
+      sub: 'Chaque séance relue en trois feuilles : ce qui était annoncé, ce qui a été décidé, les écarts relevés dans les documents.',
       // Zéro dit quelque chose ici : aucune séance n'est encore relue.
       valeur: nombre(data.seancesRelues), unite: data.seancesRelues > 1 ? 'séances relues' : 'séance relue' },
-    { icone: 'document', titre: 'Délibérations & décisions', href: '/deliberations', bloc: 'qui-decide.deliberations',
-      sub: 'La chronologie des votes du conseil municipal.',
+    { icone: 'document', titre: 'Délibérations des conseils', href: '/deliberations', bloc: 'qui-decide.deliberations',
+      sub: 'Les votes du conseil municipal, année par année.',
       valeur: nombre(data.deliberations), unite: 'actes du conseil municipal' },
     // « Graphe d'influence » faisait franchir au lecteur une étape que les
     // données ne permettent pas : une relation documentée n'établit pas une

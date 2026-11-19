@@ -49,10 +49,10 @@
   .portee { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 .4rem; }
   .portee button {
     padding: .4rem .8rem; border: 1px solid var(--trait); border-radius: 6px;
-    background: #fff; color: var(--gris); font-size: .85rem; cursor: pointer;
+    background: var(--carte); color: var(--gris); font-size: .85rem; cursor: pointer;
   }
   .portee button b { font-weight: 700; color: var(--encre); }
-  .portee button.on { border-color: var(--encre); background: var(--encre); color: #fff; }
-  .portee button.on b { color: #fff; }
+  .portee button.on { border-color: var(--encre); background: var(--encre); color: var(--papier); }
+  .portee button.on b { color: var(--papier); }
   .aide { color: var(--gris); font-size: .8rem; margin: 0 0 .9rem; max-width: 74ch; }
 </style>

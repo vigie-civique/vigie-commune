@@ -1,11 +1,20 @@
 <script>
   import { cleLocale } from './brouillon.js'
+  import { auMoins } from '#lib/roles.js'
+  import { currentUser } from '#lib/stores/auth.js'
+  import Fiabilite from '#lib/components/Fiabilite.svelte'
+  import { choixFiabilite, libelleSource } from '#lib/libelles.js'
 
   export let notes = []
   export let brouillon            // { ajouts, modifs: {id: {note, source, confidence}}, suppr }
 
-  const QUALITES = ['verified', 'probable', 'hypothesis', 'unverified']
-  const noteVide = () => ({ note: '', source: 'manual', confidence: 'verified' })
+  // Un contributeur ne pose pas de fiabilité publiable : l'API refuse
+  // `verified` venant de lui (audit du 15/11/2026).
+  $: tranche = auMoins($currentUser, 'validator')
+  $: QUALITES = tranche ? ['verified', 'probable', 'hypothesis', 'unverified']
+                        : ['probable', 'hypothesis', 'unverified']
+  const noteVide = () => ({ note: '', source: 'manual',
+                            confidence: auMoins($currentUser, 'validator') ? 'verified' : 'probable' })
 
   let nouvelle = noteVide()
   let editingNoteId = null
@@ -47,7 +56,7 @@
     <div class="add-note-meta">
       <input bind:value={nouvelle.source} placeholder="source" />
       <select bind:value={nouvelle.confidence}>
-        {#each QUALITES as q}<option value={q}>{q}</option>{/each}
+        {#each choixFiabilite(QUALITES) as q}<option value={q.cle}>{q.libelle}</option>{/each}
       </select>
       <button class="btn-add-small" on:click={ajouter} disabled={!nouvelle.note.trim()}>
         + Ajouter à la fiche
@@ -61,8 +70,8 @@
         <li class="note-item a-enregistrer">
           <div class="note-body">
             <span class="tag-attente">à enregistrer</span>
-            <span class="conf-dot" class:verified={a.corps.confidence==='verified'} title={a.corps.confidence}></span>
-            <span class="note-src muted">{a.corps.source}</span>
+            <Fiabilite code={a.corps.confidence} />
+            <span class="note-src muted">{libelleSource(a.corps.source)}</span>
             <p class="note-text">{a.corps.note}</p>
           </div>
           <button class="lien-annuler" on:click={() => retirer(a.cle)}>retirer</button>
@@ -78,7 +87,7 @@
               <div class="note-edit-meta">
                 <input bind:value={edition.source} placeholder="source" />
                 <select bind:value={edition.confidence}>
-                  {#each QUALITES as q}<option value={q}>{q}</option>{/each}
+                  {#each choixFiabilite(QUALITES) as q}<option value={q.cle}>{q.libelle}</option>{/each}
                 </select>
               </div>
               <div class="rel-edit-actions">
@@ -89,10 +98,10 @@
           {:else}
             <div class="note-body">
               <span class="note-date">{n.date ?? ''}</span>
-              <span class="conf-dot" class:verified={v.confidence==='verified'} title={v.confidence}></span>
-              <span class="note-src muted">{v.source}</span>
+              <Fiabilite code={v.confidence} />
+              <span class="note-src muted">{libelleSource(v.source)}</span>
               {#if brouillon.suppr.includes(n.id)}{' '}
-                <span class="tag-attente">supprimée à l'enregistrement</span>
+                <span class="tag-attente">sera effacée quand vous enregistrerez la fiche</span>
                 <button class="lien-annuler" on:click={() => basculerSuppr(n.id)}>rétablir</button>
               {' '}{:else if m}{' '}
                 <span class="tag-attente">modifiée, à enregistrer</span>
@@ -102,8 +111,9 @@
             </div>
             {#if !brouillon.suppr.includes(n.id)}
               <div class="note-actions">
-                <button class="rel-btn rel-btn-edit" on:click={() => startEditNote(n)} title="Modifier">✏</button>
-                <button class="rel-btn rel-btn-del"  on:click={() => basculerSuppr(n.id)} title="Supprimer">✕</button>
+                <button class="btn-texte" on:click={() => startEditNote(n)} aria-label="Modifier cette note">Modifier</button>
+                <button class="btn-texte danger" on:click={() => basculerSuppr(n.id)}
+                        title="Efface la note de la base" aria-label="Supprimer cette note : l'effacer de la base">Supprimer</button>
               </div>
             {/if}
           {/if}

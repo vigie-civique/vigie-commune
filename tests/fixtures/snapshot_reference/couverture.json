@@ -1,5 +1,5 @@
 {
-  "arrete_le": "2026-10-19T22:05:14",
+  "arrete_le": "2026-11-14T22:27:08",
   "sources": [
     {
       "source": "exemple.invalid",
@@ -69,6 +69,7 @@
       "libelle": "L'État",
       "collecteurs": [
         "jaune",
+        "fdva",
         "subventions"
       ],
       "releve": false
@@ -89,6 +90,7 @@
       "dernier_depot": "2026-10-04"
     }
   },
+  "decp_millesimes": null,
   "actes_avec_piece": 9,
   "actes_total": 10,
   "part_avec_piece": 90.0,
@@ -96,7 +98,7 @@
     {
       "sujet": "Documents des délibérations",
       "etat": "partiel",
-      "detail": "La très grande majorité des actes renvoient vers la page du compte rendu qui les contient, et non vers la délibération elle-même. Il faut donc chercher le passage dans le document."
+      "detail": "Pour 1 acte sur 10, le lien mène au compte rendu de la séance, et non à la délibération elle-même. Il faut donc chercher le passage dans le document."
     },
     {
       "sujet": "Mandatures antérieures à 2020",
@@ -112,6 +114,26 @@
       "sujet": "Recoupement entre sources",
       "etat": "absent",
       "detail": "Aucune donnée n'est aujourd'hui confirmée par deux sources indépendantes : la chaîne ne sait pas encore le faire."
+    },
+    {
+      "sujet": "Décisions prises par délégation",
+      "etat": "absent",
+      "detail": "Les décisions que le maire ou le président de l'intercommunalité prennent par délégation du conseil ne sont pas publiées une à une. Elles ne sont jamais comptées parmi les délibérations."
+    },
+    {
+      "sujet": "Arrêtés",
+      "etat": "absent",
+      "detail": "Les arrêtés du maire et du président de l'intercommunalité (stationnement, police, voirie, personnel…) ne sont pas encore collectés."
+    },
+    {
+      "sujet": "Syndicats intercommunaux",
+      "etat": "absent",
+      "detail": "Les actes des syndicats dont la commune est membre (eau, déchets, énergie, écoles…) ne sont pas suivis. Ils décident pourtant de services et de dépenses qui la concernent."
+    },
+    {
+      "sujet": "Commissions",
+      "etat": "incomplet",
+      "detail": "La composition des commissions est relevée dans les procès-verbaux et ne sort qu'après relecture. Un membre non élu n'a pas de fiche à ce titre ; le texte de l'acte qui le désigne reste cité. Les travaux des commissions (ordres du jour, comptes rendus) ne sont pas publiés ici."
     }
   ]
 }

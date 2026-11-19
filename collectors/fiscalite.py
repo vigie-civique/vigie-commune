@@ -28,6 +28,17 @@ département — pour chaque commune suivie en profondeur (`fiscalite_reperes`).
 Une commune sans taux (la redevance remplace alors la taxe) n'a pas de repère :
 l'absence de ligne n'est pas un rang.
 
+**Avant 2021.** En 2021, la part départementale de foncier bâti est passée aux
+communes (suppression de la taxe d'habitation sur les résidences principales) :
+le taux communal voté « bondit » du taux départemental de 2020 sans hausse pour
+le contribuable. Le montrer demande le taux communal d'avant et le taux du
+département en 2020, que les jeux ODS ci-dessus n'ont pas. Ils sont dans les
+**comptes individuels** des communes et des départements (DGFiP, même API,
+Licence Ouverte) : colonne `tfb`, « Taux voté (%) » selon la maquette jointe à
+chaque jeu. Voie retenue plutôt que le REI : mêmes taux, même API, sans ZIP.
+Le taux départemental a sa propre portée (`departement`) : comme le taux
+global, il ne s'attribue jamais au conseil municipal.
+
 Usage :
   python3 -m collectors.fiscalite
   python3 -m collectors.fiscalite --insee 30140
@@ -62,6 +73,22 @@ INDICATEURS = [
 
 DATASETS = sorted({d for d, *_ in INDICATEURS})
 
+# Avant 2021 : comptes individuels, un jeu par exercice ou groupe d'exercices.
+# On n'y prend que 2015-2020 ; la suite vient de `e12vote`, qui rend en 2021 le
+# même taux que leur `tfb` pour Lasalle, Saillans et Brassac (relevé du 09/11/2026).
+COMPTES_COMMUNES = {
+    "comptes-individuels-des-communes-fichier-global-2011-2015": (2015,),
+    "comptes-individuels-des-communes-fichier-global-2016": (2016,),
+    "comptes-individuels-des-communes-fichier-global-2017": (2017,),
+    "comptes-individuels-des-communes-fichier-global-2018": (2018,),
+    "comptes-individuels-des-communes-fichier-global-2019-2020": (2019, 2020),
+}
+COMPTES_DEPARTEMENTS = ("comptes-individuels-des-departements-et-des-collectivites"
+                        "-territoriales-uniques-fichier-global-2019-2020")
+ANNEE_TRANSFERT = 2021          # la part départementale de TFB passe aux communes
+LIB_TFB_VOTE = next(lib for _, _, ind, lib, _ in INDICATEURS if ind == "TFB_VOTE")
+LIB_TFB_DEP = "Taxe foncière bâti — taux voté par le département"
+
 # Les indicateurs qu'on situe parmi les autres communes. La taxe d'enlèvement
 # des ordures ménagères d'abord : c'est le seul taux de la page qu'aucune part
 # communale n'explique, et le premier qu'un habitant compare.
@@ -77,7 +104,7 @@ def ensure_table(conn):
             annee       INTEGER NOT NULL,
             indicateur  TEXT NOT NULL,
             libelle     TEXT,
-            portee      TEXT,            -- commune | global
+            portee      TEXT,            -- commune | global | departement
             taux        REAL,
             epci        TEXT,
             source      TEXT DEFAULT 'data.economie-fiscalite',
@@ -109,7 +136,7 @@ def fetch_dataset(dataset: str, insee_list: list[str]) -> list[dict]:
     where = " or ".join(f'insee_com="{c}"' for c in insee_list)
     url = f"{ODS_BASE}/{dataset}/records?" + urllib.parse.urlencode(
         {"where": where, "limit": 100, "order_by": "exercice desc"})
-    data = fetch_json(url, source="data.economie-fiscalite", timeout=60)
+    data = fetch_json(url, source="data.economie-fiscalite", timeout=60, complete=True)
     return data.get("results", [])
 
 
@@ -141,8 +168,121 @@ def import_records(conn, dataset: str, records: list[dict]) -> int:
 def _agregat(dataset: str, select: str, where: str) -> dict:
     url = f"{ODS_BASE}/{dataset}/records?" + urllib.parse.urlencode(
         {"select": select, "where": where})
-    return (fetch_json(url, source="data.economie-fiscalite", timeout=60)
+    # Un agrégat n'est pas un relevé : il ne s'ajoute pas au compte des taux.
+    return (fetch_json(url, source="data.economie-fiscalite", timeout=60, mesurer=False)
             .get("results") or [{}])[0]
+
+
+def code_dgfip(insee: str) -> tuple[str, str] | None:
+    """(dep, icom) des comptes individuels : '30140' → ('030', '140'),
+    '2A004' → ('02A', '004'). Outre-mer : None. Les comptes y codent le
+    département 101 à 106 dans un ordre qui n'est pas celui de l'INSEE
+    (Guyane 102, Martinique 103) : ne pas deviner, aucune instance n'y est."""
+    if len(insee) != 5 or insee.startswith("97"):
+        return None
+    return "0" + insee[:2], insee[2:]
+
+
+def _records(dataset: str, select: str, where: str) -> list[dict]:
+    """Toute la réponse : l'API rend 100 lignes par page et ne dit pas qu'elle
+    coupe. On suit `total_count`."""
+    out: list[dict] = []
+    while True:
+        url = f"{ODS_BASE}/{dataset}/records?" + urllib.parse.urlencode(
+            {"select": select, "where": where, "limit": 100, "offset": len(out)})
+        data = fetch_json(url, source="data.economie-fiscalite", timeout=60, complete=True)
+        page = data.get("results") or []
+        out += page
+        if not page or len(out) >= (data.get("total_count") or 0):
+            return out
+
+
+def fetch_avant_2021(insee_list: list[str]) -> tuple[dict[str, list[dict]], list[dict]]:
+    """Comptes individuels des communes visées (2015-2020), puis ceux de leurs
+    départements (2020). Rien n'est écrit ici."""
+    codes = sorted({c for c in map(code_dgfip, insee_list) if c})
+    if not codes:
+        return {}, []
+    communes = " or ".join(f"(dep='{d}' and icom='{c}')" for d, c in codes)
+    par_jeu = {}
+    for dataset, annees in COMPTES_COMMUNES.items():
+        ans = ",".join(f"'{a}'" for a in annees)
+        par_jeu[dataset] = _records(dataset, "an,dep,icom,inom,tfb",
+                                    f"an in ({ans}) and ({communes})")
+    deps = ",".join(sorted({f"'{d}'" for d, _ in codes}))
+    departements = _records(COMPTES_DEPARTEMENTS, "exer,dep,lbudg,tfb",
+                            f"exer='{ANNEE_TRANSFERT - 1}' and dep in ({deps})")
+    return par_jeu, departements
+
+
+def _vote(r: dict) -> bool:
+    """Un `tfb` des comptes individuels à 0 n'est pas un taux voté : Fontrieu
+    (81062), commune nouvelle du 01/01/2016, y vaut 0 en 2016 entre deux 13,06.
+    Absent, pas zéro (décision du 09/11/2026)."""
+    return r.get("tfb") is not None and float(r["tfb"]) != 0
+
+
+def zeros_avant_2021(par_jeu: dict[str, list[dict]], insee_list: list[str]) -> list[tuple]:
+    """(insee, annee) dont la source donne un `tfb` à 0 : la ligne qu'une passe
+    antérieure aurait écrite est retirée, pas laissée en base."""
+    par_code = {code_dgfip(i): i for i in insee_list if code_dgfip(i)}
+    out = set()
+    for records in par_jeu.values():
+        for r in records:
+            insee = par_code.get((r.get("dep"), r.get("icom")))
+            if insee and str(r.get("an") or "").isdigit() and r.get("tfb") is not None \
+                    and not _vote(r):
+                out.add((insee, int(r["an"])))
+    return sorted(out)
+
+
+def lignes_avant_2021(par_jeu: dict[str, list[dict]], departements: list[dict],
+                      insee_list: list[str]) -> list[tuple]:
+    """Lignes de `fiscalite_taux` : TFB_VOTE 2015-2020 par commune, et TFB_DEP,
+    le taux du département en 2020, porté sur chaque commune de ce département.
+    `source` = le jeu d'où vient la valeur."""
+    par_code = {code_dgfip(i): i for i in insee_list if code_dgfip(i)}
+    nom = lambda insee, defaut=None: COMMUNES.get(insee, {}).get("nom") or defaut
+    lignes, lu = [], {}
+    for dataset, records in par_jeu.items():
+        for r in records:
+            insee = par_code.get((r.get("dep"), r.get("icom")))
+            lu.setdefault(insee, r.get("inom"))
+            annee = int(r["an"]) if str(r.get("an") or "").isdigit() else None
+            if not insee or annee is None or annee >= ANNEE_TRANSFERT or not _vote(r):
+                continue
+            lignes.append((insee, nom(insee, r.get("inom")), annee, "TFB_VOTE", LIB_TFB_VOTE,
+                           "commune", float(r["tfb"]), dataset))
+    taux_dep: dict[str, set[float]] = {}
+    for r in departements:
+        if r.get("exer") == str(ANNEE_TRANSFERT - 1) and _vote(r):
+            taux_dep.setdefault(r["dep"], set()).add(float(r["tfb"]))
+    for (dep, _), insee in sorted(par_code.items()):
+        # Corse : la Collectivité publie 12,56, mais le taux transféré en 2021
+        # n'est pas le même des deux côtés (Ajaccio 30,65 − 18,40 = 12,25 ;
+        # Bastia 36,58 − 23,68 = 12,90). Pas de taux à porter qui boucle.
+        if dep in ("02A", "02B"):
+            continue
+        taux = taux_dep.get(dep)
+        if not taux:
+            continue                # département absent : pas de ligne, pas de zéro
+        if len(taux) > 1:
+            raise ValueError(f"département {dep} : {len(taux)} taux de TFB en "
+                             f"{ANNEE_TRANSFERT - 1} ({sorted(taux)}), aucun retenu")
+        lignes.append((insee, nom(insee, lu.get(insee)), ANNEE_TRANSFERT - 1, "TFB_DEP", LIB_TFB_DEP,
+                       "departement", taux.pop(), COMPTES_DEPARTEMENTS))
+    return lignes
+
+
+def import_avant_2021(conn, lignes: list[tuple], zeros: list[tuple] = ()) -> int:
+    conn.executemany("DELETE FROM fiscalite_taux WHERE insee=? AND annee=?"
+                     " AND indicateur='TFB_VOTE'", zeros)
+    conn.executemany(
+        "INSERT OR REPLACE INTO fiscalite_taux"
+        " (insee, commune, annee, indicateur, libelle, portee, taux, source)"
+        " VALUES (?,?,?,?,?,?,?,?)", lignes)
+    conn.commit()
+    return len(lignes)
 
 
 def releve_reperes(conn, communes: list[str]) -> int:
@@ -181,12 +321,15 @@ def run(insee_list: list[str] | None = None) -> int:
     ensure_table(conn)
     cibles = insee_list or COMMUNES_INSEE
     total = 0
+    echecs = []
     try:
         for dataset in DATASETS:
             try:
                 records = fetch_dataset(dataset, cibles)
             except Exception as e:
-                print(f"  [fiscalite] {dataset} : erreur — {e}")
+                # Format lu par le service local du portail (DETAIL / RESUME).
+                print(f"  [fiscalite] {dataset} : échec → {type(e).__name__}: {e}")
+                echecs.append(dataset)
                 continue
             n = import_records(conn, dataset, records)
             total += n
@@ -194,13 +337,27 @@ def run(insee_list: list[str] | None = None) -> int:
             print(f"  [fiscalite] {dataset}: {len(records)} enregistrements → "
                   f"{n} taux ({annees[0] if annees else '?'}–{annees[-1] if annees else '?'})")
         try:
+            # Tout lire avant d'écrire, comme les repères (archive de `fetch_json`).
+            par_jeu, departements = fetch_avant_2021(cibles)
+            lignes = lignes_avant_2021(par_jeu, departements, cibles)
+            n = import_avant_2021(conn, lignes, zeros_avant_2021(par_jeu, cibles))
+            total += n
+            print(f"  [fiscalite] avant {ANNEE_TRANSFERT} (comptes individuels) : {n} taux "
+                  f"dont {sum(1 for l in lignes if l[3] == 'TFB_DEP')} départementaux")
+        except Exception as e:
+            print(f"  [fiscalite] avant {ANNEE_TRANSFERT} : échec → {type(e).__name__}: {e}")
+            echecs.append(f"avant {ANNEE_TRANSFERT}")
+        try:
             n = releve_reperes(conn, [c for c in COMMUNES_FOND_INSEE if c in cibles])
             print(f"  [fiscalite] {n} repère(s) : {', '.join(REPERES)}")
         except Exception as e:
-            print(f"  [fiscalite] repères : erreur — {e}")
+            print(f"  [fiscalite] repères : échec → {type(e).__name__}: {e}")
+            echecs.append("repères")
         print(f"[fiscalite] {total} taux en base")
     finally:
         conn.close()
+    if echecs:
+        raise RuntimeError(f"relevés en échec : {', '.join(echecs)}")
     return total
 
 

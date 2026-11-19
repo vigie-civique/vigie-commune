@@ -216,7 +216,7 @@ def _collecte_du_site(monkeypatch, statuts: list[str]):
         "C", (), {"catalogue_pv": staticmethod(lambda p: list(docs))}))
     monkeypatch.setattr(conseils, "complement_mediatheque", lambda portee, documents: [])
     monkeypatch.setattr(conseils, "transaction", lambda: contextlib.nullcontext())
-    monkeypatch.setattr(conseils, "traiter", lambda conn, doc, portee, avec_ocr=False:
+    monkeypatch.setattr(conseils, "traiter", lambda conn, doc, portee, avec_ocr=False, budget=None:
                         {"statut": next(suite), "delibs": 0})
     return conseils
 

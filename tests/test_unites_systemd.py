@@ -179,3 +179,14 @@ def test_un_renommage_de_la_publication_ne_traverse_pas_deux_readwritepaths(
         for dest in (lieux["SITE"], lieux["PUBLIE"]):
             publication.revenir_a_la_version_precedente(dest)
     assert json.loads((lieux["SITE"] / "stats.json").read_text())["marque"] == "en ligne"
+
+
+def test_l_atelier_en_ligne_lance_l_apercu_derriere_nginx():
+    """Le serveur d'aperçu, lancé par l'atelier, ne croit que le compte que
+    nginx dit d'après la session (deploy/nginx-atelier.conf, `X-Vigie-Compte`).
+    Sans cette ligne, il reprend le compte dans un cookie que le visiteur écrit
+    (audit du 15/11/2026, B3)."""
+    lignes = (ROOT / "deploy" / "atelier.service").read_text(encoding="utf-8").splitlines()
+    assert "Environment=VIGIE_APERCU_COMPTE_PAR_ENTETE=1" in lignes
+    servir = _charger("servir_unite", "servir_apercu.py")
+    assert "VIGIE_APERCU_COMPTE_PAR_ENTETE" in Path(servir.__file__).read_text(encoding="utf-8")

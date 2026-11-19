@@ -20,9 +20,9 @@ import time
 import urllib.parse
 import urllib.request
 import unicodedata
-from .archive import fetch_json
+from .archive import archiver_retenues, fetch_json
 from .config import (JO_ASSO_API, CODE_POSTAL, COMMUNE_NAME,
-                     COMMUNES_DELEGUEES, HEADERS, REQUEST_DELAY,
+                     ANCIENNES_COMMUNES, HEADERS, REQUEST_DELAY,
                      cp_du_step, registre_du_step)
 
 
@@ -42,16 +42,25 @@ def _norm(s: str) -> str:
 # l'interrogation se fait par code postal, qui déborde de toute façon.
 _REGISTRE = registre_du_step("rna")
 _COMMUNE_LOOKUP = {_norm(c["nom"]): c["nom"] for c in _REGISTRE.values()}
-# Communes déléguées : le JO des associations continue d'écrire l'ancien nom
+# Anciennes communes : le JO des associations continue d'écrire l'ancien nom
 # des communes fusionnées, parfois des décennies après. La correspondance
-# « ancien nom → commune actuelle » se lit dans `communes_deleguees` de
+# « ancien nom → commune actuelle » se lit dans `anciennes_communes` de
 # config/instance.json, où chaque entrée porte le code INSEE de sa commune de
 # rattachement. Elle a été écrite en dur pendant des mois : le moteur
 # connaissait ainsi une fusion précise, et une seule.
-for _delegee in COMMUNES_DELEGUEES.values():
+for _delegee in ANCIENNES_COMMUNES.values():
     _parent = _REGISTRE.get(_delegee.get("commune", ""), {}).get("nom")
-    if _parent:
+    # Un nom vide (« à confirmer ») ferait correspondre toute annonce sans
+    # commune à la commune de rattachement.
+    if _parent and _delegee.get("nom"):
         _COMMUNE_LOOKUP[_norm(_delegee["nom"])] = _parent
+# L'ancien nom porté par le code même de la commune nouvelle : Pelvoux sous
+# 05101, devenu Vallouise-Pelvoux. Le JO range encore sous ce nom des
+# associations déclarées avant la fusion, et en publie des avis après elle.
+for _c in _REGISTRE.values():
+    for _ancien in _c.get("anciens_noms") or []:
+        if _ancien:     # vide : toute annonce sans commune serait reconnue
+            _COMMUNE_LOOKUP[_norm(_ancien)] = _c["nom"]
 
 
 def _match_commune(ville: str) -> str | None:
@@ -66,14 +75,19 @@ from .nom_normalise import nettoyer_libelle, normaliser
 # ----------------------------------------------------------------
 
 def fetch_jo_page(offset: int = 0, limit: int = 100, cp: str = CODE_POSTAL) -> dict:
+    # Pas d'archive ici : `fetch_all_jo` archive la page réduite au périmètre.
+    return fetch_json(url_jo(offset, limit, cp), source="rna-jo", timeout=15,
+                      archiver=False, complete=True)
+
+
+def url_jo(offset: int = 0, limit: int = 100, cp: str = CODE_POSTAL) -> str:
     params = urllib.parse.urlencode({
         "where": f'codepostal_actuel="{cp}"',
         "limit": limit,
         "offset": offset,
         "order_by": "dateparution DESC"
     })
-    url = f"{JO_ASSO_API}?{params}"
-    return fetch_json(url, source="rna-jo", timeout=15)
+    return f"{JO_ASSO_API}?{params}"
 
 
 def fetch_all_jo(cp: str = CODE_POSTAL) -> list[dict]:
@@ -91,6 +105,10 @@ def fetch_all_jo(cp: str = CODE_POSTAL) -> list[dict]:
 
         items = data.get("results", [])
         results.extend(items)
+        # Le code postal déborde sur les communes voisines : on n'archive que ce
+        # que `import_rna` retiendra (même filtre, `_match_commune`).
+        archiver_retenues("rna-jo", url_jo(offset, limit, cp), data,
+                          [i for i in items if _match_commune(i.get("commune_actuelle") or "")])
 
         if total is None:
             total = data.get("total_count", 0)

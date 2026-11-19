@@ -57,6 +57,7 @@ import re
 import unicodedata
 import urllib.request
 
+from . import mesure
 from .archive import HEADERS, archive_fetch
 from .config import COMMUNE_INSEE, COMMUNE_NAME, DEPARTEMENT, EPCI_NOM
 from .db import get_conn, transaction
@@ -130,8 +131,10 @@ def selectionner(texte: str, departement: str, commune: str,
     Rend aussi le nombre de lignes du même département écartées : c'est la
     mesure de ce que le rapprochement a refusé, et elle doit rester visible.
     """
-    retenus, ecartes = [], 0
-    for ligne in csv.DictReader(io.StringIO(texte), delimiter=";"):
+    retenus, ecartes, lues = [], 0, 0
+    lecteur = csv.DictReader(io.StringIO(texte), delimiter=";")
+    for ligne in lecteur:
+        lues += 1
         if (ligne.get("departement") or "").strip() != departement:
             continue
         mandat = (ligne.get("type_mandat") or "").strip()
@@ -157,6 +160,9 @@ def selectionner(texte: str, departement: str, commune: str,
             "url": f"{BASE}{chemin}" if chemin.startswith("/") else chemin or None,
             "reference": (ligne.get("classement") or "").strip(),
         })
+    # La liste nationale, avant tout filtre : sous 20 000 habitants, aucun
+    # déclarant n'est retenu, et c'est l'ordinaire.
+    mesure.lu(SOURCE, lues, lecteur.fieldnames, complete=True)
     return retenus, ecartes
 
 

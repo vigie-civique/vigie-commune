@@ -37,9 +37,10 @@ import re
 import urllib.parse
 import urllib.request
 
+from . import mesure
 from .archive import archive_fetch
 from .config import EPCI_NOM, EPCI_SIREN, HEADERS
-from .db import transaction, upsert_entity, upsert_person, upsert_relation
+from .db import entite_par_siren, transaction, upsert_entity, upsert_person, upsert_relation
 
 BASE_URL = "https://www.banatic.interieur.gouv.fr/intercommunalite/{siren}"
 DOC_URL = "https://www.banatic.interieur.gouv.fr/consultation/api/document/{id}/{titre}"
@@ -71,6 +72,9 @@ def fetch(siren: str) -> dict:
 
 def _epci_entity(conn, siren: str) -> int:
     """Entité `service` de l'EPCI, créée si absente."""
+    eid = entite_par_siren(conn, siren)
+    if eid is not None:
+        return eid
     row = conn.execute(
         """SELECT e.id FROM entities e
            LEFT JOIN entity_notes n ON n.entity_id = e.id
@@ -79,11 +83,27 @@ def _epci_entity(conn, siren: str) -> int:
         (f"%{siren}%", f"%{EPCI_NOM.split(' ', 1)[-1]}%")).fetchone()
     if row:
         return row["id"]
-    return upsert_entity(conn, type="service", name=EPCI_NOM,
+    return upsert_entity(conn, type="service", name=EPCI_NOM, siren=siren,
                          confidence="verified")
 
 
+def _texte_source(v) -> str | None:
+    """Un texte de la fiche, sans espaces de bord ; None s'il est vide."""
+    v = " ".join(str(v or "").split())
+    return v or None
+
+
 def import_competences(conn, epci_id: int, data: dict, dry_run: bool) -> int:
+    """Les compétences, chacune avec SA PRÉCISION.
+
+    L'intitulé seul ne dit pas ce qui a été transféré. La CC Causses Aigoual
+    Cévennes exerce « Service public de défense extérieure contre
+    l'incendie » ; la fiche précise « Entretien des pistes DFCI. » Lue sans
+    cette précision, la compétence a fait écrire que les bornes incendie
+    relevaient de l'intercommunalité, alors que la commune les paie (relevé du
+    07/11/2026). La précision est publiée telle que la source l'écrit, à côté
+    de l'intitulé, jamais résumée.
+    """
     n = 0
     for c in data.get("competencesGroupement", []):
         cat = (c.get("categorieCompetence") or {}).get("libelle")
@@ -93,16 +113,23 @@ def import_competences(conn, epci_id: int, data: dict, dry_run: bool) -> int:
         conn.execute(
             """INSERT INTO epci_competences
                (epci_siren, code, libelle, categorie, obligatoire,
-                interet_communautaire, source)
-               VALUES (?,?,?,?,?,?,?)
+                interet_communautaire, description, precision_competence,
+                precision_interet_communautaire, source)
+               VALUES (?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(epci_siren, code) DO UPDATE SET
                  libelle=excluded.libelle, categorie=excluded.categorie,
                  obligatoire=excluded.obligatoire,
                  interet_communautaire=excluded.interet_communautaire,
+                 description=excluded.description,
+                 precision_competence=excluded.precision_competence,
+                 precision_interet_communautaire=excluded.precision_interet_communautaire,
                  collected_at=datetime('now')""",
             (EPCI_SIREN, c.get("code"), c.get("libelle"), cat,
              1 if c.get("isObligatoire") else 0,
              1 if c.get("isInteretCommunautaire") else 0,
+             _texte_source(c.get("description")),
+             _texte_source(c.get("specificiteInteretCompetence")),
+             _texte_source(c.get("specificiteInteretCommunautaire")),
              "BANATIC"))
     return n
 
@@ -229,7 +256,29 @@ def import_adhesions(conn, epci_id: int, data: dict, dry_run: bool) -> int:
     return n
 
 
+def _date_fr(iso: str | None) -> str:
+    return f"{iso[8:10]}/{iso[5:7]}/{iso[:4]}" if iso and len(iso) >= 10 else ""
+
+
 def import_arretes(conn, data: dict, dry_run: bool) -> int:
+    """Les événements de la fiche : ce que BANATIC a ENREGISTRÉ, à la date de
+    son état, pas un fait acquis.
+
+    Un événement n'est jamais retiré de la fiche quand l'arrêté qui le porte
+    est annulé ou remplacé. Celle de la CC Causses Aigoual Cévennes, à jour du
+    09/09/2026, annonce toujours « Transfert des compétences eau et
+    assainissement au 1/01/2021 », un arrêté annulé depuis : le transfert
+    effectif date du 01/01/2023, par un autre arrêté (relevé du 07/11/2026). Le titre dit donc d'où
+    vient l'événement et à quelle date la source l'atteste ; le reste est au
+    lecteur, actes en main.
+
+    Chaque événement est identifié par son identifiant BANATIC (ou, sur une
+    ligne d'avant cette règle, par l'URL de son document) et RÉÉCRIT à chaque
+    passe. `events` n'a aucune contrainte d'unicité : l'`INSERT OR IGNORE`
+    d'avant n'ignorait rien, ajoutait les mêmes arrêtés à chaque passe, et
+    n'aurait jamais porté un titre corrigé jusqu'à une ligne existante.
+    """
+    etat_au = (data.get("dateDerniereModification") or "")[:10] or None
     n = 0
     for e in data.get("evenements", []):
         if not e.get("isAffichable", True):
@@ -241,23 +290,63 @@ def import_arretes(conn, data: dict, dry_run: bool) -> int:
         n += 1
         if dry_run:
             continue
-        conn.execute(
-            """INSERT OR IGNORE INTO events
-               (type, date, title, content, source, source_url, metadata)
-               VALUES (?,?,?,?,?,?,?)""",
-            ("arrete_prefectoral_epci",
-             (e.get("dateEffet") or e.get("dateCreation") or "")[:10],
-             f"{EPCI_NOM} — {e.get('description') or titre}",
-             titre, "banatic", url,
-             json.dumps({"siren": EPCI_SIREN,
-                         "creation_groupement": e.get("isCreationGroupement")},
-                        ensure_ascii=False)))
+        description = e.get("description") or titre
+        etat = f"selon BANATIC, fiche à jour du {_date_fr(etat_au)}" if etat_au \
+            else "selon BANATIC, fiche non datée"
+        contenu = (f"{titre}. Événement enregistré par BANATIC ({etat}). La fiche "
+                   "ne dit pas si l'arrêté a été retiré, annulé ou remplacé depuis : "
+                   "l'acte en vigueur se vérifie dans les arrêtés préfectoraux et les "
+                   "délibérations qui le visent.")
+        valeurs = ("arrete_prefectoral_epci",
+                   (e.get("dateEffet") or e.get("dateCreation") or "")[:10],
+                   f"{EPCI_NOM} — {description} ({etat})",
+                   contenu, "banatic", url,
+                   json.dumps({"siren": EPCI_SIREN,
+                               "creation_groupement": e.get("isCreationGroupement"),
+                               "banatic_id": e.get("id"),
+                               "date_effet": (e.get("dateEffet") or "")[:10] or None,
+                               "date_creation": (e.get("dateCreation") or "")[:10] or None,
+                               "etat_au": etat_au,
+                               "revisable": True},
+                              ensure_ascii=False))
+        # Par l'URL, on ne reprend qu'une ligne d'avant l'identifiant : deux
+        # événements d'une même fiche peuvent citer le même document, et se
+        # réécriraient l'un l'autre (relecture vigie-securite du 08/11).
+        existants = [r[0] for r in conn.execute(
+            """SELECT id FROM events
+               WHERE type = 'arrete_prefectoral_epci' AND source = 'banatic'
+                 AND ((? IS NOT NULL AND json_extract(metadata, '$.banatic_id') = ?)
+                      OR (? IS NOT NULL AND source_url = ?
+                          AND json_extract(metadata, '$.banatic_id') IS NULL))""",
+            (e.get("id"), e.get("id"), url, url))]
+        if existants:
+            # Toutes les copies sont réécrites, aucune n'est supprimée : une
+            # ligne peut porter une revue de l'atelier.
+            conn.executemany(
+                "UPDATE events SET type=?, date=?, title=?, content=?, source=?,"
+                " source_url=?, metadata=json_patch(COALESCE(metadata, '{}'), ?)"
+                " WHERE id=?",
+                [(*valeurs, i) for i in existants])
+            if len(existants) > 1:
+                print(f"    ↳ {len(existants)} copies du même événement BANATIC "
+                      f"(« {description[:50]} ») : réécrites, à dédoublonner")
+        else:
+            conn.execute(
+                """INSERT INTO events
+                   (type, date, title, content, source, source_url, metadata)
+                   VALUES (?,?,?,?,?,?,?)""", valeurs)
     return n
 
 
 def run(siren: str = EPCI_SIREN, dry_run: bool = False) -> None:
     print(f"[banatic] {EPCI_NOM} (SIREN {siren})")
     data = fetch(siren)
+    # La fiche se relit en entier. Les délégués changent avec les élections :
+    # leur forme sert, pas leur nombre.
+    for cle, complete in (("competencesGroupement", True),
+                          ("groupementsAdherentsSyndicatMixte", True), ("delegues", False)):
+        liste = data.get(cle) or []
+        mesure.lu(f"banatic-{cle}", len(liste), mesure.forme_de(liste), complete=complete)
 
     with transaction() as conn:
         epci_id = _epci_entity(conn, siren)

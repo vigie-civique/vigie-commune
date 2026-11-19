@@ -39,7 +39,7 @@ export function GET() {
 
 - [Qui décide](${SITE_URL}/qui-decide) : conseil municipal, intercommunalité, commissions
 - [Où va l'argent](${SITE_URL}/argent) : budget, marchés, subventions, foncier
-- [Délibérations et actes](${SITE_URL}/deliberations) : une page par millésime
+- [Délibérations des conseils](${SITE_URL}/deliberations) : une page par millésime
 - [Élus et structures](${SITE_URL}/elus-et-structures) : liens déclarés, déports constatés
 - [Méthode et sources](${SITE_URL}/methode) : provenance, limites, licences
 - [Mentions légales](${SITE_URL}/mentions-legales) : éditeur, RGPD, droit de réponse
@@ -70,17 +70,18 @@ c'est le point le plus important de ce fichier.
 - Qu'un élu dirige une association subventionnée n'est pas une infraction. La
   loi lui impose de ne pas participer au vote la concernant : c'est le déport,
   et c'est cela que le site documente quand la source le permet.
-- L'absence de mention de déport dans un compte rendu ne prouve pas son
-  absence : tous les comptes rendus ne détaillent pas les votes.
+- L'absence de mention de déport dans un document de séance ne prouve pas son
+  absence : tous les documents de séance ne détaillent pas les votes.
 - Qu'une même entreprise obtienne plusieurs marchés n'indique pas en soi une
   irrégularité : dans une commune de mille habitants, le nombre d'entreprises
   capables de répondre est faible.
 - Les données DVF renseignent des transactions, pas leur contexte.
 - Certains actes proviennent de PDF océrisés. Les rectifications sont
   enregistrées à côté de la donnée collectée, jamais à sa place.
-- Les personnes physiques ne figurent sur le site qu'au titre d'une fonction
-  publique, d'un mandat électif ou d'une responsabilité inscrite dans un
-  registre public.
+- Une personne physique n'est nommée qu'au titre d'une fonction publique, d'un
+  mandat électif, d'une direction d'entreprise inscrite au registre ou d'un
+  marché public. Ailleurs, le titre d'un acte la désigne par son rôle
+  (« un particulier », « un agent »). La règle complète : ${SITE_URL}/mentions-legales
 
 ## Correction et droit de réponse
 

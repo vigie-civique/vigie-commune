@@ -3,6 +3,7 @@
   import FiltrePortee from '#lib/components/FiltrePortee.svelte'
   import Icon from '#lib/components/Icon.svelte'
   import { TYPE_LABELS } from '#lib/data.js'
+  import { contientLesMots } from '#lib/recherche.js'
 
   // Rendu au build par +page.server.js.
   export let data
@@ -77,7 +78,7 @@
   $: filtered = dansActivite
     .filter(e => typeFilter === 'all' || e.type === typeFilter)
     .filter(e => !natureVisible || nature === 'all' || e.nature === nature)
-    .filter(e => !q || (e.name || '').toLowerCase().includes(q.toLowerCase()))
+    .filter(e => contientLesMots(e.name, q))
     .sort((a, b) => (b.citations || 0) - (a.citations || 0) || (a.name || '').localeCompare(b.name || ''))
   $: counts = dansActivite.reduce((a, e) => { a[e.type] = (a[e.type] || 0) + 1; return a }, {})
 
@@ -214,14 +215,14 @@
   }
   .vers-carte:hover { border-color: var(--ardoise); text-decoration: none; }
   .scope { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .4rem; }
-  .scope button { padding: .4rem .8rem; border: 1px solid var(--trait); border-radius: 6px; background: #fff; color: var(--gris); font-size: .85rem; cursor: pointer; }
+  .scope button { padding: .4rem .8rem; border: 1px solid var(--trait); border-radius: 6px; background: var(--carte); color: var(--gris); font-size: .85rem; cursor: pointer; }
   .scope button b { font-weight: 700; color: var(--encre); }
-  .scope button.on { border-color: var(--encre); background: var(--encre); color: #fff; }
-  .scope button.on b { color: #fff; }
+  .scope button.on { border-color: var(--encre); background: var(--encre); color: var(--papier); }
+  .scope button.on b { color: var(--papier); }
   .scope-hint { color: var(--gris); font-size: .8rem; margin: 0 0 .9rem; max-width: 70ch; }
   .cit { font-size: .72rem; color: var(--gris); }
   .chips { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
-  .chips button { padding: .35rem .75rem; border: 1px solid var(--trait); border-radius: 99px; background: #fff; color: var(--gris); font-size: .85rem; cursor: pointer; }
+  .chips button { padding: .35rem .75rem; border: 1px solid var(--trait); border-radius: 99px; background: var(--carte); color: var(--gris); font-size: .85rem; cursor: pointer; }
   .chips button b { font-weight: 700; color: var(--encre); }
   .chips button.on { border-color: var(--ardoise); background: var(--ardoise-pale); color: var(--ardoise-fonce); }
   .chips button.on b { color: var(--ardoise-fonce); }
@@ -229,9 +230,9 @@
   input { padding: .5rem .7rem; border: 1px solid var(--trait); border-radius: 6px; font-size: .95rem; flex: 1; min-width: 200px; }
   .count { color: var(--gris); font-size: .85rem; }
   .grid { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: .6rem; }
-  .grid a { display: flex; flex-direction: column; gap: .35rem; padding: .75rem; background: #fff; border: 1px solid var(--trait); border-radius: 8px; color: var(--encre); }
+  .grid a { display: flex; flex-direction: column; gap: .35rem; padding: .75rem; background: var(--carte); border: 1px solid var(--trait); border-radius: 8px; color: var(--encre); }
   .grid a:hover { border-color: var(--ardoise); text-decoration: none; }
-  .badge { align-self: flex-start; font-size: .7rem; padding: .1rem .5rem; border-radius: 99px; color: #fff; }
+  .badge { align-self: flex-start; font-size: .7rem; padding: .1rem .5rem; border-radius: 99px; color: var(--papier); }
   .badge.service { background: var(--ardoise); } .badge.association { background: var(--recette); }
   .badge.business { background: var(--ambre); } .badge.place { background: var(--ardoise); }
   .badge.fin { background: transparent; color: var(--gris); border: 1px solid var(--trait); }

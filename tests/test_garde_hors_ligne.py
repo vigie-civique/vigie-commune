@@ -111,3 +111,51 @@ def test_la_ci_eprouve_le_dossier_remis_et_pas_le_site_en_ligne():
     # partir de Node 22. Sur Node 20, il échouerait sur une erreur de portée
     # qui n'aurait aucun rapport avec ce qu'il cherche.
     assert 'node-version: "22"' in source or 'node-version: "2' in source
+
+
+# ── Le double-clic (01/11/2026) ──────────────────────────────────────────────
+#
+# Le lanceur (`ouvrir-le-dossier.command` / `.bat`) était le seul moyen d'avoir
+# un site qui répond : macOS le bloque, Windows le signale et n'a pas Python.
+# Le dossier se lit désormais au double-clic sur une page, sans serveur.
+
+ETAPE = ROOT / "public" / "scripts" / "pour_le_double_clic.mjs"
+CHARGEUR = ROOT / "public" / "src" / "lib" / "charger.js"
+SRC = ROOT / "public" / "src"
+
+
+def test_le_build_du_dossier_passe_par_l_etape_du_double_clic():
+    """Branchée sur l'ADAPTATEUR : un `closeBundle` serait effacé par lui."""
+    source = VITE.read_text(encoding="utf-8")
+    assert "pourLeDoubleClic(" in source, "l'étape du double-clic n'est plus branchée"
+    assert re.search(r"adapter:\s*pourLeDoubleClic\(", source), (
+        "l'étape du double-clic doit envelopper l'adaptateur, sans quoi il "
+        "réécrit le répertoire après elle"
+    )
+    assert "rendreLisibleAuDoubleClic" in ETAPE.read_text(encoding="utf-8")
+
+
+def test_seul_le_chargeur_va_chercher_un_fichier():
+    """Un `fetch` ailleurs que dans `charger.js` meurt au double-clic, sans bruit.
+
+    Les modules `.server.js` / `+server.js` / `+page.server.js` ne tournent
+    qu'au prérendu, sous Node : ils sont hors de cause.
+    """
+    fautes = []
+    for chemin in SRC.rglob("*"):
+        if chemin.suffix not in {".js", ".ts", ".svelte"} or chemin == CHARGEUR:
+            continue
+        if re.search(r"(\.server|\+server)\.(js|ts)$", chemin.name):
+            continue
+        for n, ligne in enumerate(chemin.read_text(encoding="utf-8").splitlines(), 1):
+            code = re.sub(r"//.*$", "", ligne)
+            if re.search(r"\bfetch\s*\(", code) and not code.lstrip().startswith("*"):
+                fautes.append(f"{chemin.relative_to(ROOT)}:{n}")
+    assert not fautes, "fetch() hors de src/lib/charger.js :\n" + "\n".join(fautes)
+
+
+def test_le_controle_exige_une_page_vivante_au_double_clic():
+    """Avant le 01/11, il se contentait de pages qui S'AFFICHENT en file://."""
+    source = CONTROLE.read_text(encoding="utf-8")
+    assert "la page ne s'hydrate pas" in source
+    assert "index de recherche n" in source

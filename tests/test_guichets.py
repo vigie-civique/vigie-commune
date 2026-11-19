@@ -143,12 +143,23 @@ class TestCoupure:
             g.run("99001")
 
     def test_l_index_precedent_sert(self, magasin, monkeypatch):
-        g._index()
-        g.META.touch()
         import os
-        os.utime(g.META, (0, 0))   # périmé : on retente, la DILA coupe
+        import time
+        from collectors import national_store
+        g._index()
+        vieux = time.time() - (g.CACHE_JOURS + 1) * 86400   # périmé : on retente, la DILA coupe
+        os.utime(g.META, (vieux, vieux))
         self._coupe(monkeypatch)
+        monkeypatch.setattr(national_store, "perimes_lus", [])
         assert set(g._index()[0]) == {"99001", "99002"}
+        assert national_store.perimes_lus, "l'index périmé repris est déclaré"
+
+    def test_au_dela_de_deux_fois_la_validite_l_index_ne_sert_plus(self, magasin, monkeypatch):
+        import os
+        g._index()
+        os.utime(g.META, (0, 0))
+        self._coupe(monkeypatch)
+        assert g._index() is None
 
 
 class TestExport:

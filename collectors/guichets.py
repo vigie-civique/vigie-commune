@@ -53,10 +53,12 @@ import urllib.error
 import urllib.request
 import zipfile
 
+from . import mesure
 from .archive import HEADERS, fetch_json
 from .config import NATIONAL_STORE, communes_du_step
 from .db import get_conn, transaction
-from .national_store import ecrire_atomiquement, est_frais
+from .national_store import (ecrire_atomiquement, est_frais, magasin_ecrivable,
+                             perime_lisible)
 
 SOURCE = "guichets"
 DATASET = "53699fe4a3a729239d206227"
@@ -162,7 +164,7 @@ def _url_archive() -> str:
     raise RuntimeError("Annuaire : pas d'archive de la base locale au catalogue")
 
 
-def _telecharger() -> None:
+def _telecharger() -> tuple[dict, dict, dict]:
     """Lit l'archive nationale en flux et dépose l'index réduit au magasin."""
     url = _url_archive()
     competences = services = fichier = None
@@ -192,20 +194,31 @@ def _telecharger() -> None:
     meta = {"fichier": fichier, "date": m[1] if m else None, "url": url}
     for chemin, contenu in ((COMPETENCES, competences), (SERVICES, services), (META, meta)):
         ecrire_atomiquement(chemin, json.dumps(contenu, ensure_ascii=False).encode())
-    print(f"  [guichets] index déposé : {len(competences)} communes, "
+    print(f"  [guichets] index lu : {len(competences)} communes, "
           f"{len(services)} guichets ({fichier})")
+    return competences, services, meta
 
 
 def _index() -> tuple[dict, dict, dict] | None:
-    """L'index du magasin, rafraîchi s'il a vieilli ; None s'il n'y en a aucun."""
-    if not est_frais(META, CACHE_JOURS):
-        try:
-            _telecharger()
-        except _COUPURES as e:
-            print(f"  ⚠ [guichets] annuaire injoignable ({type(e).__name__}: {e})"
-                  + (" — index précédent réutilisé" if META.is_file() else ""))
-    if not META.is_file():
+    """L'index du magasin, rafraîchi s'il a vieilli ; None s'il n'y en a aucun.
+
+    L'index téléchargé se lit en mémoire : un magasin qui refuse l'écriture
+    garde l'ancien, et le relire jetait le neuf. L'index précédent n'est repris
+    que dans la règle bornée du magasin (`perime_lisible`), qui le déclare.
+    """
+    if est_frais(META, CACHE_JOURS) or (
+            not magasin_ecrivable(CACHE, META.name) and perime_lisible(META, CACHE_JOURS)):
+        return _index_du_magasin()
+    try:
+        return _telecharger()
+    except _COUPURES as e:
+        print(f"  ⚠ [guichets] annuaire injoignable ({type(e).__name__}: {e})")
+        if perime_lisible(META, CACHE_JOURS):
+            return _index_du_magasin()
         return None
+
+
+def _index_du_magasin() -> tuple[dict, dict, dict]:
     return (json.loads(COMPETENCES.read_text()), json.loads(SERVICES.read_text()),
             json.loads(META.read_text()))
 
@@ -258,6 +271,10 @@ def run(insee: str | None = None) -> int:
         # fraîche 30 jours sans avoir rien relevé. L'échec la fait retenter demain.
         raise RuntimeError("Annuaire injoignable et aucun index au magasin : rien n'est relevé")
     competences, services, meta = index
+    # L'index national, neuf ou du magasin : la copie neuve se compare à
+    # l'ancienne le jour où elle arrive.
+    mesure.lu("guichets-communes", len(competences), None, complete=True)
+    mesure.lu("guichets-services", len(services), None, complete=True)
     codes = {insee} if insee else set(communes_du_step(SOURCE))
     total = 0
     with transaction() as conn:

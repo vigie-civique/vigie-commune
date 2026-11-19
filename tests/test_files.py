@@ -77,8 +77,8 @@ def test_chaque_file_figure_dans_le_menu_de_latelier(registre):
 
     `/atelier/geo` a vécu ainsi : page écrite, endpoint écrit, aucune entrée.
     """
-    menu = (ROOT / "dashboard" / "src" / "routes" / "atelier"
-            / "+layout.svelte").read_text(encoding="utf-8")
+    # Le menu vit dans lib/menu.js depuis #283 : le menu latéral et l'accueil le lisent.
+    menu = (ROOT / "dashboard" / "src" / "lib" / "menu.js").read_text(encoding="utf-8")
     for f in registre:
         assert f"'{f.route}'" in menu, f"{f.cle} → {f.route} absent du menu"
 
@@ -300,7 +300,9 @@ def test_lendpoint_rend_toutes_les_files_avec_leur_question(atelier):
     corps = r.json()
     assert corps["reservation_minutes"] == RESERVATION_MINUTES
     cles = {f["cle"] for f in corps["files"]}
-    assert cles == {f.cle for f in files(COMMUNE, CP)}
+    # Plus la file des dossiers retenus puis modifiés, que l'API mesure sur le
+    # disque (`api._file_dossiers_modifies`) : elle n'est pas une requête.
+    assert cles == {f.cle for f in files(COMMUNE, CP)} | {"dossiers-modifies", "refus-contredits"}
     for f in corps["files"]:
         assert f["question"] and f["geste"] and f["effet"] and f["route"]
 

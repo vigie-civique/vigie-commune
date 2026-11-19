@@ -54,6 +54,7 @@ def emplacements(publication, tmp_path, monkeypatch):
     monkeypatch.setattr(publication, "SITE", site)
     monkeypatch.setattr(publication, "ETAT", tmp_path / "etat.json")
     monkeypatch.setattr(publication, "VERSIONS", tmp_path / "versions")
+    monkeypatch.setattr(publication, "PUBLIEES", tmp_path / "publiees")
     return {"brouillon": brouillon, "publie": publie, "site": site}
 
 
@@ -1498,3 +1499,52 @@ def test_un_apercu_de_compte_tronque_ne_se_construit_ni_ne_se_publie(
     with pytest.raises(publication.PublicationRefusee):
         publication.publier(auteur="a", role="admin", apercu=apercu,
                             controleur=lambda cible: controle(True))
+
+
+# ── Chaque version promue est archivée (revue du 07/11/2026, C3) ─────────────
+
+def test_la_version_promue_est_archivee_avec_son_manifeste(publication, emplacements, tmp_path):
+    import tarfile
+    publication.generer_apercu(auteur="essai", builder=builder([1, 2]),
+                               controleur=lambda cible: controle(True))
+    (emplacements["brouillon"] / "manifeste.json").write_text(
+        json.dumps({"format": "vigie-manifeste/1", "fichiers": []}), encoding="utf-8")
+    publie = publication.publier(auteur="admin", role="admin",
+                                 controleur=lambda cible: controle(True))
+    archive = Path(publie["archive"]["archive"])
+    assert archive.parent.parent == tmp_path / "publiees"
+    assert re.fullmatch(r"\d{8}", archive.parent.name)
+    assert Path(publie["archive"]["manifeste"]).is_file()
+    with tarfile.open(archive) as tar:
+        noms = tar.getnames()
+    assert "snapshot/entities.json" in noms and "snapshot/entite/2.json" in noms
+
+
+def test_deux_promotions_du_meme_jour_se_gardent(publication, tmp_path, monkeypatch):
+    from datetime import datetime
+    monkeypatch.setattr(publication, "PUBLIEES", tmp_path / "publiees")
+    snapshot(tmp_path / "v", [1])
+    a = publication.archiver_la_version(tmp_path / "v", datetime(2026, 11, 7, 3, 30, 0))
+    b = publication.archiver_la_version(tmp_path / "v", datetime(2026, 11, 7, 14, 0, 0))
+    assert a["archive"] != b["archive"]
+    assert sorted(p.name for p in (tmp_path / "publiees" / "20261107").iterdir()) == [
+        "snapshot-033000.tar.gz", "snapshot-140000.tar.gz"]
+
+
+def test_au_dela_de_13_mois_une_version_par_mois(publication, tmp_path, monkeypatch):
+    """Rétention décidée le 07/11/2026 : tout 13 mois, puis la première du mois."""
+    from datetime import datetime
+    monkeypatch.setattr(publication, "PUBLIEES", tmp_path / "publiees")
+    snapshot(tmp_path / "v", [1])
+    for quand in (datetime(2025, 9, 1, 3), datetime(2025, 9, 1, 14),
+                  datetime(2025, 9, 20, 3), datetime(2025, 10, 6, 3),
+                  datetime(2025, 10, 7, 3)):
+        publication.archiver_la_version(tmp_path / "v", quand)
+    publication.archiver_la_version(tmp_path / "v", datetime(2026, 11, 7, 3))
+    restes = sorted(str(p.relative_to(tmp_path / "publiees"))
+                    for p in (tmp_path / "publiees").rglob("snapshot-*"))
+    assert restes == ["20250901/snapshot-030000.tar.gz",   # 1re de septembre 2025
+                      "20251006/snapshot-030000.tar.gz",   # 1re d'octobre 2025
+                      "20251007/snapshot-030000.tar.gz",   # dans les 13 mois
+                      "20261107/snapshot-030000.tar.gz"]
+    assert not (tmp_path / "publiees" / "20250920").exists()

@@ -35,6 +35,7 @@ import json
 import re
 import urllib.request
 
+from . import mesure
 from .archive import archive_fetch
 from .config import COMMUNE_NAME, COMMUNES, COMMUNES_INSEE, HEADERS
 from .db import get_conn
@@ -155,14 +156,17 @@ def fetch_rows(slug: str, titre_prefixe: str,
     reader = csv.reader(io.StringIO(txt), delimiter=";")
     header = next(reader)
     cible = set(insee_list)
-    gardees = []
+    gardees, lues = [], 0
     for row in reader:
+        lues += 1
         if len(row) < 4:
             continue
         code = f"{row[0].strip().zfill(2)}{row[2].strip().zfill(3)}" \
             if len(row[2].strip()) <= 3 else row[2].strip()
         if code in cible:
             gardees.append(row)
+    # Le scrutin national, figé, avant le filtre.
+    mesure.lu(f"elections-{slug}", lues, header, complete=True)
 
     if gardees:
         buf = io.StringIO()
@@ -334,6 +338,7 @@ def run(scrutin: str | None = None, tours: list[int] | None = None,
     ensure_tables(conn)
     cibles = insee_list or COMMUNES_INSEE
     total = {}
+    echecs = []
     try:
         for nom_scrutin, tours_dispo in SCRUTINS.items():
             if scrutin and nom_scrutin != scrutin:
@@ -344,7 +349,10 @@ def run(scrutin: str | None = None, tours: list[int] | None = None,
                 try:
                     header, rows, _ = fetch_rows(slug, prefixe, cibles)
                 except Exception as e:
-                    print(f"  [elections] {nom_scrutin} tour {tour} : erreur — {e}")
+                    # Format lu par le service local du portail (DETAIL / RESUME) :
+                    # un tour perdu ne doit pas passer pour « aucune commune concernée ».
+                    print(f"  [elections] {nom_scrutin} tour {tour} : échec → {type(e).__name__}: {e}")
+                    echecs.append(f"{nom_scrutin} tour {tour}")
                     continue
                 if not rows:
                     # Normal quand tout le vallon est élu au premier tour.
@@ -358,6 +366,8 @@ def run(scrutin: str | None = None, tours: list[int] | None = None,
                       f"{res['events']} nouveaux événements")
     finally:
         conn.close()
+    if echecs:
+        raise RuntimeError(f"relevés en échec : {', '.join(echecs)}")
     return total
 
 

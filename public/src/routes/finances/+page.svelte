@@ -448,7 +448,7 @@
   .note { background: var(--ambre-pale); border: 1px solid #eadfc6; color: var(--ambre); border-radius: 8px; padding: .6rem .8rem; font-size: .85rem; margin: 0 0 1.25rem; }
 
   .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: .75rem; margin-bottom: 1.75rem; }
-  .tile { background: #fff; border: 1px solid var(--trait); border-top: 3px solid var(--trait); border-radius: 8px; padding: .8rem .9rem; display: flex; flex-direction: column; gap: .15rem; }
+  .tile { background: var(--carte); border: 1px solid var(--trait); border-top: 3px solid var(--trait); border-radius: 8px; padding: .8rem .9rem; display: flex; flex-direction: column; gap: .15rem; }
   .tile.in  { border-top-color: var(--recette); }
   .tile.out { border-top-color: var(--ardoise); }
   .tile.req { border-top-color: var(--ambre); }
@@ -465,7 +465,7 @@
   /* Cessions de patrimoine (recettes exceptionnelles) */
   .clist { list-style: none; padding: 0; margin: 0 0 .5rem; display: flex; flex-direction: column; gap: .5rem; }
   .clist li { display: grid; grid-template-columns: 52px 1fr auto; align-items: baseline; gap: .7rem;
-              background: #faf5ff; border: 1px solid var(--ardoise-pale); border-left: 3px solid var(--ardoise); border-radius: 8px; padding: .55rem .75rem; }
+              background: var(--lavande-voile); border: 1px solid var(--ardoise-pale); border-left: 3px solid var(--ardoise); border-radius: 8px; padding: .55rem .75rem; }
   .cyear { font-size: .82rem; font-weight: 700; color: var(--ardoise); font-variant-numeric: tabular-nums; }
   .cbody { display: flex; flex-direction: column; gap: .1rem; min-width: 0; }
   .cbuyer { font-size: .88rem; color: var(--encre); font-weight: 600; }
@@ -524,13 +524,13 @@
   .r { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .who a { color: var(--ardoise-fonce); } .desc { color: var(--gris); }
   .tag { font-size: .68rem; font-weight: 700; padding: 1px 6px; border-radius: 999px; }
-  .tag.in { background: #e7f0ea; color: var(--recette); } .tag.out { background: var(--ardoise-pale); color: var(--ardoise-fonce); }
+  .tag.in { background: var(--recette-pale); color: var(--recette); } .tag.out { background: var(--ardoise-pale); color: var(--ardoise-fonce); }
   /* L'état est une information de fiabilité, pas de catégorie : il se lit en
      gris sauf quand il retire une garantie que le lecteur croyait acquise. */
   .etat { font-size: .68rem; font-weight: 700; padding: 1px 6px; border-radius: 999px;
           background: var(--ardoise-pale); color: var(--ardoise-fonce); white-space: nowrap; cursor: help; }
-  .etat.e-paye { background: #e7f0ea; color: var(--recette); }
-  .etat.e-demande, .etat.e-inconnu { background: #fdf1e0; color: #8a5a10; }
+  .etat.e-paye { background: var(--recette-pale); color: var(--recette); }
+  .etat.e-demande, .etat.e-inconnu { background: var(--ocre-pale); color: var(--ocre); }
 
   .muted { color: var(--gris); }
   .foot { color: var(--gris-clair); font-size: .78rem; margin-top: 1.5rem; max-width: 72ch; }

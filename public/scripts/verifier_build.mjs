@@ -252,6 +252,16 @@ if (plancher !== null && fiches < plancher) {
     + `(${pages.length} pages en tout) : le prérendu s'est arrêté en route`)
 }
 
+// 4. La page 404 dit quelque chose sans JavaScript (`scripts/ecrire_404.mjs`).
+//    Le fallback d'adaptateur est un squelette vide : sans ce contrôle, un
+//    build qui saute l'étape livre de nouveau une page blanche.
+const P404 = join(BUILD, '404.html')
+if (!existsSync(P404)) {
+  incomplet.push("404.html est absent : un lien cassé tomberait sur la page d'erreur de l'hébergeur")
+} else if (!readFileSync(P404, 'utf8').includes('<noscript>')) {
+  incomplet.push('404.html ne porte aucun texte sans JavaScript — jouer scripts/ecrire_404.mjs')
+}
+
 if (incomplet.length) {
   console.error(`\n✖ Build INCOMPLET dans ${BUILD} :\n`)
   for (const i of incomplet) console.error('  ' + i)

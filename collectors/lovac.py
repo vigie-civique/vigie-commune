@@ -46,12 +46,17 @@ import argparse
 import csv
 import io
 import re
+import shutil
+import tempfile
 import urllib.request
+from pathlib import Path
 
+from . import mesure
 from .archive import HEADERS, archive_fetch, fetch_json
 from .config import NATIONAL_STORE, communes_du_step
 from .db import get_conn, transaction
-from .national_store import copier_atomiquement, est_frais
+from .national_store import (copier_atomiquement, est_frais, magasin_ecrivable,
+                             perime_lisible)
 
 SOURCE = "lovac"
 # L'identifiant, pas le slug : le slug porte « 2020-a-2026 » et changera avec
@@ -86,10 +91,13 @@ RUPTURES = {
 }
 
 
-def _telecharger() -> str:
-    """Dépose le fichier des communes au magasin, rend l'URL de la ressource.
+def _telecharger() -> tuple[str, Path]:
+    """Dépose le fichier des communes au magasin ; rend l'URL et le fichier à lire.
 
-    L'URL porte la date de dépôt : elle est LUE dans la fiche du jeu.
+    L'URL porte la date de dépôt : elle est LUE dans la fiche du jeu. Quand le
+    magasin refuse de remplacer le fichier (celui d'un autre compte, dossier
+    sticky), la copie neuve est lue dans un dossier temporaire que `run` efface :
+    relire l'ancienne en la disant déposée publiait un millésime périmé.
     """
     fiche = fetch_json(f"https://www.data.gouv.fr/api/1/datasets/{DATASET}/",
                        source=SOURCE, timeout=60)
@@ -102,13 +110,25 @@ def _telecharger() -> str:
     if not url:
         raise RuntimeError("LOVAC : pas de fichier des communes au catalogue")
     if est_frais(FICHIER, CACHE_JOURS):
-        return url
-    req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=300) as r:
-        copier_atomiquement(FICHIER, r)
-        archive_fetch(SOURCE, url, b"", content_type="text/csv", http_status=r.status)
-    print(f"  [lovac] fichier national déposé : {FICHIER.name}")
-    return url
+        return url, FICHIER
+    ecrivable = magasin_ecrivable(CACHE, FICHIER.name)
+    if not ecrivable and perime_lisible(FICHIER, CACHE_JOURS):
+        return url, FICHIER
+    cible = (FICHIER if ecrivable
+             else Path(tempfile.mkdtemp(prefix="vigie-lovac-")) / FICHIER.name)
+    try:
+        req = urllib.request.Request(url, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=300) as r:
+            if not copier_atomiquement(cible, r):
+                raise OSError(f"écriture impossible dans {cible.parent}")
+            archive_fetch(SOURCE, url, b"", content_type="text/csv", http_status=r.status)
+    except BaseException:
+        if cible != FICHIER:
+            shutil.rmtree(cible.parent, ignore_errors=True)
+        raise
+    print(f"  [lovac] fichier national {'déposé' if cible == FICHIER else 'lu hors du magasin'}"
+          f" : {FICHIER.name}")
+    return url, cible
 
 
 def _colonne(nom: str) -> tuple[str, int] | None:
@@ -126,8 +146,9 @@ def lire(texte: str, codes: set[str]) -> list[tuple[str, int, str, str, int | No
     if not code:
         raise RuntimeError(f"LOVAC : colonne du code commune introuvable ({entetes[:3]})")
     series = {c: _colonne(c) for c in entetes}
-    lignes = []
+    lignes, lues = [], 0
     for rang in lecteur:
+        lues += 1
         insee = (rang.get(code) or "").strip()
         if insee not in codes:
             continue
@@ -139,6 +160,8 @@ def lire(texte: str, codes: set[str]) -> list[tuple[str, int, str, str, int | No
                 continue
             valeur = None if brut == SECRET else int(brut)
             lignes.append((insee, cle[1], cle[0], brut, valeur))
+    # Les communes de France, neuves ou du magasin, avant le filtre.
+    mesure.lu(SOURCE, lues, entetes, complete=True)
     return lignes
 
 
@@ -159,9 +182,13 @@ def ensure_table(conn):
 
 
 def run(insee: str | None = None) -> int:
-    url = _telecharger()
+    url, chemin = _telecharger()
     codes = {insee} if insee else set(communes_du_step("lovac"))
-    lignes = lire(FICHIER.read_text(encoding="latin-1"), codes)
+    try:
+        lignes = lire(chemin.read_text(encoding="latin-1"), codes)
+    finally:
+        if chemin != FICHIER:
+            shutil.rmtree(chemin.parent, ignore_errors=True)
     with transaction() as conn:
         ensure_table(conn)
         conn.executemany(

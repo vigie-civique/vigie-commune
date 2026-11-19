@@ -53,8 +53,13 @@ export function load() {
 
   return {
     marches,
+    // Commune nouvelle : les marchés d'une ancienne commune sont marqués.
+    avantFusion: lire('avant_fusion.json', {}),
     sourceMarches: etatSource(couverture, 'marches').etat,
     extraits: extraitsMarches(couverture, 'commune'),
+    // Les années que les consolidés DECP lus ne couvrent pas : un zéro de ces
+    // années ne dit rien de l'acheteur. Null : snapshot plus ancien.
+    decpAbsents: (couverture.decp_millesimes && couverture.decp_millesimes.absents) || null,
     constat: attribues.length ? {
       attribues: attribues.length,
       total,

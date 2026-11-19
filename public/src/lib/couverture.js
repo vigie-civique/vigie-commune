@@ -49,7 +49,8 @@ export const LIBELLE_SOURCE = {
 export function etatSource(couverture, domaine) {
   const attendus = SOURCES[domaine] || []
   const runs = (couverture && couverture.collecteurs) || {}
-  const tournes = attendus.filter((c) => runs[c])
+  // Un collecteur sans source déclarée n'a rien interrogé, même s'il a tourné.
+  const tournes = attendus.filter((c) => runs[c] && !runs[c].non_configure)
   if (!tournes.length) {
     return { etat: 'absente', sources: attendus.map((c) => LIBELLE_SOURCE[c] || c), dernier: null }
   }

@@ -28,14 +28,25 @@ Usage :
 """
 import argparse
 import json
+import re
 import time
 import urllib.error
+import urllib.parse
 
+from . import mesure
 from .archive import fetch_json
 from .config import COMMUNES, COMMUNES_INSEE, REQUEST_DELAY
 from .db import get_conn
 
 MELODI_API = "https://api.insee.fr/melodi/data"
+
+# Melodi rend plusieurs communes en une requête (`GEO` répété) : 5 requêtes au
+# lieu de 75 pour un EPCI de 15 communes, quand le quota est de 30 par minute
+# et que `insee` attendait jusqu'à 470 s sa place (31/10/2026). Vingt communes
+# tiennent sous les 10 000 observations du plus gros jeu (EMPLOI, ~430 chacune).
+LOT = 20
+# `GEO` revient préfixé du millésime de la géographie : `2025-COM-30140`.
+GEO_COMMUNE = re.compile(r"COM-(\d[\dAB]\d{3})$")
 
 DATASETS = [
     "DS_POPULATIONS_REFERENCE",
@@ -109,17 +120,33 @@ def _fetch_json_429(url: str):
     raise RuntimeError("Melodi : trop de tentatives (429)")
 
 
-def fetch_dataset(dataset: str, insee: str) -> list[dict]:
-    """Toutes les observations d'un jeu pour une commune (suit la pagination)."""
-    url = f"{MELODI_API}/{dataset}?GEO=COM-{insee}&maxResult=10000"
-    observations = []
+def fetch_dataset(dataset: str, codes: list[str]) -> dict[str, list[dict]]:
+    """Les observations d'un jeu pour un lot de communes, rangées par commune
+    (suit la pagination). Une commune sans observation n'a pas de clé."""
+    requete = [("GEO", f"COM-{c}") for c in codes] + [("maxResult", 10000)]
+    url = f"{MELODI_API}/{dataset}?{urllib.parse.urlencode(requete)}"
+    par_commune: dict[str, list[dict]] = {}
+    lues, forme = 0, None
     while url:
         data = _fetch_json_429(url)
-        observations.extend(data.get("observations", []))
+        # Au plafond, Melodi coupe sans annoncer de page suivante (mesuré le
+        # 31/10/2026 : 100 lignes rendues sur 252, `paging` sans `next`).
+        if len(data.get("observations", [])) >= 10000 and not (data.get("paging") or {}).get("next"):
+            raise RuntimeError(f"{dataset} : plafond de 10000 lignes atteint — réponse tronquée")
+        observations = data.get("observations", [])
+        lues += len(observations)
+        if forme is None:
+            forme = mesure.forme_de(observations)
+        for obs in observations:
+            geo = GEO_COMMUNE.search(str(obs.get("dimensions", {}).get("GEO", "")))
+            if geo:
+                par_commune.setdefault(geo.group(1), []).append(obs)
         url = (data.get("paging") or {}).get("next")
         if url:
             time.sleep(REQUEST_DELAY)
-    return observations
+    # Avant le filtre GEO ; les lots de communes d'un même jeu s'additionnent.
+    mesure.lu(f"melodi-{dataset}", lues, forme, complete=True)
+    return par_commune
 
 
 def _extract(dataset: str, obs: dict) -> tuple[str, str, float, dict] | None:
@@ -183,21 +210,33 @@ def run(insee_list: list[str] | None = None, datasets: list[str] | None = None):
     conn = get_conn()
     ensure_table(conn)
     total = 0
-    for insee in (insee_list or COMMUNES_INSEE):
-        commune = COMMUNES.get(insee, {}).get("nom", insee)
-        print(f"[insee] {commune} ({insee})")
-        for ds in (datasets or DATASETS):
+    codes = list(insee_list or COMMUNES_INSEE)
+    lots = [codes[i:i + LOT] for i in range(0, len(codes), LOT)]
+    print(f"[insee] {len(codes)} commune(s), {len(lots)} lot(s) par jeu")
+    echecs = []
+    for ds in (datasets or DATASETS):
+        for lot in lots:
             try:
-                observations = fetch_dataset(ds, insee)
+                par_commune = fetch_dataset(ds, lot)
             except Exception as e:
-                print(f"  {ds}: erreur — {e}")
+                # Format lu par le service local du portail (DETAIL / RESUME) :
+                # un lot perdu ne doit pas passer pour des communes sans donnée.
+                cle = f"{ds} lot dès {lot[0]} ({len(lot)} communes)"
+                print(f"  [insee] {cle} : échec → {type(e).__name__}: {e}")
+                echecs.append(cle)
                 continue
-            n = import_observations(conn, ds, insee, observations)
+            n = sum(import_observations(conn, ds, insee, par_commune.get(insee, []))
+                    for insee in lot)
             total += n
-            print(f"  {ds}: {len(observations)} obs → {n} indicateurs")
+            vides = [c for c in lot if c not in par_commune]
+            print(f"  {ds}: {sum(map(len, par_commune.values()))} obs → {n} indicateurs"
+                  f" ({len(lot)} communes" + (f", sans donnée : {', '.join(vides)}" if vides else "") + ")")
             time.sleep(REQUEST_DELAY)
-    print(f"[insee] OK — {total} indicateurs insérés/mis à jour")
     conn.close()
+    if echecs:
+        print(f"[insee] {total} indicateurs insérés/mis à jour pour les autres lots")
+        raise RuntimeError(f"relevés en échec : {', '.join(echecs)}")
+    print(f"[insee] OK — {total} indicateurs insérés/mis à jour")
 
 
 def show_stats():

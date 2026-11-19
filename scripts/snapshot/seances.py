@@ -89,5 +89,8 @@ def index_des_seances(public_events: list[dict], seances_relues: list[dict]) -> 
 def etape_seances(out, public_events, seances_relues) -> dict:
     index = index_des_seances(public_events, seances_relues)
     write_json(out / "seances.json", {"seances": index, "total": len(index)})
+    # Le détail par portée : le total seul additionnait sans le dire les
+    # séances communautaires à celles du conseil municipal (portail, 28/10/2026).
     return {"stats_seances": {"seances": len(index),
+                              "par_portee": dict(Counter(s["portee"] for s in index)),
                               "relues": sum(1 for s in index if s.get("en_clair"))}}

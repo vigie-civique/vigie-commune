@@ -2,8 +2,11 @@
 cm_ocr.py — Collecteur CR du Conseil Municipal diffusés en PDF SCANNÉ (image).
 
 Les procès-verbaux les plus anciens de brassac.fr (avant 2014) sont des PDF
-*scannés*, sans couche texte : `conseils` les catalogue puis passe la main
-ici. Ce collecteur les traite de bout en bout :
+*scannés*, sans couche texte. ⚠️ Ce chemin en ligne de commande n'écrit plus
+(audit du 26/10/2026) : il découpait avec l'ancien découpeur, sans `cle_acte`, et
+doublonnait ce que `conseils --ocr` écrit. Le dry-run reste (il montre le
+découpage) ; `--commit` renvoie à `python3 -m collectors.conseils --ocr`. Les
+fonctions de ce module servent `conseils`. Historique de la lecture :
 
   1. résout l'entrée en (PDF, url de CR, date) — page CR, url PDF, fichier local, ou --discover ;
   2. télécharge le PDF (cache data/cm_records_pdf/) ;
@@ -32,12 +35,19 @@ Usage :
 from __future__ import annotations
 
 import argparse
+import functools
+import hashlib
+import json
+import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pdfplumber
@@ -83,8 +93,66 @@ MIN_TEXT_CHARS = 400
 #
 # ⚠️ Coûte le double de temps. Les `.ocr.pdf` déjà en cache ne sont PAS refaits :
 # le bénéfice ne vient qu'à une nouvelle océrisation.
+#
+# `--rotate-pages` a été ajouté le 23/10/2026, avec un seuil abaissé à 5. Les
+# délibérations de la CC du 16/04/2026 portent des pages A3 scannées couchées
+# (90°) sous un bandeau de télétransmission resté droit : lues telles quelles,
+# elles ont donné 48 fausses délibérations publiées (« WON 2 1 HANOIQNI »).
+# Tesseract y voit bien la rotation, mais avec une confiance de 12,86 — sous le
+# seuil par défaut d'ocrmypdf (14), parce que le bandeau droit tire l'estimation
+# vers 0°. Mesuré au seuil 5 : les mots courants lus doublent sur ce document
+# (234 → 468), et ne bougent pas d'un mot sur un PV normal de la même séance.
 OPTIONS_OCRMYPDF = ["--force-ocr", "--output-type", "pdf",
-                    "--optimize", "0", "--jobs", "4", "--oversample", "400"]
+                    "--optimize", "0", "--jobs", "4", "--oversample", "400",
+                    "--rotate-pages", "--rotate-pages-threshold", "5"]
+
+# Un PV signé électroniquement : ocrmypdf ≥ 16 REFUSE de l'océriser
+# (`DigitalSignatureError`), puisque le PDF produit ne porte plus une signature
+# valide. 13 PV de Saillans refusés ainsi sur le Mac le 27/10/2026. Décision de
+# Julien (01/11/2026) : invalider la signature sur la copie de travail. C'est
+# déjà le cas : ocrmypdf écrit le `.ocr.pdf` À CÔTÉ, l'original téléchargé reste
+# la pièce, intacte, signature comprise. L'option n'est passée que si l'outil la
+# connaît : la 14.0.1 de Debian 12 (VPS) n'a ni l'option ni le refus.
+OPTION_SIGNATURE = "--invalidate-digital-signatures"
+
+
+@functools.cache
+def options_ocrmypdf() -> list[str]:
+    """`OPTIONS_OCRMYPDF`, plus l'invalidation de signature si l'ocrmypdf installé la connaît."""
+    try:
+        # Une sonde, pas une océrisation : l'exécutable par son chemin.
+        aide = subprocess.run([shutil.which("ocrmypdf") or "ocrmypdf", "--help"],
+                              capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        aide = ""
+    return OPTIONS_OCRMYPDF + ([OPTION_SIGNATURE] if OPTION_SIGNATURE in aide else [])
+
+# Le dossier temporaire d'`ocrmypdf`, DANS l'instance et non dans /tmp.
+# ocrmypdf y pose un `ocrmypdf.io.*` par document, qu'il ne retire pas quand
+# on le tue (délai dépassé, Ctrl-C, session SSH coupée). Le 23/10, une OCR
+# lancée à la main sous le compte de l'atelier en a laissé 4,0 Gio dans /tmp
+# du VPS, que `PrivateTmp` des unités ne couvre pas. Ici, ce qui reste d'un
+# passage interrompu est balayé au passage suivant.
+TMP_OCR = ROOT / "data" / "tmp-ocr"
+# Plus vieux que ceci, un résidu ne peut appartenir à une OCR en cours : à
+# dix secondes par page (`conseils.delai_ocr`), il y faudrait 2 000 pages.
+RESIDU_OCR_HEURES = 6
+
+
+def environnement_ocr() -> dict:
+    """L'environnement d'un appel à `ocrmypdf`, son TMPDIR balayé."""
+    TMP_OCR.mkdir(parents=True, exist_ok=True)
+    limite = time.time() - RESIDU_OCR_HEURES * 3600
+    for residu in TMP_OCR.iterdir():
+        try:
+            if residu.lstat().st_mtime < limite:
+                if residu.is_dir() and not residu.is_symlink():
+                    shutil.rmtree(residu, ignore_errors=True)
+                else:
+                    residu.unlink(missing_ok=True)
+        except OSError:
+            continue
+    return {**os.environ, "TMPDIR": str(TMP_OCR)}
 # Découpe : « N° DEL 2606_02 », « DEL 2606_02 », etc. → capture l'identifiant AAMM_XX.
 # Le séparateur est ce que l'OCR a bien voulu lire du trait d'union bas : le CM
 # du 30/06/2026 sort « 2606.08 » et « 2606 _18 », et ces deux délibérations
@@ -136,9 +204,13 @@ def download_pdf(pdf_url: str, date: str | None) -> Path:
     return dest
 
 
-def _extract_text(pdf: Path) -> str:
+def _extract_pages(pdf: Path) -> list[str]:
     with pdfplumber.open(pdf) as f:
-        return "\n".join(p.extract_text() or "" for p in f.pages)
+        return [p.extract_text() or "" for p in f.pages]
+
+
+def _extract_text(pdf: Path) -> str:
+    return "\n".join(_extract_pages(pdf))
 
 
 def _check_ocr_tooling(lang: str) -> None:
@@ -165,32 +237,169 @@ def _check_ocr_tooling(lang: str) -> None:
 # instance peut vivre sur une machine qui n'a ni les PDF océrisés ni de quoi
 # océriser — il lui suffit des textes.
 #
-# Le texte ne vaut que s'il est AU MOINS aussi récent que le PDF océrisé quand
-# celui-ci est là : une ré-océrisation adoptée (un `.ocr.pdf` remplacé par un
-# meilleur) doit l'emporter sur le texte de l'ancienne.
+# Sans manifeste, le texte ne vaut que s'il est AU MOINS aussi récent que le PDF
+# océrisé quand celui-ci est là : une ré-océrisation adoptée (un `.ocr.pdf`
+# remplacé par un meilleur) doit l'emporter sur le texte de l'ancienne.
+#
+# ── Le manifeste du texte de référence (`x.ocr.json`) ────────────────────────
+#
+# 24/10/2026, plan de l'architecte pour la lecture des montants (étape 2). Un
+# rapport de montants lus sur le Mac doit pouvoir prouver qu'il a lu LE texte
+# que tient la base — celui du VPS pour Lasalle — et pas un texte voisin :
+# OCR Mac ≠ VPS (tesseract 5.5.2 / 5.3.0) est un défaut connu. La date d'un
+# fichier ne prouve rien : une copie, un `rsync`, un `touch` la changent.
+#
+# Le manifeste dit donc qui a produit le texte (outils, options, machine), en
+# donne les empreintes, et les positions de début de page dans le texte joint :
+# le découpage à la page s'appuie dessus sans rouvrir le PDF.
+#
+# Quand il est là, c'est LUI qui décide, plus la date :
+#   - rôle autre que « reference » → le texte n'est jamais lu ;
+#   - empreinte du texte discordante → le texte a été retouché, il est écarté ;
+#   - `.ocr.pdf` présent d'une autre taille → une réocérisation l'a remplacé.
+# Sans manifeste, la règle de la date s'applique : les textes d'avant se lisent
+# comme avant. Les textes déjà en base reçoivent un manifeste rétrospectif
+# (`scripts/manifester_textes_ocr.py`), provenance « antérieure au manifeste ».
+#
+# ⚠️ Rien ici ne touche `metadata.ocr` d'un événement : `lu_par_ocr` compare
+# `= 1`, et en faire un objet ferait retomber D5 sans bruit.
+FORMAT_MANIFESTE = "vigie-ocr-texte/1"
 
-def texte_garde(ocr_pdf: Path) -> str | None:
-    """Le texte déjà extrait de ce PDF océrisé, ou rien s'il est absent ou périmé."""
-    garde = ocr_pdf.with_suffix(".txt")
+
+def empreinte(octets: bytes) -> str:
+    return hashlib.sha256(octets).hexdigest()
+
+
+def _empreinte_fichier(chemin: Path) -> str | None:
     try:
-        if garde.stat().st_size == 0:
-            return None
-        if ocr_pdf.exists() and ocr_pdf.stat().st_mtime > garde.stat().st_mtime:
-            return None
-        return garde.read_text(encoding="utf-8")
+        h = hashlib.sha256()
+        with open(chemin, "rb") as f:
+            for bloc in iter(lambda: f.read(1 << 20), b""):
+                h.update(bloc)
+        return h.hexdigest()
     except OSError:
         return None
 
 
-def garder_texte(ocr_pdf: Path, texte: str) -> str:
-    """Écrit le texte à côté du PDF océrisé, et le rend. Un texte vide n'est pas
-    gardé : il dirait « déjà lu, rien dedans » d'un document qu'on n'a pas su lire."""
+def positions_pages(pages: list[str]) -> list[int]:
+    """Début de chaque page dans `"\\n".join(pages)` — le texte gardé."""
+    debuts, pos = [], 0
+    for p in pages:
+        debuts.append(pos)
+        pos += len(p) + 1
+    return debuts
+
+
+@functools.lru_cache(maxsize=1)
+def versions_outils() -> dict:
+    def premiere_ligne(*cmd):
+        if not shutil.which(cmd[0]):
+            return None
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        except (subprocess.SubprocessError, OSError):
+            return None
+        return ((r.stdout or r.stderr).strip().splitlines() or [None])[0]
+    return {"ocrmypdf": premiere_ligne("ocrmypdf", "--version"),
+            "tesseract": premiere_ligne("tesseract", "--version"),
+            "pdftotext": premiere_ligne("pdftotext", "-v"),
+            "pdfplumber": getattr(pdfplumber, "__version__", None)}
+
+
+def lire_manifeste(ocr_pdf: Path) -> dict | None:
+    """Le manifeste, ou None s'il n'y en a pas. Illisible = discordant : {}."""
+    chemin = ocr_pdf.with_suffix(".json")
+    if not chemin.exists():
+        return None
+    try:
+        m = json.loads(chemin.read_text(encoding="utf-8"))
+        return m if isinstance(m, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def ecrire_manifeste(ocr_pdf: Path, texte: str, pages: list[str] | None, *,
+                     provenance: str = "collecte", langue: str | None = "fra",
+                     outils: dict | str | None = None) -> dict:
+    original = ocr_pdf.with_name(ocr_pdf.name.removesuffix(".ocr.pdf") + ".pdf")
+    debuts = positions_pages(pages) if pages is not None and "\n".join(pages) == texte else None
+    m = {
+        "format": FORMAT_MANIFESTE,
+        "role": "reference",
+        "provenance": provenance,
+        "original": original.name,
+        "original_sha256": _empreinte_fichier(original),
+        "ocr_pdf_taille": ocr_pdf.stat().st_size if ocr_pdf.exists() else None,
+        "texte_sha256": empreinte(texte.encode("utf-8")),
+        "pages": debuts,
+        "outils": outils if outils is not None else versions_outils(),
+        "options_ocrmypdf": options_ocrmypdf() if provenance == "collecte" else None,
+        "langue": langue,
+        # La machine qui a PRODUIT le texte : connue seulement à la collecte.
+        # Un manifeste rétrospectif ne dit que qui l'a écrit.
+        "machine": socket.gethostname() if provenance == "collecte" else None,
+        "manifeste_ecrit_par": socket.gethostname(),
+        "ecrit_le": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    chemin = ocr_pdf.with_suffix(".json")
+    provisoire = chemin.with_name(chemin.name + ".partiel")
+    provisoire.write_text(json.dumps(m, ensure_ascii=False, indent=1), encoding="utf-8")
+    provisoire.replace(chemin)
+    return m
+
+
+def texte_garde(ocr_pdf: Path) -> str | None:
+    """Le texte déjà extrait de ce PDF océrisé, ou rien s'il est absent, périmé
+    ou désavoué par son manifeste."""
+    garde = ocr_pdf.with_suffix(".txt")
+    try:
+        if garde.stat().st_size == 0:
+            return None
+        manifeste = lire_manifeste(ocr_pdf)
+        if manifeste is None:
+            if ocr_pdf.exists() and ocr_pdf.stat().st_mtime > garde.stat().st_mtime:
+                return None
+            return garde.read_text(encoding="utf-8")
+        if manifeste.get("role") != "reference":
+            return None
+        if ocr_pdf.exists() and manifeste.get("ocr_pdf_taille") not in (None, ocr_pdf.stat().st_size):
+            return None
+        texte = garde.read_text(encoding="utf-8")
+        if empreinte(texte.encode("utf-8")) != manifeste.get("texte_sha256"):
+            print(f"  [ocr] {garde.name} : empreinte ≠ manifeste, texte écarté")
+            return None
+        return texte
+    except OSError:
+        return None
+
+
+def pages_gardees(ocr_pdf: Path, texte: str) -> list[str] | None:
+    """Les pages de `texte`, recoupées aux débuts que garde le manifeste — ou rien.
+
+    Rien quand le manifeste manque, n'a pas de pages, ou n'est pas celui de CE
+    texte (empreinte) : le découpage à la page ne se fait que sur une preuve.
+    """
+    m = lire_manifeste(ocr_pdf) or {}
+    debuts = m.get("pages")
+    if not debuts or m.get("texte_sha256") != empreinte(texte.encode("utf-8")):
+        return None
+    fins = [d - 1 for d in debuts[1:]] + [len(texte)]
+    pages = [texte[d:f] for d, f in zip(debuts, fins)]
+    return pages if "\n".join(pages) == texte else None
+
+
+def garder_texte(ocr_pdf: Path, texte: str, pages: list[str] | None = None,
+                 langue: str = "fra") -> str:
+    """Écrit le texte à côté du PDF océrisé, avec son manifeste, et le rend. Un
+    texte vide n'est pas gardé : il dirait « déjà lu, rien dedans » d'un document
+    qu'on n'a pas su lire."""
     if texte.strip():
         garde = ocr_pdf.with_suffix(".txt")
         provisoire = garde.with_name(garde.name + ".partiel")
         try:
             provisoire.write_text(texte, encoding="utf-8")
             provisoire.replace(garde)
+            ecrire_manifeste(ocr_pdf, texte, pages, langue=langue)
         except OSError as e:           # répertoire en lecture seule : on s'en passe
             print(f"  [ocr] texte non gardé ({garde.name}) : {e}")
     return texte
@@ -208,10 +417,11 @@ def ensure_text(pdf: Path, lang: str = "fra") -> str:
         _check_ocr_tooling(lang)
         print(f"  OCR ({lang}) → {ocr_pdf.name} …")
         subprocess.run(
-            ["ocrmypdf", "-l", lang, *OPTIONS_OCRMYPDF, str(pdf), str(ocr_pdf)],
-            check=True, capture_output=True,
+            ["ocrmypdf", "-l", lang, *options_ocrmypdf(), str(pdf), str(ocr_pdf)],
+            check=True, capture_output=True, env=environnement_ocr(),
         )
-    return garder_texte(ocr_pdf, _extract_text(ocr_pdf))
+    pages = _extract_pages(ocr_pdf)
+    return garder_texte(ocr_pdf, "\n".join(pages), pages, langue=lang)
 
 
 # ── Parsing des délibérations ──────────────────────────────────────────────────
@@ -495,6 +705,9 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0, help="Max de CR en mode --discover")
     ap.add_argument("--commit", action="store_true", help="Écrit en base (sinon dry-run)")
     args = ap.parse_args()
+    if args.commit:
+        ap.error("--commit n'écrit plus ici : lancer `python3 -m collectors.conseils --ocr` "
+                 "(découpage à la page, identité d'acte par `cle_acte`)")
 
     if args.discover:
         cands = discover(limit=args.limit)

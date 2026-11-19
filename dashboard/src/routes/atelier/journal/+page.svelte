@@ -5,6 +5,7 @@
   import { COMMUNE } from '#lib/instance.js'
   import { heureLocale } from '#lib/heure.js'
   import { LIBELLE_ROLE, messageErreur } from '#lib/roles.js'
+  import { phraseStatut } from '#lib/libelles.js'
   import { LIBELLES } from '#lib/champs.js'
 
   const PAGE = 100
@@ -26,7 +27,17 @@
     apercu: 'aperçu', publication: 'publication', 'mise-en-ligne': 'mise en ligne',
     'verification-en-ligne': 'vérification en ligne',
     proposer: 'proposition', acceptee: 'proposition acceptée', refusee: 'proposition refusée',
-    retiree: 'proposition retirée', ia: "branchement de l'IA",
+    retiree: 'proposition retirée', ia: 'branchement du modèle',
+  }
+
+  // Ce que la base appelle `entity_notes` ou `note/2` se lit « note » ou « note 2 ».
+  const OBJETS = { entity: 'fiche', entity_notes: 'note', entity_websites: 'site', entity_contacts: 'contact',
+                   relation: 'relation', relations: 'relation', 'relation candidate': 'lien présumé', deliberation: 'délibération', flow: 'flux financier',
+                   marche: 'marché public', proposition: 'proposition', note: 'note', site: 'site' }
+  const objet = (m) => OBJETS[m] ?? (m ?? '').replace(/_/g, ' ')
+  const reference = (c) => {
+    const m = /^([a-z_]+)\/(\d+)$/.exec(c ?? '')
+    return m ? `${objet(m[1])} ${m[2]}` : (LIBELLES[c] ?? c ?? '—')
   }
 
   onMount(() => charger(true))
@@ -39,7 +50,7 @@
     try {
       const r = await authFetch(`/atelier/journal?${qs}`)
       const d = await r.json()
-      if (!r.ok) { erreur = messageErreur(d.detail); return }
+      if (!r.ok) { erreur = messageErreur(d.detail, phraseStatut(r.status)); return }
       lignes = depuisLeDebut ? d.lignes : [...lignes, ...d.lignes]
       total = d.total; auteurs = d.auteurs; tables = d.tables
     } finally {
@@ -73,7 +84,7 @@
     <label>Sur
       <select bind:value={quoi} on:change={() => charger(true)}>
         <option value="">tout</option>
-        {#each Object.entries(tables) as [cle, libelle]}<option value={cle}>{libelle}</option>{/each}
+        {#each Object.entries(tables) as [cle, libelle]}<option value={cle}>{objet(libelle)}</option>{/each}
       </select>
     </label>
     <span class="muted">{total.toLocaleString('fr-FR')} écriture{total > 1 ? 's' : ''}</span>
@@ -82,20 +93,20 @@
   {#if erreur}<p class="avis">{erreur}</p>{/if}
 
   <div class="table">
-    <table>
+    <table class="cartes">
       <thead><tr><th>Quand</th><th>Qui</th><th>Quoi</th><th>Sur</th><th>Avant</th><th>Après</th></tr></thead>
       <tbody>
         {#each lignes as l (l.id)}
           <tr>
-            <td class="date">{heureLocale(l.at)}</td>
-            <td>{l.par ?? '—'}</td>
-            <td>{ACTIONS[l.action] ?? l.action} <span class="muted">· {l.quoi_libelle}</span></td>
-            <td>
+            <td class="date" data-label="Quand">{heureLocale(l.at)}</td>
+            <td data-label="Qui">{l.par ?? '—'}</td>
+            <td data-label="Quoi">{ACTIONS[l.action] ?? l.action} <span class="muted">· {objet(l.quoi_libelle)}</span></td>
+            <td data-label="Sur">
               {#if l.entity_id}<a href="/atelier/entite/{l.entity_id}">{l.fiche ?? `fiche ${l.entity_id}`}</a>{#if l.champ}&nbsp;<span class="muted">· {LIBELLES[l.champ] ?? l.champ}</span>{/if}
-              {:else}{l.champ ?? '—'}{/if}
+              {:else}{reference(l.champ)}{/if}
             </td>
             {#each [[l.avant, 'valeur avant'], [l.apres, 'valeur']] as [v, classe]}
-              <td class={classe}>
+              <td class={classe} data-label={classe === 'valeur' ? 'Après' : 'Avant'}>
                 {#if estDetail(v)}<details><summary>détail</summary><code>{v}</code></details>
                 {:else}{valeur(v)}{/if}
               </td>
@@ -133,5 +144,14 @@
   .muted { color: var(--texte-doux); }
   .vide { padding: 1rem; }
   .avis { background: var(--alerte-doux); border: 1px solid var(--alerte-bordure); border-radius: 6px; color: var(--alerte-texte); padding: .5rem .75rem; }
+  @media (max-width: 900px) {
+    .page { padding: .8rem; }
+    table, tbody, tr, td { display: block; width: 100%; }
+    thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    tr { border-bottom: 1px solid var(--bordure); padding: .4rem .6rem; }
+    td { display: flex; gap: .6rem; align-items: baseline; padding: .2rem 0; border: none; flex-wrap: wrap; }
+    td[data-label]::before { content: attr(data-label); flex: 0 0 4.5rem; font-size: .7rem; text-transform: uppercase; color: var(--texte-doux); }
+    .valeur { max-width: none; }
+  }
   .plus { align-self: flex-start; border: 1px solid var(--bordure-forte); border-radius: 6px; padding: .45rem .8rem; color: var(--texte-2); }
 </style>

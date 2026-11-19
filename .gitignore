@@ -5,6 +5,11 @@ db/*.db
 db/*.db-*
 # Les règles que la CI dérive de l'exemple, à côté de sa base (tests/amorcer_base_ci.py).
 db/*.regles.json
+# La santé des sources (scripts/collect_loop.py), écrite à côté de la base.
+db/sante.json
+# L'état de l'index de recherche par sens (scripts/build_rag_index.py --etat).
+db/index_sens.json
+db/index_sens.tmp
 public/static/data/
 # Le fond de carte est un artefact d'instance, produit par scripts/carte_fond.py
 # et borné à l'emprise de la commune : il n'appartient pas au moteur, pas plus
@@ -15,6 +20,14 @@ public/static/carte/
 # Seul le premier était ignoré — le second se serait retrouvé versionné au
 # premier `git add -A` d'une instance.
 dashboard/static/public_api/
+# Les synthèses IA de l'atelier, un `<entity_id>.json` par entité
+# (api.py::SYNTHESES_DIR, POST /api/atelier/ia/syntheses). Ce sont des jugements
+# de machine, non relus, avec un `niveau_interet`, et ils peuvent porter sur une
+# personne : nominatifs, à ne jamais versionner ni diffuser. Ils n'étaient
+# couverts par aucune règle : le premier `git add -A` d'un clone d'instance les
+# aurait versionnés, donc emportés dans le kit (construit dans l'instance) ou
+# remontés vers le moteur, d'où part le miroir public.
+dashboard/static/api/
 # La version PRÉCÉDENTE du snapshot, et la version NEUVE en cours d'écriture.
 # La publication en deux temps ne copie pas par-dessus le répertoire servi :
 # elle écrit à côté, contrôle, puis échange par deux renommages
@@ -135,3 +148,6 @@ installateur/.outils/
 /Vigie Civique.sh
 /Vigie Civique.bat
 /Vigie Civique.desktop
+
+# terrain de tests/test_garde_perimetre.py (dans le dépôt : sous /tmp la garde permet tout)
+.garde-perimetre-*/

@@ -4,6 +4,7 @@ import { EPCI, INSEE } from '#lib/instance.js'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from '#lib/donnees.server.js'
+import { tauxAvecAvant2021 } from './rupture.js'
 
 export const prerender = true
 
@@ -14,7 +15,8 @@ const lire = (nom, defaut = {}) => {
 
 export function load() {
   const d = lire('fiscalite.json', { taux: [] })
-  const taux = d.taux || []
+  // `avant_2021` : les années 2015-2020 et la part du département, hors de `taux`.
+  const taux = tauxAvecAvant2021(d)
   const annee = taux.length ? Math.max(...taux.map((t) => t.annee)) : null
   // Où se place le taux de la commune parmi celles qui lèvent la même taxe —
   // calculé à la collecte (`fiscalite_reperes`), pour le dernier exercice connu.

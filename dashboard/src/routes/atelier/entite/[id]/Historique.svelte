@@ -21,8 +21,12 @@
               <td>{heureLocale(a.at)}</td>
               <td>{a.user_email ?? '—'}</td>
               <td>{champLisible(a.field) ?? a.action}</td>
-              <td class="old-val">{valeurLisible(a.field, a.old_value) ?? '—'}</td>
-              <td class="new-val">{valeurLisible(a.field, a.new_value) ?? '—'}</td>
+              {#if a.contenu_reserve}
+                <td class="reserve muted" colspan="2">Contenu réservé aux validateurs</td>
+              {:else}
+                <td class="old-val">{valeurLisible(a.field, a.old_value) ?? '—'}</td>
+                <td class="new-val">{valeurLisible(a.field, a.new_value) ?? '—'}</td>
+              {/if}
             </tr>
           {/each}
         </tbody>
@@ -43,6 +47,7 @@
     padding: .32rem .5rem; color: var(--texte-doux);
     border-bottom: 1px solid var(--bordure-douce); vertical-align: top;
   }
+  .reserve { font-style: italic; }
   .old-val { color: var(--danger); text-decoration: line-through; }
   .new-val { color: var(--succes); }
 </style>

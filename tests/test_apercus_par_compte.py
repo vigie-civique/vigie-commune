@@ -53,6 +53,7 @@ def lieux(pub, tmp_path, monkeypatch):
     monkeypatch.setattr(pub, "APERCUS", lieux["apercus"])
     monkeypatch.setattr(pub, "ETAT", tmp_path / "etat.json")
     monkeypatch.setattr(pub, "VERSIONS", tmp_path / "versions")
+    monkeypatch.setattr(pub, "PUBLIEES", tmp_path / "publiees")
     monkeypatch.setattr(pub, "VERROU", tmp_path / "publication.lock")
     return lieux
 
@@ -184,8 +185,7 @@ def test_un_apercu_rouge_ou_expire_ne_se_publie_pas(pub, lieux):
 
 # ── Servir ───────────────────────────────────────────────────────────────────
 
-@pytest.fixture
-def serveur(tmp_path):
+def _servir(tmp_path, par_entete):
     servir = _charger("servir_par_compte", "scripts/servir_apercu.py")
     racine = tmp_path / "apercus"
     for compte, titre in (("7", "Aperçu de sept"), ("9", "Aperçu de neuf")):
@@ -197,6 +197,7 @@ def serveur(tmp_path):
     class Gestionnaire(servir.HandlerParCompte):
         pass
     Gestionnaire.racine = racine
+    Gestionnaire.par_entete = par_entete
     httpd = servir.Serveur(("127.0.0.1", 0),
                            functools.partial(Gestionnaire, directory=str(racine)))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -207,13 +208,26 @@ def serveur(tmp_path):
         httpd.server_close()
 
 
+@pytest.fixture
+def serveur(tmp_path):
+    yield from _servir(tmp_path, par_entete=False)
+
+
+@pytest.fixture
+def serveur_derriere_nginx(tmp_path):
+    yield from _servir(tmp_path, par_entete=True)
+
+
 class _SansRedirection(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *a, **kw):
         return None
 
 
-def _get(url, cookie=None):
-    requete = urllib.request.Request(url, headers={"Cookie": cookie} if cookie else {})
+def _get(url, cookie=None, compte=None):
+    entetes = {"Cookie": cookie} if cookie else {}
+    if compte is not None:
+        entetes["X-Vigie-Compte"] = compte
+    requete = urllib.request.Request(url, headers=entetes)
     ouvreur = urllib.request.build_opener(_SansRedirection)
     try:
         with ouvreur.open(requete, timeout=5) as r:
@@ -243,3 +257,65 @@ def test_le_lien_ne_redirige_pas_hors_du_site(serveur):
     désignent un AUTRE site. Le lien de l'atelier ne doit mener que chez lui."""
     code, entetes, _ = _get(f"{serveur}//ailleurs.example/x?apercu=7")
     assert code == 303 and entetes["Location"] == "/ailleurs.example/x"
+
+
+# ── Derrière nginx : le compte vient de la session, pas du visiteur ─────────────
+# Audit du 15/11/2026, B3 : `?apercu=9` ou un cookie `vigie_apercu=9` montraient
+# l'aperçu du compte 9 à n'importe qui. Derrière nginx, seul l'en-tête posé
+# d'après la session de l'atelier (`auth_request`) choisit.
+
+def test_derriere_nginx_le_compte_vient_de_l_en_tete(serveur_derriere_nginx):
+    assert "Finances 7" in _get(f"{serveur_derriere_nginx}/finances", compte="7")[2]
+    assert "Aperçu de neuf" in _get(f"{serveur_derriere_nginx}/", compte="9")[2]
+
+
+def test_derriere_nginx_un_cookie_ne_montre_pas_l_apercu_d_un_autre(serveur_derriere_nginx):
+    code, _, corps = _get(f"{serveur_derriere_nginx}/", "vigie_apercu=9", compte="7")
+    assert code == 200 and "Aperçu de sept" in corps
+    # Sans en-tête (nginx contourné, ou mal réglé) : rien, cookie ou pas.
+    assert _get(f"{serveur_derriere_nginx}/", "vigie_apercu=9")[0] == 404
+    for faux in ("", "..", "7/../9", "-7", "7,9"):
+        assert _get(f"{serveur_derriere_nginx}/", compte=faux)[0] == 404
+
+
+def test_derriere_nginx_le_parametre_des_liens_est_retire_sans_rien_poser(serveur_derriere_nginx):
+    code, entetes, _ = _get(f"{serveur_derriere_nginx}/finances?apercu=9", compte="7")
+    assert code == 303 and entetes["Location"] == "/finances"
+    assert "Set-Cookie" not in entetes
+
+
+def test_l_option_derriere_nginx_se_lit_dans_l_environnement(monkeypatch):
+    """L'atelier lance ce serveur sans l'option (scripts/publication.py) : elle
+    arrive par l'unité systemd (atelier.service)."""
+    servir = _charger("servir_option", "scripts/servir_apercu.py")
+
+    class Arret(Exception):
+        pass
+
+    def arreter(*a, **k):
+        raise Arret
+    monkeypatch.setattr(servir, "Serveur", arreter)
+    monkeypatch.setenv("VIGIE_APERCU_COMPTE_PAR_ENTETE", "1")
+    with pytest.raises(Arret):
+        servir.main(["/nulle-part", "--par-compte", "--port", "0"])
+    assert servir.HandlerParCompte.par_entete is True
+
+    monkeypatch.delenv("VIGIE_APERCU_COMPTE_PAR_ENTETE")
+    with pytest.raises(Arret):
+        servir.main(["/nulle-part", "--par-compte", "--port", "0"])
+    assert servir.HandlerParCompte.par_entete is False
+
+
+def test_la_marque_du_passage_est_retiree_de_l_adresse(serveur_derriere_nginx):
+    code, entetes, _ = _get(f"{serveur_derriere_nginx}/finances?__vigie_passage=1", compte="7")
+    assert code == 303 and entetes["Location"] == "/finances"
+    assert "Set-Cookie" not in entetes
+
+
+def test_seuls_nos_parametres_sont_retires_de_l_adresse(serveur_derriere_nginx):
+    """`?apercu=` et la marque du passage partent ; ceux du site restent."""
+    code, entetes, _ = _get(f"{serveur_derriere_nginx}/finances?annee=2025&__vigie_passage=1&q=a+b",
+                            compte="7")
+    assert code == 303 and entetes["Location"] == "/finances?annee=2025&q=a+b"
+    code, entetes, _ = _get(f"{serveur_derriere_nginx}/finances?apercu=9&annee=2025", compte="7")
+    assert code == 303 and entetes["Location"] == "/finances?annee=2025"

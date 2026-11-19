@@ -297,6 +297,10 @@ ACCUEIL = ('<html><head><link href="./_app/immutable/assets/0.css" rel="styleshe
            + '<script>import("./_app/immutable/entry/start.js")</script></body></html>')
 
 
+PAGE_404 = ("<html><head><title>Page introuvable</title></head><body>"
+            "<noscript><h1>Page introuvable</h1></noscript></body></html>")
+
+
 def _build(racine: Path, fiches: int) -> Path:
     build = racine / "build"
     for nom in ("assets/0.css", "entry/start.js"):
@@ -304,6 +308,8 @@ def _build(racine: Path, fiches: int) -> Path:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("/* */")
     (build / "index.html").write_text(ACCUEIL, encoding="utf-8")
+    # Le fallback d'adaptateur, une fois `ecrire_404.mjs` passé.
+    (build / "404.html").write_text(PAGE_404, encoding="utf-8")
     (build / "entite").mkdir()
     for i in range(fiches):
         (build / "entite" / f"{i}.html").write_text(PAGE, encoding="utf-8")
@@ -335,6 +341,16 @@ def test_un_build_entier_passe_et_dit_ce_qu_il_a_compte(tmp_path):
     r = _verifier(_build(tmp_path, 12), _snapshot(tmp_path, 12))
     assert r.returncode == 0, r.stderr
     assert "12 fiches pour 12 annoncées" in r.stdout
+
+
+@avec_node
+def test_un_build_dont_la_404_est_vide_est_refuse(tmp_path):
+    """25/10/2026 : le fallback d'adaptateur est un squelette sans texte ; sans
+    `ecrire_404.mjs`, un lien cassé tombait sur une page blanche."""
+    build = _build(tmp_path, 12)
+    (build / "404.html").write_text("<html><head></head><body></body></html>", encoding="utf-8")
+    r = _verifier(build, _snapshot(tmp_path, 12))
+    assert r.returncode == 1 and "404.html ne porte aucun texte" in r.stderr, r.stderr
 
 
 @avec_node

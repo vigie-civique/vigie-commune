@@ -45,19 +45,22 @@ Usage :
   python3 -m collectors.mobilite --insee 30140
   python3 -m collectors.mobilite --stats
 """
+import io
 import argparse
 import csv
 import time
 import urllib.parse
 import urllib.request
 
+from . import mesure
 from .archive import HEADERS, archive_fetch, fetch_json
 from .config import (BBOX, CENTROID, COMMUNE_INSEE, COMMUNES, NATIONAL_STORE,
                      REQUEST_DELAY, communes_du_step)
 from .db import get_conn, transaction
 from .geometrie import bbox as bbox_geom
 from .geometrie import contour_commune, dedans, point_interieur
-from .national_store import ecrire_atomiquement, est_frais
+from .national_store import (ecrire_atomiquement, est_frais, magasin_ecrivable,
+                             perime_lisible)
 
 SOURCE = "transport-anct"
 TRANSPORT = "https://transport.data.gouv.fr/api"
@@ -111,7 +114,12 @@ def arrets(sud: float, ouest: float, nord: float, est: float) -> list[dict]:
         "south": sud, "north": nord, "west": ouest, "east": est,
         "width_px": 2000, "height_px": 2000})
     data = fetch_json(url, source=SOURCE, timeout=60)
-    return data.get("features") or []
+    traits = data.get("features") or []
+    # Quelques arrêts par commune, zéro en zone rurale : la forme sert, le
+    # volume n'alerte pas.
+    mesure.lu("gtfs-arrets", len(traits),
+              mesure.forme_de(traits, "properties"))
+    return traits
 
 
 def _url_anct() -> str | None:
@@ -137,20 +145,23 @@ def croisement_anct() -> dict[str, dict]:
     autres jeux nationaux, et sert à toutes les instances de la machine.
     """
     cache = CACHE / "croisement-dispositifs.csv"
-    if not est_frais(cache, ANCT_JOURS):
-        source = _url_anct()
-        if not source:
-            raise RuntimeError("ANCT : aucune ressource CSV dans le catalogue")
-        req = urllib.request.Request(source, headers=HEADERS)
-        with urllib.request.urlopen(req, timeout=180) as r:
-            brut = r.read()
-            archive_fetch(SOURCE, source, brut,
-                          content_type=r.headers.get_content_type(),
-                          http_status=r.status)
-        ecrire_atomiquement(cache, brut)
-
-    with cache.open(encoding="utf-8-sig", newline="") as f:
-        return lire_croisement(f)
+    if est_frais(cache, ANCT_JOURS) or (
+            not magasin_ecrivable(CACHE, cache.name) and perime_lisible(cache, ANCT_JOURS)):
+        with cache.open(encoding="utf-8-sig", newline="") as f:
+            return lire_croisement(f)
+    source = _url_anct()
+    if not source:
+        raise RuntimeError("ANCT : aucune ressource CSV dans le catalogue")
+    req = urllib.request.Request(source, headers=HEADERS)
+    with urllib.request.urlopen(req, timeout=180) as r:
+        brut = r.read()
+        archive_fetch(SOURCE, source, brut,
+                      content_type=r.headers.get_content_type(),
+                      http_status=r.status)
+    # Lu en mémoire, pas depuis le magasin : quand il refuse l'écriture, l'ancien
+    # fichier y est resté, et le relire jetait ce qu'on vient de télécharger.
+    ecrire_atomiquement(cache, brut)
+    return lire_croisement(io.StringIO(brut.decode("utf-8-sig"), newline=""))
 
 
 def lire_croisement(flux) -> dict[str, dict]:
@@ -161,12 +172,17 @@ def lire_croisement(flux) -> dict[str, dict]:
     que disparaître parce que le dictionnaire n'a pas été mis à jour.
     """
     table: dict[str, dict] = {}
-    for ligne in csv.DictReader(flux, delimiter=";"):
+    lecteur = csv.DictReader(flux, delimiter=";")
+    lues = 0
+    for ligne in lecteur:
+        lues += 1
         insee = (ligne.get("insee_com") or "").strip()
         if not insee:
             continue
         table[insee] = {k: v.strip() for k, v in ligne.items()
                         if k and k.startswith("id_") and (v or "").strip()}
+    # Le fichier national, lu au magasin ou neuf.
+    mesure.lu("anct-croisement", lues, lecteur.fieldnames, complete=True)
     return table
 
 

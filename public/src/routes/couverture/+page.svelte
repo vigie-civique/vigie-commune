@@ -1,5 +1,5 @@
 <script>
-  import { SITE_NOM } from '#lib/instance.js'
+  import { SITE_NOM, STATUT_TYPE, STATUT_LIBELLE, STATUT_TEXTE, STATUT_TENUE_PAR } from '#lib/instance.js'
   import Niveau from '#lib/components/Niveau.svelte'
 
   // Rendu au build par +page.server.js.
@@ -17,6 +17,13 @@
     try { return new Date(d.slice(0, 10) + 'T00:00:00').toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' }) }
     catch { return d }
   }
+  // Le statut du site, en entier : le bandeau de chaque page n'en garde que
+  // l'étiquette et mène ici (09/11/2026). Même texte que le snapshot
+  // (`collectors/statut.py`), seul l'endroit change.
+  const marque = STATUT_TYPE === 'demonstration' ? '○' : '●'
+  const statut = STATUT_TENUE_PAR
+    ? STATUT_TEXTE.replace('tenu sur place', `tenu sur place par ${STATUT_TENUE_PAR}`)
+    : STATUT_TEXTE
   const nb = (n) => (n == null ? '-' : n.toLocaleString('fr-FR'))
 
   // Un collecteur qui n'a pas tourné depuis longtemps est une lacune en
@@ -30,7 +37,11 @@
   const DEFAUT = 45
   const age = (d) => (Date.now() - new Date(d.replace(' ', 'T')).getTime()) / 864e5
   $: dormants = Object.entries(c?.collecteurs || {})
+    .filter(([, v]) => !v.non_configure)
     .filter(([, v]) => !v.dernier || age(v.dernier) > (v.ttl ?? DEFAUT))
+  // Sans source déclarée, un collecteur n'a rien pu relever : son zéro n'est
+  // ni un résultat ni un retard (raa d'un dossier national, 02/11/2026).
+  $: nonReleves = Object.entries(c?.collecteurs || {}).filter(([, v]) => v.non_configure)
     .sort((a, b) => (a[1].dernier || '').localeCompare(b[1].dernier || ''))
 </script>
 
@@ -47,6 +58,11 @@
     « nous n'avons pas collecté cette année-là ». Cette page donne l'inverse : les
     limites de ce qui est publié ici.
   </p>
+
+  {#if STATUT_TEXTE}
+    <h2 id="statut">Statut du site</h2>
+    <p class="statut-site"><b><span aria-hidden="true">{marque}</span> {STATUT_LIBELLE}.</b> {statut}</p>
+  {/if}
 
   {#if !c?.sources?.length}
     <!-- Une page dont tout le propos est de dire ce qui manque ne peut pas se
@@ -166,12 +182,28 @@
       <p>Chaque collecteur a tourné dans le délai que son rythme prévoit.</p>
     {/if}
 
+    {#if nonReleves.length}
+      <h2>Non relevé, faute de source déclarée</h2>
+      <p>
+        {nonReleves.length > 1 ? 'Ces collecteurs n\'ont' : 'Ce collecteur n\'a'} rien
+        interrogé&nbsp;: la source qu'{nonReleves.length > 1 ? 'ils lisent' : 'il lit'} n'est
+        pas déclarée pour ce territoire. Ce n'est pas un zéro, c'est une question
+        qui n'a pas été posée.
+      </p>
+      <ul class="dormants">
+        {#each nonReleves as [nom, v]}
+          <li><b>{nom}</b> : {v.non_configure}</li>
+        {/each}
+      </ul>
+    {/if}
+
     <h2>Ce que nous ne savons pas faire</h2>
     <ul class="lacunes">
       {#each c.lacunes_connues || [] as l}
         <li class={l.etat}>
           <p class="sujet">{l.sujet} <span class="etat">{ETATS[l.etat] || l.etat}</span></p>
-          <p class="detail">{l.detail}</p>
+          <p class="detail">{l.detail}
+            {#if l.page_jeu}<a href={l.page_jeu} rel="noopener">Le jeu de données</a>{/if}</p>
         </li>
       {/each}
     </ul>
@@ -188,6 +220,7 @@
   h1 { font-size: 1.85rem; margin: 0 0 .5rem; }
   h2 { font-size: 1.1rem; margin: 2rem 0 .6rem; }
   .chapeau { color: var(--gris); max-width: 62ch; line-height: 1.6; margin: 0 0 1.5rem; }
+  .statut-site { max-width: 62ch; line-height: 1.6; }
   .apres { margin: .35rem 0 0; font-size: .9rem; color: var(--gris); }
   .apres a, .liens a { color: var(--ardoise); }
   .note { font-size: .82rem; color: var(--gris-clair); margin: .5rem 0 0; line-height: 1.5; }

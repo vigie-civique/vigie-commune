@@ -4,6 +4,7 @@
   import { pageStore } from '#lib/etat-app'
   const page = pageStore()
   import { TYPE_LABELS, loadJSON, euros } from '#lib/data.js'
+  import { chercher, motsDeRequete } from '#lib/recherche.js'
 
   // La recherche ne portait que sur les acteurs. Or on ne cherche pas seulement
   // « qui » : on cherche « école », « assainissement », « voirie », un montant,
@@ -19,17 +20,41 @@
   $: acteurs = data.index
 
   let complet = null          // index transversal, une fois chargé
-  let chargement = true
+  // Faux au rendu : la page est prérendue, et un « Chargement… » écrit dans le
+  // HTML y restait pour toujours quand le script ne partait pas (audit UX du
+  // 25/10/2026). Il ne s'affiche que si le chargement a réellement commencé.
+  let chargement = false
+
+  // Le texte des actes : chargé à la première recherche et non à l'ouverture
+  // (environ 1 Mo compressé pour dix ans d'actes). Absent d'un site qui n'a pas
+  // de lexique : la recherche reste alors sur les titres, sans rien dire.
+  let texte = null
+  let texteEtat = 'attente'   // attente | charge | pret | absent
+  async function chargerTexte() {
+    texteEtat = 'charge'
+    try {
+      texte = (await loadJSON('recherche_texte.json')).mots || null
+      texteEtat = texte ? 'pret' : 'absent'
+    } catch { texte = null; texteEtat = 'absent' }
+  }
 
   let q = ''
   let categorie = ''
   let commune = ''
 
+  // Requête pré-remplie depuis l'URL : ?q= rend les résultats partageables.
+  // Lu après le montage et non au rendu : la page est prérendue, il n'y a pas
+  // de query string au build (SvelteKit interdit d'y toucher à ce moment-là).
+  // Relu à chaque navigation : la loupe du menu, utilisée depuis cette page
+  // même, change l'adresse sans remonter le composant, et l'ancienne requête
+  // restait affichée.
+  let monte = false
+  const lireRequete = (url) => { q = url.searchParams.get('q') || '' }
+  $: if (monte) lireRequete($page.url)
+
   onMount(async () => {
-    // Requête pré-remplie depuis l'URL : ?q= rend les résultats partageables.
-    // Lu ici et non au rendu : la page est prérendue, il n'y a pas de query
-    // string au build (SvelteKit interdit d'y toucher à ce moment-là).
-    q = $page.url.searchParams.get('q') || ''
+    monte = true
+    chargement = true
     try {
       complet = (await loadJSON('recherche_index.json')).index || []
     } catch { complet = null }   // on reste sur les acteurs seuls
@@ -47,16 +72,10 @@
     versement: 'Versement',
   }
 
-  // Recherche insensible aux accents et à la casse : « caderle » doit trouver
-  // « Sainte-Croix-de-Caderle », et « ecole » doit trouver « école ».
-  const fold = (s) => (s || '')
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // diacritiques combinants
-    .toLowerCase()
-
   // Tant que l'index transversal n'est pas là, on cherche dans les acteurs, mis
   // au même format : le lecteur n'a pas à savoir qu'il y a deux fichiers.
   $: source = complet ?? acteurs.map((e) => ({
-    k: 'acteur', t: e.n, u: `/entite/${e.id}`, c: e.c, n: 1000 + (e.nb || 0),
+    k: 'acteur', t: e.n, s: e.s, u: `/entite/${e.id}`, c: e.c, n: 1000 + (e.nb || 0),
   }))
 
   // Le champ `c` ne veut pas dire la même chose selon la catégorie : commune
@@ -69,15 +88,17 @@
   )].sort()
   $: filtreCommuneUtile = categorie === 'acteur'
   $: if (!filtreCommuneUtile && commune) commune = ''
-  $: needle = fold(q.trim())
-  $: resultats = needle.length < 2 && !categorie && !commune
-    ? []
-    : source
-        .filter((e) => !categorie || e.k === categorie)
-        .filter((e) => !commune || e.c === commune)
-        .filter((e) => !needle || fold(e.t).includes(needle)
-                    || (e.m != null && String(e.m).includes(needle))
-                    || (e.d || '').includes(needle))
+  // Des mots, pas une suite de lettres, et un score calculé à la requête :
+  // `#lib/recherche.js`. Sans mot cherchable (moins de deux lettres), la liste
+  // n'apparaît que si une catégorie ou une commune est choisie.
+  $: assezDeLettres = q.trim().length >= 2 && motsDeRequete(q).length > 0
+  $: if (assezDeLettres && complet && texteEtat === 'attente') chargerTexte()
+  $: trouve = !assezDeLettres && !categorie && !commune
+    ? { resultats: [], partiel: false, dansLeTexte: new Set() }
+    : chercher(source, assezDeLettres ? q : '',
+        (e) => (!categorie || e.k === categorie) && (!commune || e.c === commune),
+        texte)
+  $: resultats = trouve.resultats
   $: affiches = resultats.slice(0, LIMITE)
   $: parCategorie = resultats.reduce((acc, r) => {
     acc[r.k] = (acc[r.k] || 0) + 1
@@ -98,6 +119,15 @@
     Cherchez un nom, mais aussi un sujet («&nbsp;voirie&nbsp;», «&nbsp;école&nbsp;»),
     un montant ou une année.
   </p>
+
+  <noscript>
+    <p class="etat">
+      La recherche demande JavaScript. À défaut, parcourez
+      <a href="/conseils">les conseils en clair</a>,
+      <a href="/dossiers">les dossiers thématiques</a>
+      ou <a href="/deliberations">les délibérations</a>.
+    </p>
+  </noscript>
 
   <div class="filtres">
     <input
@@ -125,11 +155,14 @@
 
   {#if !resultats.length}
     <p class="etat">
-      {needle.length >= 2 || categorie || commune
+      {assezDeLettres || categorie || commune
         ? 'Rien ne correspond.'
         : `Tapez au moins deux lettres, ou choisissez une catégorie. ${source.length.toLocaleString('fr-FR')} entrées consultables.`}
     </p>
   {:else}
+    {#if trouve.partiel}
+      <p class="etat">Aucune entrée ne contient tous ces mots : voici celles qui en contiennent le plus.</p>
+    {/if}
     <p class="compte">
       {resultats.length.toLocaleString('fr-FR')} résultat{resultats.length > 1 ? 's' : ''}
       {#if Object.keys(parCategorie).length > 1}{' '}
@@ -150,6 +183,7 @@
             rel={e.u?.startsWith('http') ? 'noopener' : undefined}>
             <span class="badge {e.k}">{CATEGORIES[e.k] || e.k}</span>
             <span class="nom">{e.t}</span>
+            {#if trouve.dansLeTexte.has(e)}<span class="externe">dans le texte</span>{/if}
             {#if e.u?.startsWith('http')}<span class="externe">source ↗</span>{/if}
             {#if e.d}<span class="commune">{e.d}</span>{/if}
             {#if e.c}<span class="commune">{e.c}</span>{/if}
@@ -173,12 +207,12 @@
   .filtres { display: flex; gap: .6rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
   input[type="search"] {
     flex: 1 1 22rem; padding: .65rem .9rem; font-size: 1rem;
-    border: 1px solid var(--trait); border-radius: 10px; background: #fff; color: var(--encre);
+    border: 1px solid var(--trait); border-radius: 10px; background: var(--carte); color: var(--encre);
   }
   input[type="search"]:focus, select:focus { outline: 2px solid var(--ardoise); outline-offset: 1px; border-color: var(--ardoise); }
   select {
     padding: .65rem .7rem; font-size: .9rem; border: 1px solid var(--trait);
-    border-radius: 10px; background: #fff; color: var(--gris);
+    border-radius: 10px; background: var(--carte); color: var(--gris);
   }
 
   .etat { color: var(--gris); }
@@ -189,7 +223,7 @@
   .liste { list-style: none; margin: 0; padding: 0; display: grid; gap: .4rem; }
   .liste .ligne {
     display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
-    padding: .6rem .8rem; background: #fff; border: 1px solid var(--trait);
+    padding: .6rem .8rem; background: var(--carte); border: 1px solid var(--trait);
     border-radius: 10px; color: inherit; text-decoration: none;
   }
   a.ligne:hover { border-color: var(--ardoise); box-shadow: 0 3px 10px rgba(37,99,235,.1); text-decoration: none; }
@@ -203,10 +237,10 @@
     padding: .15rem .45rem; border-radius: 5px; background: var(--trait-pale); color: var(--gris); white-space: nowrap;
   }
   .badge.business { background: var(--ambre-pale); color: var(--ambre); }
-  .badge.association { background: #d1fae5; color: #065f46; }
+  .badge.association { background: var(--vert-pale); color: var(--vert-fonce); }
   .badge.service { background: var(--ardoise-pale); color: var(--ardoise-fonce); }
   .badge.place { background: var(--ardoise-pale); color: #5b21b6; }
-  .badge.person { background: #f6e7e5; color: var(--depense); }
+  .badge.person { background: var(--depense-pale); color: var(--depense); }
   .badge.dossier, .badge.seance { background: var(--ardoise); color: var(--blanc); }
   .externe { font-size: .72rem; color: var(--gris); }
 

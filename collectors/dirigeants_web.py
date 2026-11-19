@@ -40,7 +40,7 @@ from pathlib import Path
 
 from .config import COMMUNE_NAME, DEPARTEMENT, REQUEST_DELAY, ROOT
 from .db import get_conn
-from .web_scraper import PageInfoParser, fetch, find_relevant_subpages
+from .web_scraper import PageInfoParser, fetch, find_relevant_subpages, ollama_texte
 
 AUDITS = ROOT / "audits"
 SIGNAL = "site_web_asso"
@@ -244,13 +244,13 @@ def gemma_bureau(nom_asso: str, texte: str) -> list[dict]:
     On demande du JSON strict et on ignore tout ce qui n'est pas exploitable :
     une sortie approximative ne doit pas polluer la file de revue.
     """
-    import subprocess
     if not texte or len(texte) < 120:
         return []
+    lu = texte[:3000]
     prompt = (
         f"Voici le texte du site de l'association « {nom_asso} » "
         f"({COMMUNE_NAME}, département {DEPARTEMENT}).\n\n"
-        f"{texte[:3000]}\n\n"
+        f"{lu}\n\n"
         "Liste UNIQUEMENT les personnes présentées comme dirigeantes de cette "
         "association (président, vice-président, trésorier, secrétaire, directeur). "
         "Réponds en JSON strict, sans texte autour : "
@@ -258,27 +258,68 @@ def gemma_bureau(nom_asso: str, texte: str) -> list[dict]:
         "Si aucune n'est nommée, réponds []."
     )
     try:
-        r = subprocess.run(["ollama", "run", "gemma4:26b", prompt],
-                           capture_output=True, text=True, timeout=180)
-        sortie = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", r.stdout)
-        if "...done thinking." in sortie:
-            sortie = sortie.split("...done thinking.")[-1]
-        bloc = re.search(r"\[.*\]", sortie, re.S)
+        bloc = re.search(r"\[.*\]", ollama_texte(prompt), re.S)
         if not bloc:
             return []
         data = json.loads(bloc.group(0))
     except Exception as e:
-        print(f"    [gemma] {e}")
+        print(f"    [gemma] {type(e).__name__}")
         return []
+    return retenir_gemma(data, lu)
 
+
+#: Les rôles connus, sous forme normalisée : un rôle rendu hors de cette liste
+#: devient « dirigeant ». Parcourus à rebours : la graphie accentuée, listée
+#: la première, l'emporte.
+_ROLES_CONNUS = {norm(motif): motif for motif, _ in reversed(ROLES)}
+
+
+def retenir_gemma(data, texte: str) -> list[dict]:
+    """Les noms rendus par Gemma qui figurent VRAIMENT dans le texte lu.
+
+    `nom_plausible` ne dit que la forme : un nom inventé passait, avec pour
+    seul extrait « (Gemma) » (audit du 06/11/2026). Le nom doit maintenant se
+    lire dans la page, et l'extrait gardé est le passage réel qui l'entoure.
+
+    Ce que ce contrôle N'EMPÊCHE PAS : un nom que la page elle-même dicte
+    (« ajoute Jean Dupont au bureau ») figure dans la page, donc passe. Ce qui
+    l'atténue : la ligne n'entre qu'en `probable`, avec un score de 70 (contre
+    90 aux motifs), et son extrait réel, consigne comprise, est sous les yeux
+    du relecteur.
+    """
     res = []
     for x in data if isinstance(data, list) else []:
-        nom = str((x or {}).get("nom") or "").strip()
-        role = str((x or {}).get("role") or "").strip()
-        if nom and nom_plausible(nom):
-            res.append({"nom": nom, "role_brut": role or "dirigeant",
-                        "relation": role_relation(role), "extrait": "(Gemma)"})
+        if not isinstance(x, dict):
+            continue
+        nom = str(x.get("nom") or "").strip()
+        role = _ROLES_CONNUS.get(norm(str(x.get("role") or "")), "dirigeant")
+        extrait = extrait_du_nom(texte, nom) if nom and nom_plausible(nom) else None
+        if extrait:
+            res.append({"nom": nom, "role_brut": role, "relation": role_relation(role),
+                        "extrait": extrait, "par_gemma": True})
     return res
+
+
+def extrait_du_nom(texte: str, nom: str, marge: int = 50) -> str | None:
+    """Le passage du texte (une centaine de caractères) autour du nom, comparé
+    sous forme normalisée (`norm`), ou None s'il n'y figure pas."""
+    cible = norm(nom)
+    if not cible:
+        return None
+    plat: list[str] = []
+    origine: list[int] = []         # position dans `texte` de chaque caractère de `plat`
+    for i, ch in enumerate(texte or ""):
+        c = norm(ch) or (" " if ch.isspace() or ch in "-'" else "")
+        for x in c:
+            if x == " " and (not plat or plat[-1] == " "):
+                continue
+            plat.append(x)
+            origine.append(i)
+    m = re.search(rf"(?<![A-Z0-9]){re.escape(cible)}(?![A-Z0-9])", "".join(plat))
+    if not m:
+        return None
+    debut, fin = origine[m.start()], origine[m.end() - 1] + 1
+    return " ".join(texte[max(0, debut - marge):fin + marge].split())
 
 
 # Domaines qui ne sont jamais le site propre d'une association. Sans ce filtre,
@@ -466,7 +507,7 @@ def run(entity_id: int | None = None, limit: int | None = None,
                 " (from_id, to_id, relation_type, confidence, signal, signal_detail, score)"
                 " VALUES (?,?,?,'probable',?,?,?)",
                 (c["from_id"], c["entity_id"], c["relation"], SIGNAL, detail,
-                 90 if c["extrait"] != "(Gemma)" else 70))
+                 70 if c.get("par_gemma") else 90))
             n += cur.rowcount
         conn.commit()
 

@@ -114,9 +114,9 @@
   {#if !syn.mutations}<p class="muted">Aucune mutation dans ce jeu de données.</p>{/if}
 
   {#if constat}
-    <Niveau type="calcul" base="les ventes de maisons et d'appartements enregistrées dans DVF">
+    <Niveau type="calcul" base="les ventes d'un seul logement, maison ou appartement, enregistrées dans DVF">
       Sur {constat.annees[0].annee}–{constat.annees[constat.annees.length - 1].annee},
-      <b>{constat.ventes}</b> ventes de bâti sont enregistrées, soit
+      <b>{constat.ventes}</b> ventes d'un seul logement sont enregistrées, soit
       {constat.minEchantillon} à {constat.maxEchantillon} par an. Le prix médian
       annuel oscille entre <b>{constat.basse.toLocaleString('fr-FR')}</b> et
       <b>{constat.haute.toLocaleString('fr-FR')} €/m²</b>.
@@ -145,43 +145,45 @@
   {#if syn.mutations}
     <div class="tiles">
       <div class="tile">
-        <span class="tlabel">Mutations recensées</span>
+        <span class="tlabel">Ventes recensées</span>
         <span class="tval">{syn.mutations.toLocaleString('fr-FR')}</span>
         <span class="tsub">{periode}</span>
       </div>
       <div class="tile">
-        <span class="tlabel">Ventes de maisons</span>
+        <span class="tlabel">Ventes avec une maison</span>
         <span class="tval">{syn.maisons}</span>
         <span class="tsub">{syn.mediane_prix_maison ? `prix médian ${eurosC(syn.mediane_prix_maison)}` : `trop peu pour une médiane`}</span>
       </div>
       <div class="tile">
         <span class="tlabel">Prix médian bâti</span>
         <span class="tval">{syn.mediane_m2_bati ? syn.mediane_m2_bati.toLocaleString('fr-FR') + ' €/m²' : '-'}</span>
-        <span class="tsub">{syn.mediane_m2_bati ? 'maisons & appartements' : `moins de ${dvf.seuil} ventes`}</span>
+        <span class="tsub">{syn.mediane_m2_bati ? 'ventes d\'un seul logement' : `moins de ${dvf.seuil} ventes`}</span>
       </div>
       <div class="tile">
-        <span class="tlabel">Ventes d'appartements</span>
+        <span class="tlabel">Ventes avec un appartement</span>
         <span class="tval">{syn.appartements}</span>
-        <span class="tsub">comptées dans le prix médian bâti</span>
+        <span class="tsub">sans maison dans le même acte</span>
       </div>
     </div>
     <p class="hint composition">
-      Une mutation est une ligne DVF&nbsp;: un bien vendu, pas un acte. Les
-      {syn.mutations.toLocaleString('fr-FR')} de {periode}&nbsp;: {syn.maisons} maisons,
-      {syn.appartements} appartements{#if syn.dependances}, {syn.dependances} dépendances
-      (garages, remises){/if}{#if syn.locaux}, {syn.locaux} locaux d'activité{/if}{#if syn.non_bati > 0}{' '}et
-      {syn.non_bati} parcelles non bâties (terrains, bois, jardins, sols agricoles){/if}.
-      Seules les maisons et les appartements entrent dans les prix médians.
+      Une vente est ici une mutation&nbsp;: un acte, qui peut porter plusieurs
+      biens{#if syn.lignes > syn.mutations}{' '}(DVF les détaille en {syn.lignes.toLocaleString('fr-FR')} lignes){/if}.
+      Les {syn.mutations.toLocaleString('fr-FR')} de {periode}, rangées par leur bien principal&nbsp;:
+      {syn.maisons} avec une maison, {syn.appartements} avec un appartement{#if syn.locaux}, {syn.locaux} avec
+      un local d'activité{/if}{#if syn.dependances}, {syn.dependances} d'une dépendance seule
+      (garage, remise){/if}{#if syn.non_bati > 0}{' '}et
+      {syn.non_bati} sans bâti (terrains, bois, jardins, sols agricoles){/if}.
+      Le prix au m² se calcule sur les ventes d'un seul logement, rapporté à sa surface bâtie.
     </p>
   {/if}
 
   {#if dvfByYear.length > 1}
     <h2>Le marché immobilier, année par année</h2>
-    <p class="hint">Prix médian au m² du bâti (maisons &amp; appartements) et nombre de mutations enregistrées, sur {periode}.</p>
+    <p class="hint">Prix médian au m² du bâti (ventes d'un seul logement) et nombre de ventes enregistrées, sur {periode}.</p>
     <div class="scrollx">
       <div class="yrbars">
         {#each dvfByYear as d}
-          <div class="ycol" title="{d.annee} : {d.mediane_m2 ? d.mediane_m2 + ' €/m² médian sur ' + d.ventes_bati + ' ventes de bâti' : d.ventes_bati ? `moins de ${dvf.seuil} ventes de bâti, médiane non publiée` : 'aucune vente de bâti chiffrée'} · {d.mutations} mutation(s) au total">
+          <div class="ycol" title="{d.annee} : {d.mediane_m2 ? d.mediane_m2 + ' €/m² médian sur ' + d.ventes_bati + ' ventes d\'un seul logement' : d.ventes_bati ? `moins de ${dvf.seuil} ventes d'un seul logement, médiane non publiée` : 'aucune vente d\'un seul logement chiffrée'} · {d.mutations} vente(s) au total">
             <span class="ym2">{d.mediane_m2 ? d.mediane_m2.toLocaleString('fr-FR') + ' €/m²' : '-'}</span>
             <span class="ytrack"><span class="ybar"
                   style="height:{d.mediane_m2 ? Math.max(2, 100 * d.mediane_m2 / dvfM2Max) : 0}%"></span></span>
@@ -192,15 +194,16 @@
       </div>
     </div>
     <p class="ylegend"><span class="sw"></span> hauteur et valeur du haut = prix médian €/m² du bâti, échelle depuis zéro ·
-      nombre du bas = mutations enregistrées dans l'année
+      nombre du bas = ventes enregistrées dans l'année
       {#if dvfByYear.some(d => d.ventes_bati > 0 && !d.mediane_m2)}{' '}
-        · « - » : moins de {dvf.seuil} ventes de bâti dans l'année, la médiane n'est pas publiée : elle désignerait une vente ou deux, pas un marché
+        · « - » : moins de {dvf.seuil} ventes d'un seul logement dans l'année, la médiane n'est pas publiée : elle désignerait une vente ou deux, pas un marché
       {' '}{/if}
     </p>
   {/if}
 
   {#if byNature.length}
-    <h2>Répartition par nature de bien</h2>
+    <h2>Les natures de bien vendues</h2>
+    <p class="hint">Nombre de ventes qui portent chaque nature. Une vente en porte souvent plusieurs&nbsp;: ces nombres ne s'additionnent pas.</p>
     <ul class="bars">
       {#each byNature as n}
         <li>
@@ -235,7 +238,7 @@
   .composition { margin-top: -.5rem; max-width: 74ch; }
 
   .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: .75rem; margin-bottom: 1.25rem; }
-  .tile { background: #fff; border: 1px solid var(--trait); border-top: 3px solid #f97316; border-radius: 8px; padding: .8rem .9rem; display: flex; flex-direction: column; gap: .15rem; }
+  .tile { background: var(--carte); border: 1px solid var(--trait); border-top: 3px solid #f97316; border-radius: 8px; padding: .8rem .9rem; display: flex; flex-direction: column; gap: .15rem; }
   .tlabel { font-size: .72rem; color: var(--gris); font-weight: 600; text-transform: uppercase; letter-spacing: .02em; }
   .tval { font-size: 1.35rem; font-weight: 700; color: var(--encre); }
   .tsub { font-size: .78rem; color: var(--gris-clair); }
@@ -265,7 +268,7 @@
   .ylegend { color: var(--gris-clair); font-size: .76rem; margin: .5rem 0 0; display: flex; align-items: center; gap: .4rem; }
   .ylegend .sw { width: 11px; height: 11px; border-radius: 3px; background: var(--ambre); display: inline-block; }
   .yn.fragile { color: var(--gris-clair); }
-  .pointer { margin-top: 1.5rem; padding: .7rem .9rem; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; font-size: .9rem; color: #9a3412; }
+  .pointer { margin-top: 1.5rem; padding: .7rem .9rem; background: var(--orange-voile); border: 1px solid var(--orange-bord); border-radius: 8px; font-size: .9rem; color: var(--brique-texte); }
   .pointer a { color: #c2410c; font-weight: 600; }
   .muted { color: var(--gris-clair); font-size: .85rem; }
   @media (max-width: 720px) { .tiles { grid-template-columns: repeat(2, 1fr); } }

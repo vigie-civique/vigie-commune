@@ -259,8 +259,10 @@ class TestComptes:
         assert c.patch(f"/api/admin/comptes/{vid}", headers=h_admin,
                        json={"actif": False}).status_code == 200
         assert c.get("/api/atelier/stats", headers=h_val).status_code == 401
+        # 401 comme un mot de passe faux : un 403 disait que le mot de passe
+        # était juste (audit du 15/11/2026).
         assert c.post("/api/auth/login", json={"email": "valid@exemple.fr",
-                                               "password": MDP}).status_code == 403
+                                               "password": MDP}).status_code == 401
 
     def test_le_dernier_admin_reste_admin(self, atelier):
         c = atelier["client"]
@@ -303,6 +305,7 @@ def flux(atelier, tmp_path, monkeypatch):
         monkeypatch.setattr(pub, nom, tmp_path / nom)
     monkeypatch.setattr(pub, "ETAT", tmp_path / "etat.json")
     monkeypatch.setattr(pub, "VERSIONS", tmp_path / "versions")
+    monkeypatch.setattr(pub, "PUBLIEES", tmp_path / "publiees")
     monkeypatch.setattr(pub, "VERROU", tmp_path / "publication.lock")
 
     def build_snapshot(out):
@@ -501,3 +504,236 @@ class TestMinimisation:
         assert c.post(f"/api/atelier/entities/{asso}/notes", headers=h_c,
                       json={"note": "siège déplacé"}).status_code == 200
         assert c.get(f"/api/atelier/entities/{asso}", headers=h_c).json()["notes_reservees"] is False
+
+
+# ─── Garde de route : publication et décision (14/11/2026) ────────────────────
+# Ces routes tenaient leur rôle d'un contrôle dans leur corps ; la garde est
+# remontée dans leur déclaration (`require_compte_ou_cle`). Le rôle du dessous
+# est refusé en le disant, le rôle requis passe, et la clé admin locale passe
+# encore ici — et seulement ici : les lectures lui sont fermées.
+
+#: (méthode, chemin, corps, rôle minimal). Pour `apercu/serveur`, le corps
+#: choisit le rôle : démarrer, validateur ; arrêter (celui de tout le monde), admin.
+GARDEES = [
+    ("GET", "/api/admin/publication", None, "validator"),
+    ("POST", "/api/admin/publication/apercu", None, "validator"),
+    ("POST", "/api/admin/publication/publier", None, "admin"),
+    ("POST", "/api/admin/publication/verifier-en-ligne", None, "validator"),
+    ("POST", "/api/admin/publication/mettre-en-ligne", None, "admin"),
+    ("POST", "/api/admin/publication/revenir", None, "admin"),
+    ("GET", "/api/admin/publication/modifications", None, "validator"),
+    ("POST", "/api/admin/publication/apercu/serveur", {"action": "demarrer"}, "validator"),
+    ("POST", "/api/admin/publication/apercu/serveur", {"action": "arreter"}, "admin"),
+    ("POST", "/api/candidates/{cid}/review", {"action": "accept"}, "validator"),
+]
+DESSOUS = {"validator": "contributor", "admin": "validator"}
+
+
+@pytest.fixture
+def sans_effet(atelier, tmp_path, monkeypatch):
+    """Les emplacements de publication sous `tmp_path`, et les gestes qui
+    construisent, téléversent, interrogent le site ou lancent un serveur
+    remplacés par un témoin : seule la garde est éprouvée ici, le flux a ses
+    propres essais (`test_publication_flux`, `test_apercus_par_compte`)."""
+    import api
+    from montages import reloger
+    racine = tmp_path / "opt"
+    reloger(api.pub, racine, monkeypatch)
+    monkeypatch.setattr(api.pub, "APERCUS", racine / "audits" / "apercus")
+    gestes = []
+    for nom in ("generer_apercu_du_compte", "generer_apercu", "publier", "verifier_en_ligne",
+                "mettre_en_ligne", "revenir_a_la_version_precedente",
+                "demarrer_serveur_apercu_du_compte", "demarrer_serveur_apercu",
+                "arreter_serveur_apercu"):
+        monkeypatch.setattr(api.pub, nom, lambda *a, _nom=nom, **k: gestes.append(_nom) or {"dest": "témoin"})
+    _, a = atelier["sql"]("INSERT INTO entities(type, name) VALUES('person', 'A')")
+    _, b = atelier["sql"]("INSERT INTO entities(type, name) VALUES('person', 'B')")
+    _, cid = atelier["sql"](
+        "INSERT INTO relation_candidates(from_id, to_id, relation_type, confidence, signal) "
+        "VALUES(?, ?, 'famille_présumé', 'probable', 'same_surname')", (a, b))
+    return {"gestes": gestes, "cid": cid}
+
+
+def _appel(atelier, sans_effet, methode, chemin, corps, **kw):
+    return atelier["client"].request(methode, chemin.format(cid=sans_effet["cid"]),
+                                     json=corps, **kw)
+
+
+class TestGardeDeRoute:
+    @pytest.mark.parametrize("methode, chemin, corps, role", GARDEES)
+    def test_le_role_du_dessous_est_refuse_en_le_disant(self, atelier, sans_effet,
+                                                         methode, chemin, corps, role):
+        h, _ = atelier["compte"]("dessous@exemple.fr", DESSOUS[role])
+        r = _appel(atelier, sans_effet, methode, chemin, corps, headers=h)
+        assert r.status_code == 403, r.text
+        detail = r.json()["detail"]
+        assert detail["role_requis"] == role
+        assert "vous êtes" in detail["message"]
+        assert "ADMIN_KEY" not in r.text
+        assert sans_effet["gestes"] == []
+
+    @pytest.mark.parametrize("methode, chemin, corps, role", GARDEES)
+    def test_le_role_requis_passe(self, atelier, sans_effet, methode, chemin, corps, role):
+        h, _ = atelier["compte"]("requis@exemple.fr", role)
+        r = _appel(atelier, sans_effet, methode, chemin, corps, headers=h)
+        assert r.status_code == 200, r.text
+
+    def test_le_contributeur_porteur_de_la_cle_ne_tranche_toujours_pas(
+            self, atelier, sans_effet, monkeypatch):
+        """Avant la garde, `exiger` passait avant la clé dans le corps de
+        `review` : un compte connu trop faible est refusé, clé ou non."""
+        import api
+        monkeypatch.setattr(api, "ADMIN_KEY", "cle-de-test")
+        h, _ = atelier["compte"]("contrib@exemple.fr", "contributor")
+        local = TestClient(api.app, client=("127.0.0.1", 50000))
+        r = local.post(f"/api/candidates/{sans_effet['cid']}/review",
+                       headers={**h, "x-admin-key": "cle-de-test"}, json={"action": "accept"})
+        assert r.status_code == 403
+
+
+class TestAnnexesDuTri:
+    """Les quatre annexes du tri des gardes (Julien, 14/11/2026)."""
+
+    def test_l_etat_du_snapshot_public_est_retire(self, atelier):
+        h, _ = atelier["compte"]("admin@exemple.fr", "admin")
+        assert atelier["client"].get("/api/admin/public-snapshot", headers=h).status_code == 404
+
+    @pytest.mark.parametrize("action", ["", "Arreter", "redemarrer", "stop"])
+    def test_le_serveur_d_apercu_n_accepte_que_deux_actions(self, atelier, sans_effet, action):
+        """Toute valeur autre que `arreter` valait démarrage."""
+        h, _ = atelier["compte"]("admin@exemple.fr", "admin")
+        r = atelier["client"].post("/api/admin/publication/apercu/serveur", headers=h,
+                                   json={"action": action})
+        assert r.status_code == 422, r.text
+        assert sans_effet["gestes"] == []
+
+    def test_marches_borne_limit(self, atelier):
+        h, _ = atelier["compte"]("lit@exemple.fr", "contributor")
+        c = atelier["client"]
+        assert c.get("/api/marches", headers=h, params={"limit": 200}).status_code == 200
+        assert c.get("/api/marches", headers=h, params={"limit": 500}).status_code == 200
+        for trop in (501, 10**9, 0, -1):
+            assert c.get("/api/marches", headers=h, params={"limit": trop}).status_code == 422, trop
+
+    def test_pivots_lit_sans_creer(self, atelier):
+        """La route créait l'entité manquante (`upsert_entity`) : une lecture
+        écrivait en base."""
+        h, _ = atelier["compte"]("lit@exemple.fr", "contributor")
+        avant = atelier["sql"]("SELECT count(*) AS n FROM entities")[0][0]["n"]
+        r = atelier["client"].get("/api/pivots", headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"commune": None, "epci": None, "etat": None, "prefecture": None}
+        assert atelier["sql"]("SELECT count(*) AS n FROM entities")[0][0]["n"] == avant
+
+    def test_pivots_rend_ce_que_les_collecteurs_ont_cree(self, atelier):
+        from collectors.db import get_conn, pivot_ids
+        conn = get_conn()
+        try:
+            crees = pivot_ids(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        h, _ = atelier["compte"]("lit@exemple.fr", "contributor")
+        assert atelier["client"].get("/api/pivots", headers=h).json() == crees
+
+
+#: Les 17 lectures de l'atelier, que la clé ouvrait sans identité ni journal.
+#: Fermées à la clé le 14/11/2026 : `require_auth`, jeton de tout compte.
+LECTURES = [
+    "/api/stats",
+    "/api/pivots",
+    "/api/entities",
+    "/api/entities/{entity_id}",
+    "/api/search",
+    "/api/layers/{layer_type}",
+    "/api/graph",
+    "/api/events",
+    "/api/events/search",
+    "/api/dvf",
+    "/api/flows",
+    "/api/marches",
+    "/api/budget",
+    "/api/ofgl",
+    "/api/syntheses",
+    "/api/syntheses/{entity_id}",
+    "/api/budget-annexe",
+]
+
+
+def _chemin(chemin, cid=1, eid=1):
+    return (chemin.replace("{candidate_id}", str(cid)).replace("{cid}", str(cid))
+            .replace("{layer_type}", "associations").replace("{entity_id}", str(eid)))
+
+
+class TestCleAdminLocale:
+    """La clé admin, admise depuis la machine elle-même, ne passe plus que sur
+    les routes de publication et de décision, où elle vaut admin."""
+
+    @staticmethod
+    def _routes_a_cle():
+        import api
+        from fastapi.routing import APIRoute
+
+        def porte(dependant):
+            return any(getattr(d.call, "__qualname__", "") == "require_compte_ou_cle.<locals>._dep"
+                       or porte(d) for d in dependant.dependencies)
+        return [(m, r.path) for r in api.app.routes if isinstance(r, APIRoute)
+                and porte(r.dependant) for m in sorted(r.methods - {"HEAD", "OPTIONS"})]
+
+    #: Les 9 routes de publication et de décision. Une liste, pas un compte : un
+    #: échange (une route perd la garde, une autre la gagne) ne passe pas.
+    D_HIER = sorted({(m, c.replace("{cid}", "{candidate_id}")) for m, c, _, _ in GARDEES})
+
+    def test_seules_la_publication_et_la_decision_admettent_la_cle(self):
+        assert sorted(self._routes_a_cle()) == self.D_HIER
+        assert len(self.D_HIER) == 9
+
+    def test_la_cle_passe_depuis_la_machine(self, atelier, sans_effet, monkeypatch):
+        import api
+        monkeypatch.setattr(api, "ADMIN_KEY", "cle-de-test")
+        local = TestClient(api.app, client=("127.0.0.1", 50000))
+        refusees = []
+        for methode, chemin in self.D_HIER:
+            chemin = _chemin(chemin, sans_effet["cid"])
+            corps = {"action": "accept"} if "review" in chemin else None
+            r = local.request(methode, chemin, headers={"x-admin-key": "cle-de-test"}, json=corps)
+            if r.status_code != 200:
+                refusees.append(f"{methode} {chemin} → {r.status_code}")
+        assert refusees == []
+
+    @pytest.mark.parametrize("chemin", LECTURES)
+    def test_la_cle_seule_est_refusee_sur_les_lectures(self, atelier, monkeypatch, chemin):
+        """Depuis la machine, avec la bonne clé : 401. Le verrou global la laisse
+        passer ; c'est la garde de route qui refuse."""
+        import api
+        monkeypatch.setattr(api, "ADMIN_KEY", "cle-de-test")
+        local = TestClient(api.app, client=("127.0.0.1", 50000))
+        r = local.get(_chemin(chemin), headers={"x-admin-key": "cle-de-test"},
+                      params={"q": "four"} if "search" in chemin else None)
+        assert r.status_code == 401, r.text
+
+    @pytest.mark.parametrize("chemin", LECTURES)
+    def test_un_jeton_de_contributeur_lit(self, atelier, chemin):
+        """La contre-épreuve : le 401 vient de la clé, pas d'une route cassée."""
+        h, _ = atelier["compte"]("lit@exemple.fr", "contributor")
+        eid = atelier["fiche"]()
+        r = atelier["client"].get(_chemin(chemin, eid=eid), headers=h,
+                                  params={"q": "four"} if "search" in chemin else None)
+        assert r.status_code not in (401, 403) and r.status_code < 500, r.text
+
+    def test_les_lectures_sont_sous_require_auth(self):
+        import api
+        from api_auth import require_auth
+        from fastapi.routing import APIRoute
+        par_chemin = {r.path: r for r in api.app.routes
+                      if isinstance(r, APIRoute) and "GET" in r.methods}
+        sans = [c for c in LECTURES
+                if not any(d.call is require_auth for d in par_chemin[c].dependant.dependencies)]
+        assert sans == []
+
+    def test_la_cle_venue_d_ailleurs_est_refusee(self, atelier, monkeypatch):
+        import api
+        monkeypatch.setattr(api, "ADMIN_KEY", "cle-de-test")
+        dehors = TestClient(api.app, client=("203.0.113.7", 50000))
+        r = dehors.post("/api/admin/publication/publier", headers={"x-admin-key": "cle-de-test"})
+        assert r.status_code == 403

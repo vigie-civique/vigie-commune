@@ -48,6 +48,7 @@ import sqlite3
 
 import requests
 
+from . import mesure
 from .archive import archive_fetch
 from .config import DB_PATH, HEADERS
 from .db import (beneficiaire_local, beneficiaires_locaux, pivot_ids,
@@ -137,6 +138,7 @@ def jeux_du_schema(session: requests.Session) -> list[dict]:
         if jeu.get("id") not in connus:
             jeux.append(jeu)
             connus.add(jeu.get("id"))
+    mesure.lu("scdl-catalogue", len(jeux), None, complete=True)
     return jeux
 
 
@@ -157,7 +159,11 @@ def _lignes(session: requests.Session, ressource: dict) -> list[dict]:
     # ligne DANS un champ non protégé par des guillemets. Sans ça, le module
     # csv lève, et un seul fichier mal formé emportait la collecte entière.
     lues = csv.DictReader(io.StringIO(texte, newline=""), delimiter=sep)
-    return [{_cle(k): v for k, v in ligne.items()} for ligne in lues]
+    lignes = [{_cle(k): v for k, v in ligne.items()} for ligne in lues]
+    # Une cinquantaine de producteurs qui retirent et republient : le volume
+    # n'alerte pas, le catalogue si.
+    mesure.lu("scdl-lignes", len(lignes), lues.fieldnames)
+    return lignes
 
 
 def collecter(conn, session: requests.Session, dry_run: bool = False) -> dict:
@@ -230,7 +236,7 @@ def collecter(conn, session: requests.Session, dry_run: bool = False) -> dict:
 
 
 def run(dry_run: bool = False):
-    session = requests.Session()
+    session = mesure.suivre(requests.Session())
     session.headers.update(HEADERS)
 
     conn = sqlite3.connect(str(DB_PATH))
