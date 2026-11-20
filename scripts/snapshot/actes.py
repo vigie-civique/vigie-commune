@@ -18,9 +18,10 @@ from collectors.citations import acte_de_ligne, index_de, lignes_en_base
 from collectors.cle_acte import cle_de_ligne
 from collectors.decisions import COMPTEES as DECISIONS_COMPTEES, TYPES as TYPES_DECISION_PAR_PORTEE
 from collectors.decisions import categorie as categorie_decision
-from collectors.pv_parsers import (NUMEROTATION_DE_TETE, rubrique_de_decisions, titre_en_debris_de_tableau,
-                                   titre_en_entete_de_tampon, titre_en_fragment,
-                                   titre_en_mots_colles, titre_questions_diverses)
+from collectors.pv_parsers import (NUMEROTATION_DE_TETE, rubrique_de_decisions, titre_en_debris_de_ponctuation,
+                                   titre_en_debris_de_tableau, titre_en_entete_de_tampon,
+                                   titre_en_fragment, titre_en_mots_colles,
+                                   titre_numero_d_acte_seul, titre_questions_diverses)
 from scripts.snapshot.revue import TYPES_REVUS, appliquer_revue
 from scripts.snapshot.socle import (RULES, URL_COMMUNE, URL_EPCI, rows, safe_url,
                                     write_json_compact)
@@ -405,7 +406,8 @@ TYPES_AGENDA = ("local_event",)
 # l'exclusion, le renvoi à la pièce qui atteste les flux lus dans l'acte.
 MOTIFS_DE_TITRE_DOUTEUX = ("titre_fragment_de_phrase", "titre_mots_colles",
                            "titre_debris_de_tableau", "titre_nom_de_la_commune",
-                           "titre_entete_de_tampon", "titre_questions_diverses")
+                           "titre_entete_de_tampon", "titre_questions_diverses",
+                           "titre_numero_d_acte_seul", "titre_debris_de_ponctuation")
 
 
 def motif_de_titre_douteux(titre: str, nom_commune: str) -> str | None:
@@ -440,6 +442,12 @@ def motif_de_titre_douteux(titre: str, nom_commune: str) -> str | None:
         return "titre_entete_de_tampon"
     if titre_questions_diverses(titre):
         return "titre_questions_diverses"
+    # Le numéro d'acte du même tampon, seul, et le guillemet ou la parenthèse
+    # orphelins d'un titre coupé : pas un objet, et jamais recollés.
+    if titre_numero_d_acte_seul(titre):
+        return "titre_numero_d_acte_seul"
+    if titre_en_debris_de_ponctuation(titre):
+        return "titre_debris_de_ponctuation"
     return None
 
 

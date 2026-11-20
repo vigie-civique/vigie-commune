@@ -147,6 +147,21 @@ def test_les_syntheses_nominatives_ne_sortent_pas(depot):
     assert not any(r.startswith("dashboard/static/api/") for r in retenus)
 
 
+def test_l_extrait_de_memoire_ne_sort_pas(depot):
+    """`docs/memoire/` (mémoire de l'assistant remise au développeur bénévole)
+    n'entre pas dans le kit."""
+    d = depot / "docs" / "memoire"
+    d.mkdir(parents=True)
+    (d / "lecons.md").write_text("# leçons\n")
+    subprocess.run(["git", "-C", str(depot), "add", "-A"], check=True, capture_output=True)
+    suivis = subprocess.run(["git", "-C", str(depot), "ls-files"], check=True,
+                            capture_output=True, text=True).stdout
+    assert "docs/memoire/lecons.md" in suivis   # le piège est posé
+    retenus = {p.relative_to(depot).as_posix() for p in kit.fichiers(depot)}
+    assert "collectors/rna.py" in retenus
+    assert not any(r.startswith("docs/memoire/") for r in retenus)
+
+
 # ── L'exception des images (06/10/2026) ──────────────────────────────────────
 # Le dépôt versionne quatre icônes PNG. Elles n'échappent pas au contrôle :
 # elles sont nommées une par une, et ne peuvent porter que de l'image.

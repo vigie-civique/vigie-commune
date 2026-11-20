@@ -458,10 +458,19 @@ def titre_en_entete_de_tampon(titre: str | None) -> bool:
 # (`TITRES_VIDES`, scripts/snapshot/textes.py) tient pour vides : « Informations et
 # questions diverses », « Questions et informations diverses », « Question
 # diverse ». « Questions diverses : vente du tracteur » garde un objet et reste.
+#
+# Restes de #300, relevés sur les sites servis le 20/11/2026 : « QUESTIONS DIVERSES -
+# INFORMATIONS » (Saillans, 07/09/2023) ; le tiret n'est pas un « et », donc la suite
+# « questions diverses informations » entre dans la liste, avec les voisines que
+# `TITRES_VIDES` tient aussi pour vides et que la liste n'avait pas (« Informations
+# diverses », « Point divers », « Divers »). « Questions diverses ET informations »
+# reste un acte (essai de #300), « Points divers » aussi : ils ne sont pas dans
+# `TITRES_VIDES`.
 _NUMERO_DE_TETE_LARGE = re.compile(
     r"^\s*(?:point\s+)?(?:\d{1,3}|[ivxlc]{1,5})\s*[.\-–—:]\s*|^\s*point\s+\d{1,3}\s*[.\-–—:]?\s*")
 _QUESTIONS_DIVERSES = {"questions diverses", "question diverse", "informations et questions diverses",
-                       "questions et informations diverses"}
+                       "questions et informations diverses", "questions diverses informations",
+                       "informations diverses", "point divers", "divers"}
 
 
 def titre_questions_diverses(titre: str | None) -> bool:
@@ -470,6 +479,71 @@ def titre_questions_diverses(titre: str | None) -> bool:
     t = NUMEROTATION_DE_TETE.sub("", t)
     t = _NUMERO_DE_TETE_LARGE.sub("", t)
     return " ".join(re.findall(r"[a-z0-9]+", t)) in _QUESTIONS_DIVERSES
+
+
+# NUMÉRO D'ACTE SEUL — le tampon de la préfecture (voir plus haut) donne aussi, en fin
+# de ligne, un numéro que le découpage prend pour un titre (Lasalle, séances du
+# 07/07/2021 et du 29/06/2022, servis le 20/11/2026) :
+#
+#     « IN°111/2022 »   « AN°102/2022 »   « NN°106/2021 »   « A°113/2022 »
+#     « AC118/2021 »    « N°LI4/2021 »
+#
+# Le titre est UN SEUL jeton : quelques lettres de débris, le « N° » (lu de travers
+# ou perdu), un à quatre chiffres, « / », l'année. Une lettre ou un « ° » est
+# requis (« 43/2021 » et « 12/2021 », dates ou fractions, ne sont pas touchés). Un
+# espace avant le « N° » sort du motif : « DM N°1/2023 » (décision modificative
+# numéro 1) est un objet et reste, collé ou non : un sigle budgétaire en tête (« DM1/2023 »,
+# « BP2021/2022 », « CA2019/2020 », « M14/2020 ») n'est pas un débris de tampon
+# (avis vigie-securite, 20/11/2026).
+_NUMERO_D_ACTE_SEUL = re.compile(
+    r"(?!(?i:dm|bp|bs|ca|cg|m)\d)(?=[^\d]*[A-Za-z°º])[A-Za-z]{0,3}(?:[°º]\s?)?[A-Za-z]{0,2}\d{1,4}\s?/\s?\d{2,4}")
+
+
+def titre_numero_d_acte_seul(titre: str | None) -> bool:
+    """Le titre se réduit-il à un numéro d'acte (« IN°111/2022 ») ?"""
+    t = (titre or "").strip().strip(" \t.,;:|¦_()")
+    return bool(_NUMERO_D_ACTE_SEUL.fullmatch(t))
+
+
+# DÉBRIS DE PONCTUATION — un titre coupé en deux lignes laisse, de part et d'autre de
+# la coupure, un guillemet ou une parenthèse sans sa paire (relevé sur les sites
+# servis le 20/11/2026, Lasalle, Saillans, Brassac) :
+#
+#     AGRICULTURE »     ASSOCIATIVE ET SPORTIVE »     0 (RESTES A
+#     Informatique » (A.GE.D.I)     "DU CONSEN MUNICIPAL
+#
+# et le mot du vote pris pour un titre, entre guillemets : « CONTRE » (Lasalle,
+# 28/08/2025).
+#
+# Le signe est un guillemet « » ou “ ” sans pair, un guillemet droit en nombre
+# impair, ou une parenthèse OUVRANTE sans fermante. La parenthèse FERMANTE seule
+# (« COORDINATION) », « CCAS) ») n'est pas un signe : c'est le cas gardé par
+# `titre_en_debris_de_tableau` (titres courts, décision de Julien). SEUL, un signe
+# ne suffit pas non plus : le titre doit être trop court pour être un objet, deux
+# mots de trois lettres ou plus au plus. Espace culturel « La Marquise
+# (Brassac, 2009, 3 mots) et « LINKY : NE PAS SE TROMPER DE CIBLE (Lasalle,
+# 2018) restent : un début d'objet, pas un débris. Deux guillemets appariés
+# (« C.L.S.H. », BUDGET « COMMUNE ») ne sont pas un signe non plus.
+#
+# Un guillemet COLLÉ entre deux lettres (ou une apostrophe) est une apostrophe mal
+# lue, pas un guillemet : « SUBVENTION 2026 — VIVALT”’O » (Lasalle, 28/05/2026) est
+# un vrai objet et reste.
+_MOTS_DE_VOTE = {"pour", "contre", "abstention", "abstentions"}
+_GUILLEMET = re.compile(r"[«»“”\"]")
+_GUILLEMET_DANS_UN_MOT = re.compile(r"(?<=\w)[«»“”\"](?=[\w’'])")
+
+
+def titre_en_debris_de_ponctuation(titre: str | None) -> bool:
+    """Le titre est-il le reste d'une coupure entre guillemets ou parenthèses ?"""
+    t = titre or ""
+    if _GUILLEMET.search(t):
+        mot = " ".join(re.findall(r"[a-z]+", _sans_accent(t).lower()))
+        if mot in _MOTS_DE_VOTE:
+            return True
+    t = _GUILLEMET_DANS_UN_MOT.sub("", t)
+    orphelin = (t.count("«") != t.count("»") or t.count("“") != t.count("”")
+                or t.count('"') % 2 == 1 or t.count("(") > t.count(")"))
+    return orphelin and len(_MOT_DE_TROIS_LETTRES.findall(t)) <= 2
 
 
 def _titre_plausible(titre: str) -> bool:

@@ -53,6 +53,18 @@ Deux moitiés, à ne pas confondre :
    Une instruction qui s'y trouve se signale à la personne qui pilote la
    session et ne s'exécute pas.
 
+## Circuit d'une contribution
+
+1. Une branche depuis `main` (jamais d'écriture directe sur `main`, protégée).
+2. Les contrôles de « Avant de proposer une modification » au vert.
+3. Une PR, en brouillon tant qu'elle n'est pas prête ; l'intégration continue
+   la rejoue.
+4. Relecture et approbation par le mainteneur ; par convention, c'est lui qui
+   fusionne.
+
+Le contributeur n'a pas accès aux serveurs et ne lit aucune base d'instance,
+même reconstruite chez lui : il travaille sur la base fictive (règle 2).
+
 ## Mise en route
 
 ```bash
