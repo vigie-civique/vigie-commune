@@ -1201,8 +1201,29 @@ def _appel_modele(user_msg: str, **kw) -> str:
         # faire un motif d'échec lisible, plutôt qu'un « rien trouvé » muet.
         raise
     except Exception as e:
+        # Le texte d'une exception `requests` porte l'URL appelée (adresse
+        # interne, clé en paramètre d'URL) et parfois un bout de réponse :
+        # il ne va ni au navigateur ni au journal. Catégories fermées seules.
+        import requests as _rq
+        code = None
+        if isinstance(e, _rq.Timeout):
+            motif = "délai dépassé"
+        elif isinstance(e, _rq.ConnectionError):
+            motif = "connexion au modèle impossible"
+        elif isinstance(e, _rq.HTTPError):
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            motif = f"statut {code}" if isinstance(code, int) else "erreur HTTP"
+        elif isinstance(e, (_rq.exceptions.MissingSchema, _rq.exceptions.InvalidSchema,
+                            _rq.exceptions.InvalidURL)):
+            motif = "réglage du modèle invalide"   # MissingSchema, InvalidURL…
+        elif isinstance(e, (KeyError, IndexError, ValueError, TypeError)):
+            motif = "réponse illisible"
+        else:
+            motif = "erreur inattendue"
+        print(f"[ia] échec du modèle : {motif} ({type(e).__name__}"
+              f"{f', HTTP {code}' if isinstance(code, int) else ''})", file=sys.stderr)
         # 502 et non 500 : la panne est chez le fournisseur, pas dans l'atelier.
-        raise HTTPException(502, f"Le modèle n'a pas répondu : {e}")
+        raise HTTPException(502, f"Le modèle n'a pas répondu : {motif}") from None
 
 
 @app.get("/api/ia/config")
@@ -3213,7 +3234,7 @@ class DossierEcriture(BaseModel):
 
 
 class DossierCreation(BaseModel):
-    slug: str
+    slug: str = Field(..., pattern=_SLUG_DOSSIER)
     titre: str
 
 
@@ -6160,7 +6181,10 @@ def rag_ask(body: dict = Body(...), user=Depends(require_auth)):
         answer = r.json()["message"]["content"]
     except Exception as e:
         answer = None
-        error  = str(e)
+        # Le message d'une erreur réseau porte l'adresse et le port du modèle :
+        # il reste au journal serveur, le client reçoit une phrase fixe.
+        print(f"[rag_ask] le modèle n'a pas répondu : {e!r}", file=sys.stderr)
+        error  = "le modèle n'a pas répondu"
     else:
         error = None
 
@@ -6185,6 +6209,9 @@ class ClaimRequest(BaseModel):
 
 
 CLAIMABLE_TABLES = {"relation_candidates", "entity_websites"}
+# Le nom de table SQL vient de cette table constante, jamais de la valeur reçue.
+_TABLE_SQL = {"relation_candidates": "relation_candidates",
+              "entity_websites": "entity_websites"}
 
 
 def _reservation_active(ligne: dict) -> Optional[dict]:
@@ -6233,7 +6260,7 @@ def queue_claim(
     conn = get_db_rw()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        existing = row(conn, f"SELECT * FROM {req.table} WHERE id=?", (item_id,))
+        existing = row(conn, f"SELECT * FROM {_TABLE_SQL[req.table]} WHERE id=?", (item_id,))
         if not existing:
             raise HTTPException(404, "Item introuvable")
 
@@ -6243,7 +6270,7 @@ def queue_claim(
                            expire_dans_min=active["expire_dans_min"])
 
         conn.execute(
-            f"UPDATE {req.table} SET locked_by=?, locked_at=datetime('now') WHERE id=?",
+            f"UPDATE {_TABLE_SQL[req.table]} SET locked_by=?, locked_at=datetime('now') WHERE id=?",
             (user["email"], item_id),
         )
         _journal(conn, user, _entite_de(req.table, existing), req.table, "reservation",
@@ -6273,7 +6300,7 @@ def queue_unclaim(
     conn = get_db_rw()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        existing = row(conn, f"SELECT * FROM {table} WHERE id=?", (item_id,))
+        existing = row(conn, f"SELECT * FROM {_TABLE_SQL[table]} WHERE id=?", (item_id,))
         if not existing:
             raise HTTPException(404, "Item introuvable")
         active = _reservation_active(existing)
@@ -6284,7 +6311,7 @@ def queue_unclaim(
                 "par": active["par"], "le": active["le"],
                 "expire_dans_min": active["expire_dans_min"]})
         conn.execute(
-            f"UPDATE {table} SET locked_by=NULL, locked_at=NULL WHERE id=?",
+            f"UPDATE {_TABLE_SQL[table]} SET locked_by=NULL, locked_at=NULL WHERE id=?",
             (item_id,),
         )
         if existing.get("locked_by"):
