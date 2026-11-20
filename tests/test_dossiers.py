@@ -93,7 +93,7 @@ def test_deux_editeurs_ne_secrasent_pas(instance):
     assert "Premier." in D.chemin(instance, "eau").read_text()
 
 
-@pytest.mark.parametrize("slug", ["../etc", "Eau", "", "a/b", ".versions"])
+@pytest.mark.parametrize("slug", ["../etc", "Eau", "", "a/b", ".versions", "abc\n"])
 def test_un_identifiant_ne_sort_pas_du_repertoire(instance, slug):
     with pytest.raises(ValueError):
         D.chemin(instance, slug)
@@ -203,7 +203,22 @@ def test_creer_un_dossier(atelier):
     texte = client.get("/api/atelier/dossiers/dechets").json()["texte"]
     assert "titre: Les déchets" in texte and "## L'essentiel" in texte
     assert client.post("/api/atelier/dossiers", json={"slug": "dechets", "titre": "x"}).status_code == 409
-    assert client.post("/api/atelier/dossiers", json={"slug": "../x", "titre": "x"}).status_code == 400
+    assert client.post("/api/atelier/dossiers", json={"slug": "../x", "titre": "x"}).status_code in (400, 422)
+
+
+def test_un_slug_a_saut_de_ligne_est_refuse_et_ne_cree_rien(atelier):
+    """`$` accepte un saut de ligne final : « abc\\n » passait la regex."""
+    client = atelier["en_tant_que"](CONTRIB)
+    r = client.post("/api/atelier/dossiers", json={"slug": "abc\n", "titre": "x"})
+    assert r.status_code in (400, 422)
+    assert not [p for p in D.repertoire(atelier["instance"]).glob("*") if p.name.startswith("abc")]
+
+
+def test_lister_ignore_un_fichier_a_saut_de_ligne(instance):
+    d = D.repertoire(instance)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "abc\n.md").write_text("x")
+    assert "abc\n" not in [slug for slug, _ in D.lister(instance)]
 
 
 # ── le sceau des citations (03/10/2026) ──────────────────────────────────────

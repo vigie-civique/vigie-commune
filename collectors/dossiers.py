@@ -29,6 +29,7 @@ from pathlib import Path
 from .chemins import sous
 from .verdict import empreinte
 
+# `fullmatch` : le `$` de Python admet un saut de ligne final (« abc\n »).
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,60}$")
 STATUTS = ("brouillon", "a_developper", "publie")
 
@@ -44,7 +45,7 @@ def repertoire(racine: Path) -> Path:
 def chemin(racine: Path, slug: str) -> Path:
     """Le fichier d'un dossier. Le slug est validé ici : c'est un nom de fichier
     qui vient d'une URL, il ne doit jamais sortir du répertoire."""
-    if not SLUG.match(slug or ""):
+    if not SLUG.fullmatch(slug or ""):
         raise ValueError(f"Identifiant de dossier invalide : « {slug} » "
                          "(minuscules, chiffres et tirets).")
     return sous(repertoire(racine), f"{slug}.md")
@@ -54,7 +55,7 @@ def lister(racine: Path) -> list[tuple[str, Path]]:
     d = repertoire(racine)
     if not d.is_dir():
         return []
-    return sorted((p.stem, p) for p in d.glob("*.md") if SLUG.match(p.stem))
+    return sorted((p.stem, p) for p in d.glob("*.md") if SLUG.fullmatch(p.stem))
 
 
 def entete(texte: str) -> tuple[dict, str]:

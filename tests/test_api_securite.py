@@ -344,6 +344,54 @@ class TestModeleDistant:
         assert api._ia_configuree() is attendu
 
 
+class TestErreurModeleSansFuite:
+    """Un échec du modèle affiche un motif fixe : ni URL, ni clé, ni réponse."""
+
+    @staticmethod
+    def _http401():
+        import requests
+        rep = requests.Response()
+        rep.status_code = 401
+        return requests.HTTPError("401 https://interne.test/v1?key=SECRET", response=rep)
+
+    @pytest.mark.parametrize("fabrique, libelle", [
+        (lambda: __import__("requests").ConnectionError("x https://interne.test/v1?key=SECRET"),
+         "connexion au modèle impossible"),
+        (lambda: __import__("requests").Timeout("x https://interne.test/v1?key=SECRET"),
+         "délai dépassé"),
+        (lambda: __import__("requests").ConnectTimeout("x https://interne.test/v1?key=SECRET"),
+         "délai dépassé"),
+        (lambda: TestErreurModeleSansFuite._http401(), "statut 401"),
+        (lambda: KeyError("SECRET"), "réponse illisible"),
+        (lambda: __import__("requests").exceptions.MissingSchema(
+            "x interne.test?key=SECRET"), "réglage du modèle invalide"),
+        (lambda: __import__("requests").JSONDecodeError("SECRET", "doc", 0),
+         "réponse illisible"),
+        (lambda: __import__("requests").exceptions.ChunkedEncodingError("SECRET"),
+         "erreur inattendue"),
+        (lambda: RuntimeError("SECRET interne.test"), "erreur inattendue"),
+    ])
+    def test_le_detail_est_un_libelle_fixe(self, monkeypatch, capsys, fabrique, libelle):
+        import api
+        from fastapi import HTTPException
+        monkeypatch.setattr(api, "_IA_URL", "http://localhost:11434/v1")
+        monkeypatch.setattr(api, "_IA_MODELE", "un-modele")
+        monkeypatch.setattr(api, "_IA_PROTOCOLE", "openai")
+
+        def leve(*a, **kw):
+            raise fabrique()
+        monkeypatch.setattr(api, "_appel_openai", leve)
+        with pytest.raises(HTTPException) as exc:
+            api._appel_modele("question")
+        assert exc.value.status_code == 502
+        assert "SECRET" not in exc.value.detail
+        assert "interne.test" not in exc.value.detail
+        assert libelle in exc.value.detail
+        assert exc.value.__cause__ is None
+        journal = capsys.readouterr().err
+        assert "SECRET" not in journal and "interne.test" not in journal
+
+
 class TestDocumentsSurUnAutreHote:
     """Audit du 17/10/2026 (S6) : un document archivé n'est pas de confiance, et
     il s'ouvrait à l'adresse de l'atelier. Il s'ouvre sur `DOCS_URL`, par un lien
