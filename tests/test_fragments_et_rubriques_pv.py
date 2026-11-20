@@ -669,6 +669,110 @@ def test_le_snapshot_ecarte_l_entete_de_tampon_et_le_point_sans_vote():
         assert motif(titre, COMMUNE_NAME) is None, titre
 
 
+# ── Restes de #300 : « QUESTIONS DIVERSES - INFORMATIONS », numéro d'acte seul, débris
+# de guillemets. Titres réels servis le 20/11/2026 (Lasalle, Saillans, Brassac).
+
+QUESTIONS_DIVERSES_SUITE_INFORMATIONS = [
+    "QUESTIONS DIVERSES - INFORMATIONS", "Questions diverses – informations",
+    "9 - Questions diverses : informations",
+    # Les voisines que `TITRES_VIDES` (actualité) tient pour vides.
+    "Informations diverses", "7) POINT DIVERS", "Divers",
+]
+# Un objet derrière le mot « divers », ou « points » au pluriel : restent des actes
+# (« MATERIEL DIVERS », « FINANCIERES DIVERS », « DETTE DIVERS SANTE » sont servis).
+DIVERS_QUI_RESTENT = [
+    "MATERIEL DIVERS", "FINANCIERES DIVERS", "DETTE DIVERS SANTE", "Travaux divers voirie et réseaux",
+    "Informations diverses sur le PLU", "Questions diverses informations du maire sur le PLU",
+    "INFORMATIONS AUX CONSEILLERS MUNICIPAUX", "Divers frais de scolarité", "Point divers : vente du tracteur",
+]
+
+NUMEROS_D_ACTE_SEULS = [
+    "IN°111/2022", "IN°104/2022", "AN°102/2022", "AN°100/2022", "AN°97/2022", "A°113/2022",
+    "NN°106/2021", "NN°99/2021", "AC118/2021", "N°LI4/2021", "N° 43/2021.", "(N°43/2021)",
+]
+# Un numéro avec un mot, un espace avant le « N° », ou sans lettre : restent.
+NUMEROS_QUI_RESTENT = [
+    "DM N°1/2023", "Délibération N°43/2021", "N°43/2021 : subvention voirie", "43/2021", "12/2021",
+    "PLU 2021/2022", "BP 2019 CA 2019", "M14 2020 2021", "DM 1 BG 2014", "CR CM25052020 / 1",
+    "Rapport N°2", "N°43",
+    # Sigles budgétaires collés à l'OCR : le même objet que « DM N°1/2023 ».
+    "DM1/2023", "BP2021/2022", "CA2019/2020", "BS2021/2022", "M14/2020", "dm1/2023",
+]
+
+DEBRIS_DE_PONCTUATION = [
+    "AGRICULTURE »", "SPORTIVE »", "ASSOCIATIVE ET SPORTIVE »", "ECOLOGIQUE - AGRICULTURE »",
+    "0 (RESTES A", "Informatique » (A.GE.D.I)", "« CONTRE »", "« Pour »", "« ABSTENTION »",
+    '"DU CONSEN MUNICIPAL', "“OÙ CONSEL\"MUNICIPAL", "“TRANSFORMATION RO 225€ muse",
+]
+# Faux positifs écartés à la mesure ou gardés par construction : un guillemet collé
+# dans un mot, un titre de trois mots ou plus, des guillemets appariés, la `)` seule.
+PONCTUATION_QUI_RESTE = [
+    "SUBVENTION 2026 — VIVALT”’O", "Espace culturel « La Marquise", "« LINKY : NE PAS SE TROMPER DE CIBLE",
+    "« C.L.S.H. »", "BUDGET « COMMUNE »", "Séances « Cinécran »", "« Brassac Chante »", "Soirée « Cabaret »",
+    "« Pour une école ouverte »", "Contre la fermeture de la classe", "Pour une convention",
+    "Convention (annexe 2)", "COORDINATION)", "CCAS)", "GRAND, OLIVIER)", "PLU", "MATERNELLES",
+    "Présentation du RSU", "Convention avec l’École d’Art (EDA", "Contre", "Abstention",
+]
+
+
+@pytest.mark.parametrize("titre", QUESTIONS_DIVERSES_SUITE_INFORMATIONS)
+def test_la_suite_informations_est_un_point_questions_diverses(titre):
+    from collectors.pv_parsers import titre_questions_diverses
+    assert titre_questions_diverses(titre)
+
+
+@pytest.mark.parametrize("titre", DIVERS_QUI_RESTENT)
+def test_un_divers_qui_porte_un_objet_reste_un_acte(titre):
+    from collectors.pv_parsers import titre_questions_diverses
+    assert not titre_questions_diverses(titre)
+
+
+@pytest.mark.parametrize("titre", NUMEROS_D_ACTE_SEULS)
+def test_un_numero_d_acte_seul_est_reconnu(titre):
+    from collectors.pv_parsers import titre_numero_d_acte_seul
+    assert titre_numero_d_acte_seul(titre)
+
+
+@pytest.mark.parametrize("titre", NUMEROS_QUI_RESTENT + OBJETS_QUE_LE_GARDE_NE_TOUCHE_PAS)
+def test_un_titre_avec_des_mots_n_est_pas_un_numero_d_acte_seul(titre):
+    from collectors.pv_parsers import titre_numero_d_acte_seul
+    assert not titre_numero_d_acte_seul(titre)
+
+
+@pytest.mark.parametrize("titre", DEBRIS_DE_PONCTUATION)
+def test_un_debris_de_ponctuation_est_reconnu(titre):
+    from collectors.pv_parsers import titre_en_debris_de_ponctuation
+    assert titre_en_debris_de_ponctuation(titre)
+
+
+@pytest.mark.parametrize("titre", PONCTUATION_QUI_RESTE + OBJETS_QUE_LE_GARDE_NE_TOUCHE_PAS)
+def test_un_titre_court_sans_debris_de_ponctuation_reste(titre):
+    from collectors.pv_parsers import titre_en_debris_de_ponctuation
+    assert not titre_en_debris_de_ponctuation(titre)
+
+
+@pytest.mark.parametrize("titre", QUESTIONS_DIVERSES_SUITE_INFORMATIONS + NUMEROS_D_ACTE_SEULS
+                         + DEBRIS_DE_PONCTUATION)
+def test_le_decoupage_ne_recolle_pas_les_restes_de_titre(titre):
+    """Écartés au snapshot, jamais recollés à l'acte d'avant (comme #300)."""
+    from collectors.pv_parsers import _titre_plausible
+    assert _titre_plausible(titre)
+
+
+def test_le_snapshot_ecarte_les_restes_avec_leur_motif():
+    from collectors.config import COMMUNE_NAME
+    from scripts.snapshot.actes import motif_de_titre_douteux as motif
+
+    for titre in QUESTIONS_DIVERSES_SUITE_INFORMATIONS:
+        assert motif(titre, COMMUNE_NAME) == "titre_questions_diverses", titre
+    for titre in NUMEROS_D_ACTE_SEULS:
+        assert motif(titre, COMMUNE_NAME) == "titre_numero_d_acte_seul", titre
+    for titre in DEBRIS_DE_PONCTUATION:
+        assert motif(titre, COMMUNE_NAME) == "titre_debris_de_ponctuation", titre
+    for titre in DIVERS_QUI_RESTENT + NUMEROS_QUI_RESTENT + PONCTUATION_QUI_RESTE:
+        assert motif(titre, COMMUNE_NAME) is None, titre
+
+
 def test_le_snapshot_ecarte_chaque_famille_avec_son_motif():
     """Le nom de la commune se lit dans la configuration de l'instance, à la
     casse et aux accents près ; un titre court sans débris reste publié."""
@@ -708,10 +812,15 @@ def test_le_snapshot_compte_les_nouveaux_motifs_et_garde_le_renvoi_a_la_piece(ba
                                         "2021-04-14", "Texte E."),
         "titre_questions_diverses": _acte(base, "deliberation_cc", "Questions diverses",
                                           "2026-03-04", "Texte F."),
+        "titre_numero_d_acte_seul": _acte(base, "deliberation_cc", "IN°111/2022",
+                                          "2022-06-29", "Texte G."),
+        "titre_debris_de_ponctuation": _acte(base, "deliberation", "0 (RESTES A",
+                                             "2025-12-16", "Texte H."),
     }
     gardes = [_acte(base, "deliberation", t, "2024-10-01", "Texte.")
               for t in ("MATERNELLES", "PLU", "Parité", "mise à disposition d’un local – bail civil",
-                        "Questions diverses : vente du tracteur", "DEMANDE DE SUBVENTION AU DEPARTEMENT")]
+                        "Questions diverses : vente du tracteur", "DEMANDE DE SUBVENTION AU DEPARTEMENT",
+                        "DM N°1/2023", "Espace culturel « La Marquise")]
     flux = {
         motif: base.execute(
             "INSERT INTO financial_flows (type, year, amount, event_id, description, source,"

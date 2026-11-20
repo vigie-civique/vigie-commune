@@ -102,8 +102,11 @@ EXCLUS_FICHIERS = {"instance.json", "instance.js", "seed_local.json",
 # `dashboard/static/api/` : synthèses IA nominatives écrites par l'atelier
 # (api.py::SYNTHESES_DIR). Ignorées par .gitignore ; ce filet couvre un clone où
 # elles auraient été versionnées par erreur (`git ls-files` les listerait).
+# `docs/memoire/` : extrait de la mémoire de l'assistant remis au développeur
+# bénévole (moteur#312). Pas pour le public : hors du kit, comme hors du miroir
+# (exploitation#29), décision de Julien du 20/11/2026.
 EXCLUS_CHEMINS = ("public/static/kit/", ".claude/", "CLAUDE.md",
-                  "dashboard/static/api/")
+                  "dashboard/static/api/", "docs/memoire/")
 
 # ── Les seuls binaires admis ─────────────────────────────────────────────────
 # Décision explicite du 06/10/2026 (Julien) : les icônes du site public. Un
