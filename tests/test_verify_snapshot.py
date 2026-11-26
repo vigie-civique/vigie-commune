@@ -655,3 +655,109 @@ def test_un_titre_d_agenda_qui_nomme_quelqu_un_ne_refuse_rien(vs, tmp_path):
     rep = vs.Report()
     vs.check_titres_nominatifs(d, rep)
     assert not rep.errors and not rep.warnings
+
+
+# ── Une EI publiée doit être désignée par un marché, un flux ou un acte ──────
+
+REGLE_EI = "entreprise individuelle publiée sans marché, flux ni acte qui la désigne"
+
+
+def _ei_publiee(tmp_path, **paquet):
+    dossier = tmp_path / "ei"
+    (dossier / "entite").mkdir(parents=True)
+    (dossier / "entities.json").write_text(json.dumps({"entities": [
+        {"id": 1, "type": "business", "nature": "individuelle", "citations": 1}]}))
+    (dossier / "entite" / "1.json").write_text(json.dumps(
+        {"entity": {"id": 1}, "relations": [], "liens": [], "flows": [], "marches": [],
+         **paquet}))
+    return dossier
+
+
+def test_une_ei_publiee_sans_fait_est_une_erreur(vs, tmp_path):
+    rep = vs.Report()
+    vs.check_ei_sans_fait(_ei_publiee(tmp_path), rep)
+    assert list(rep.errors) == [REGLE_EI]
+
+
+def test_une_relation_ou_une_annonce_bodacc_ne_suffit_pas(vs, tmp_path):
+    rep = vs.Report()
+    vs.check_ei_sans_fait(_ei_publiee(
+        tmp_path, relations=[{"from_id": 1, "to_id": 2}],
+        liens=[{"id": 9, "type": "bodacc_radiation"}]), rep)
+    assert list(rep.errors) == [REGLE_EI]
+
+
+@pytest.mark.parametrize("paquet", [
+    {"flows": [{"id": 1, "to_id": 1, "etat": "paye"}]}, {"marches": [{"id": 1, "titulaire_id": 1}]},
+    {"liens": [{"id": 1, "type": "deliberation", "role": "cite", "title": "Subvention"}]}])
+def test_une_ei_publiee_avec_un_flux_un_marche_ou_un_acte_passe(vs, tmp_path, paquet):
+    rep = vs.Report()
+    vs.check_ei_sans_fait(_ei_publiee(tmp_path, **paquet), rep)
+    assert rep.errors == {}
+
+
+def test_un_flux_que_l_ei_verse_ne_suffit_pas(vs, tmp_path):
+    rep = vs.Report()
+    vs.check_ei_sans_fait(_ei_publiee(tmp_path, flows=[{"id": 1, "from_id": 1, "to_id": 99,
+                                                            "etat": "paye"}]), rep)
+    assert list(rep.errors) == [REGLE_EI]
+
+
+@pytest.mark.parametrize("lien", [
+    {"id": 1, "type": "sitadel", "role": "cite", "title": "Permis"},
+    {"id": 2, "type": "deliberation", "role": "demandeur", "title": "Permis"},
+    {"id": 3, "type": "deliberation", "role": "cite", "title": "Vente à un particulier"}])
+def test_un_acte_qui_ne_compte_pas_ne_suffit_pas(vs, tmp_path, lien):
+    rep = vs.Report()
+    vs.check_ei_sans_fait(_ei_publiee(tmp_path, liens=[lien]), rep)
+    assert REGLE_EI in rep.errors
+
+
+def test_une_fiche_d_ei_liee_a_un_titre_masque_est_une_erreur(vs, tmp_path):
+    """Même avec un marché : lue avec la fiche, le titre ré-identifierait."""
+    rep = vs.Report()
+    vs.check_ei_sans_fait(_ei_publiee(
+        tmp_path, marches=[{"id": 1, "titulaire_id": 1}],
+        liens=[{"id": 3, "type": "deliberation", "role": "cite",
+                "title": "Vente à un particulier"}]), rep)
+    assert list(rep.errors) == ["fiche d'entreprise individuelle liée à un acte au titre masqué "
+                                "ou à son rôle de demandeur ou de bénéficiaire"]
+
+
+def test_un_lien_beneficiaire_ne_fait_pas_un_fait(vs, tmp_path):
+    rep = vs.Report()
+    vs.check_ei_sans_fait(_ei_publiee(tmp_path, liens=[
+        {"id": 1, "type": "deliberation", "role": "bénéficiaire", "title": "Subventions"}]), rep)
+    assert REGLE_EI in rep.errors
+
+
+def test_une_ei_portant_un_flux_a_la_description_masquee_est_une_erreur(vs, tmp_path):
+    rep = vs.Report()
+    vs.check_ei_sans_fait(_ei_publiee(tmp_path, flows=[
+        {"id": 1, "to_id": 1, "description": "Aide à un particulier"}]), rep)
+    assert "fiche d'entreprise individuelle portant un flux à la description ou à l'acte masqué" in rep.errors
+
+
+def test_un_flux_d_ei_renvoyant_a_un_acte_au_titre_masque_est_une_erreur(vs, tmp_path):
+    dossier = _ei_publiee(tmp_path, flows=[{"id": 1, "to_id": 1, "acte_id": 7}])
+    (dossier / "events.json").write_text(json.dumps({"events": [
+        {"id": 7, "title": "Aide à un particulier"}]}))
+    rep = vs.Report()
+    vs.check_ei_sans_fait(dossier, rep)
+    assert "fiche d'entreprise individuelle portant un flux à la description ou à l'acte masqué" in rep.errors
+
+
+def test_un_marche_ne_compte_que_pour_son_titulaire(vs, tmp_path):
+    """Une EI acheteuse (ou sans rôle de titulaire) n'est pas désignée par le marché."""
+    rep = vs.Report()
+    vs.check_ei_sans_fait(_ei_publiee(tmp_path, marches=[{"id": 1, "titulaire_id": 99,
+                                                          "acheteur_id": 1}]), rep)
+    assert list(rep.errors) == [REGLE_EI]
+
+
+@pytest.mark.parametrize("etat", ["demande", "annule", None])
+def test_une_subvention_demandee_ou_annulee_ne_fait_pas_un_fait(vs, tmp_path, etat):
+    """Audit du 25/11/2026, H3 : une demande n'est pas un versement."""
+    rep = vs.Report()
+    vs.check_ei_sans_fait(_ei_publiee(tmp_path, flows=[{"id": 1, "to_id": 1, "etat": etat}]), rep)
+    assert list(rep.errors) == [REGLE_EI]

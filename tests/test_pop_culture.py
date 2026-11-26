@@ -180,7 +180,7 @@ def test_la_fiche_publiee_porte_la_protection_dans_l_ordre_du_pipeline(base, mon
                  (cur.lastrowid, json.dumps({"phone": "+33 1 99 00 13 00"})))
     pop_culture.import_mh(base, "05175", [_notice("PA00080648", "Chapelle Saint-Sébastien")])
     exclusions = defaultdict(Counter)
-    sortie = fiches.etape_fiches(base, {}, set(), set(), exclusions)
+    sortie = fiches.etape_fiches(base, {}, set(), set(), exclusions, [], redige=lambda t: t)
     fiche = next(e for e in sortie["public_entities"] if e["name"] == "Chapelle Saint-Sébastien")
     assert fiche["monuments_historiques"][0]["reference"] == "PA00080648"
     assert "+33 1 99 00 13 00" not in json.dumps(fiche)

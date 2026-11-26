@@ -139,12 +139,14 @@ class TestEtatDActivite:
 class TestNatureDEntreprise:
     """505 des 744 étaient individuelles, 112 ne font que détenir."""
 
-    def test_l_activite_immobiliere_l_emporte_sur_la_forme(self):
-        # Une entreprise individuelle qui loue des logements détient ;
-        # une SCI en NAF construction construit. C'est ce que la structure
-        # FAIT qui répond à la question, pas comment elle est montée.
+    def test_la_forme_individuelle_l_emporte_sur_l_activite_immobiliere(self):
+        # Une entreprise individuelle qui loue des logements reste une EI : c'est
+        # une personne physique (décision du 24/11/2026). Pour les autres formes,
+        # l'activité l'emporte : une SCI en NAF 68 détient, une société en NAF
+        # construction construit.
         from scripts.build_public_snapshot import nature_entreprise
-        assert nature_entreprise({"naf_code": "6820A", "legal_form_code": "1000"}) == "patrimoniale"
+        assert nature_entreprise({"naf_code": "6820A", "legal_form_code": "1000"}) == "individuelle"
+        assert nature_entreprise({"naf_code": "6820A", "legal_form_code": "6540"}) == "patrimoniale"
         assert nature_entreprise({"naf_code": "4120A", "legal_form_code": "6540"}) == "societe"
 
     def test_l_entreprise_individuelle_se_distingue(self):

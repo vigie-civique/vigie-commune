@@ -43,7 +43,7 @@ def test_la_precision_dun_lien_est_masquee():
 
 def _finances(base):
     exclusions = defaultdict(Counter)
-    return etape_finances(base, {}, set(), [], {}, set(), exclusions)
+    return etape_finances(base, {}, set(), [], {}, set(), exclusions, ei_ids=frozenset(), ei_nommees=frozenset())
 
 
 def test_marches_approbations_et_budget_vote_sortent_masques_avec_leur_confiance(base):

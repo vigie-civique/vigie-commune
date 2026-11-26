@@ -136,7 +136,9 @@ def construit(tmp_path_factory):
 
 def _verifier(travail: Path, out: Path) -> dict:
     env = {**os.environ, "VIGIE_RULES": str(travail / "moteur" / "db" / "ci.regles.json"),
-           "VIGIE_INSTANCE": str(ROOT / "tests" / "instance_test.json")}
+           "VIGIE_INSTANCE": str(ROOT / "tests" / "instance_test.json"),
+           # Le relevé des EI est écrit sous la racine du moteur copié.
+           "VIGIE_AUDITS": str(travail / "moteur" / "audits")}
     r = subprocess.run([sys.executable, str(ROOT / "scripts" / "verify_snapshot.py"),
                         str(out), "--json"], capture_output=True, text=True, env=env)
     return json.loads(r.stdout)

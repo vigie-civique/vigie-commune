@@ -525,6 +525,368 @@ def check_fiches_orphelines(base, rep):
             rep.error("fiche servie pour une entité non publiée", f"entite/{f.name}")
 
 
+# Copies du builder, gardées identiques par un essai
+# (`test_les_copies_du_controleur_sont_celles_du_builder`).
+ROLES_SANS_FAIT = ("demandeur", "bénéficiaire", "beneficiaire")
+# États d'un flux qui n'attestent aucun versement (`fiches.ETATS_SANS_VERSEMENT`).
+ETATS_SANS_VERSEMENT = ("demande", "annule")
+TYPES_ACTES_COLLECTIVITE = ("deliberation", "deliberation_cc", "decision_delegation",
+                            "decision_delegation_cc")
+DESIGNE_UNE_PERSONNE = re.compile(r"\b(un particulier|une particuli[eè]re|un agent|une agente"
+                                  r"|une personne)\b", re.I)
+
+
+def cle_de_nom(nom) -> str:
+    """Copie de `fiches.cle_de_nom` (essai `test_les_copies_du_controleur_sont_celles_du_builder`)."""
+    import hashlib
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(nom or "")).encode("ascii", "ignore").decode()
+    s = " ".join(s.upper().replace("-", " ").split())
+    return hashlib.sha256(s.encode()).hexdigest() if s else ""
+
+
+# Copies du builder (`fiches.FICHIERS_EMPREINTE`, `fiches.empreinte_snapshot`,
+# rétention), gardées identiques par un essai.
+FICHIERS_EMPREINTE = ("entities.json", "flows.json", "marches.json")
+RETENTION_RELEVES_JOURS = 30
+RELEVES_EI_MINIMUM = 20
+
+
+def empreinte_snapshot(base) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    for nom in FICHIERS_EMPREINTE:
+        fp = Path(base) / nom
+        h.update(nom.encode() + b"\0" + (fp.read_bytes() if fp.is_file() else b"") + b"\0")
+    return h.hexdigest()
+
+
+def lire_controle_ei(base, rep):
+    """Le relevé de CE snapshot dans `audits/controle_ei.json`, que le builder
+    écrit HORS du snapshot (`VIGIE_AUDITS` le déplace), sous l'empreinte du
+    contenu servi (`empreinte_snapshot`).
+
+    Un snapshot construit (il a son `stats.json`) sans relevé est une ERREUR : le
+    contrôle des noms d'EI et des payeurs ne peut pas se faire, et le laisser
+    passer en avertissement coupait le filet sans bruit (avis vigie-securite du
+    25/11/2026). Le message dit pourquoi : fichier absent, ou aucun relevé pour
+    cette empreinte (snapshot modifié après sa construction, construit par un
+    autre moteur, ou relevé purgé). Sans `stats.json` (répertoire monté à la
+    main), un avertissement et un contrôle dégradé (tout flux reçu compte, les
+    noms ne sont pas vérifiés)."""
+    chemin = Path(os.environ.get("VIGIE_AUDITS") or ROOT / "audits") / "controle_ei.json"
+    if not (base / "entities.json").is_file():
+        return None  # pas un snapshot de fiches : rien à contrôler
+    construit = (base / "stats.json").is_file()
+    regle = "relevé des entreprises individuelles absent pour ce snapshot"
+    cause = None
+    try:
+        releves = json.loads(chemin.read_text(encoding="utf-8")).get("releves")
+    except FileNotFoundError:
+        releves = None
+        cause = (f"{chemin} introuvable : construction sans l'étape `controle_ei`, ou "
+                 "relevé écrit ailleurs (VIGIE_AUDITS)")
+    except OSError as e:
+        releves = None
+        cause = f"{chemin} illisible ({e.__class__.__name__} : droits d'accès ?)"
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        releves = None
+        cause = f"{chemin} illisible (JSON invalide, ou racine qui n'est pas un objet)"
+    if isinstance(releves, dict):
+        empreinte = empreinte_snapshot(base)
+        controle = releves.get(empreinte)
+        if isinstance(controle, dict):
+            return controle
+        dates = sorted(str(v.get("construit_le") or "?") for v in releves.values()
+                       if isinstance(v, dict))
+        cause = (f"aucun relevé pour l'empreinte {empreinte[:12]}… parmi {len(dates)}"
+                 + (f" (construits du {dates[0]} au {dates[-1]})" if dates else "")
+                 + " : snapshot modifié après sa construction, construit par un autre "
+                 f"moteur, ou relevé purgé (rétention {RETENTION_RELEVES_JOURS} jours, "
+                 f"{RELEVES_EI_MINIMUM} au moins). Reconstruire l'aperçu.")
+    elif releves is None and cause is None:
+        cause = f"{chemin} : clé « releves » absente ou nulle"
+    elif releves is not None:
+        cause = f"{chemin} : clé « releves » mal formée (un objet est attendu)"
+    if construit:
+        rep.error(regle, cause)
+    else:
+        rep.warn("snapshot sans stats.json : contrôle des EI dégradé", cause)
+    return None
+
+
+# Un nom publié et l'identifiant qui dit QUI il désigne.
+NOMS_ET_RENVOIS = (("titulaire_nom", "titulaire_id"), ("from_name", "from_id"),
+                   ("to_name", "to_id"))
+
+
+# Copie de `fiches.MOT_RE` et `fiches.mots_normalises`.
+MOT_RE = r"\w+(?:['’]\w+)*\.?"
+
+
+def mots_normalises(texte):
+    import unicodedata
+    sortie = []
+    for m in re.finditer(MOT_RE, str(texte or "")):
+        brut = m.group(0)
+        mot = unicodedata.normalize("NFKD", brut.rstrip(".").replace("’", "'"))
+        mot = mot.encode("ascii", "ignore").decode().upper()
+        if not mot:
+            continue
+        initiale = brut.endswith(".") and len(mot) == 1
+        fin = m.end() if initiale or not brut.endswith(".") else m.end() - 1
+        sortie.append((m.start(), fin, mot, initiale))
+    return sortie
+
+
+#: Les textes libres où un nom d'EI écartée ne doit pas se lire, dans les objets
+#: d'ARGENT seulement (`est_argent`) : ce sont eux que le builder masque. Un acte,
+#: la description d'une compétence intercommunale ne passent pas par ce masque,
+#: et les y chercher refuserait une instance pour un texte que ce brief ne
+#: traite pas. `acteur_nom` (`actualite.json`) reprend un titulaire : il n'est lu
+#: que pour les EI que la commune ne désigne pas.
+TEXTES_LIBRES = ("objet", "lieu_exec", "description", "note_revue", "title", "titre")
+TEXTES_LIBRES_ECARTEES = TEXTES_LIBRES + ("acteur_nom",)
+# Copies de `fiches.MOTS_VIDES`, `fiches.SEPARATEUR_RE`, `fiches.jetons_lies`.
+MOTS_VIDES = frozenset({"A", "AU", "AUX", "D", "DE", "DES", "DU", "EN", "ET", "L", "LA",
+                        "LE", "LES", "PAR", "POUR", "SOUS", "SUR", "UN", "UNE",
+                        # Les mots de la mention qui remplace un nom.
+                        "ENTREPRISE", "INDIVIDUELLE"})
+SEPARATEUR_RE = r"[\s\-‐–]*"
+
+
+def jetons_lies(texte):
+    texte = str(texte or "")
+    sep = re.compile(SEPARATEUR_RE)
+    sortie, fin_prec, lie_possible = [], None, False
+    for d, f, mot, initiale in mots_normalises(texte):
+        lie = lie_possible and bool(sep.fullmatch(texte[fin_prec:d]))
+        if mot in MOTS_VIDES and not initiale:
+            lie_possible, fin_prec = lie, f
+            continue
+        sortie.append((d, f, mot, initiale, lie))
+        fin_prec, lie_possible = f, True
+    return sortie
+
+
+def fenetres(texte, longueur_max):
+    """Chaque suite de 2 à `longueur_max` mots pleins liés (`jetons_lies`, sans
+    initiale) du texte, dans l'ordre."""
+    jetons = jetons_lies(texte)
+    sortie = []
+    for i in range(len(jetons)):
+        if jetons[i][3]:
+            continue
+        suite = [jetons[i][2]]
+        for j in range(i + 1, min(i + longueur_max, len(jetons))):
+            if jetons[j][3] or not jetons[j][4]:
+                break
+            suite.append(jetons[j][2])
+            sortie.append(tuple(suite))
+    return sortie
+
+
+def _sha(texte):
+    import hashlib
+    return hashlib.sha256(texte.encode()).hexdigest()
+
+
+def groupes_de_mots(texte, publies=()):
+    """Les empreintes des groupes de 2 à 4 mots distincts rangés de chaque
+    fenêtre (ce que `fiches.empreintes_de_mots` met au relevé), sauf ceux qui
+    tiennent dans le nom d'une fiche publiée (`publies`, ensembles de mots)."""
+    sortie = set()
+    for f in fenetres(texte, 4):
+        mots = set(f)
+        if len(mots) >= 2 and not any(mots <= p for p in publies):
+            sortie.add(_sha(" ".join(sorted(mots))))
+    return sortie
+
+
+def suites_de_mots(texte, publies=()):
+    """Les empreintes des suites exactes de 2 à 6 mots (`fiches.empreinte_de_suite`)."""
+    return {_sha(" ".join(f)) for f in fenetres(texte, 6)
+            if not any(set(f) <= p for p in publies)}
+
+
+def check_noms_d_ei_ecartees(base, rep, controle):
+    """Aucun nom publié ne désigne une entreprise individuelle absente de
+    `entities.json` (brief `ei-flux-marches`, 24/11/2026). Le relevé du builder
+    porte les EMPREINTES des noms. Lu dans TOUS les fichiers JSON servis :
+    - `titulaire_nom`, `from_name`, `to_name` : un nom d'EI écartée dont
+      l'identifiant voisin ne renvoie pas à une fiche publiée est une fuite. Le
+      nom d'une EI C2 que la commune désigne (`ei_nommees`) n'est admis que sur
+      un marché de la commune (`portee == commune`) ou un flux qu'elle verse
+      (`to_name`, `sens == sortant`), décision de Julien du 25/11/2026 ;
+    - le texte libre (`TEXTES_LIBRES`) : aucune fenêtre de deux à quatre mots
+      n'y forme un groupe de mots d'un tel nom (`mots_ei`, `mots_ei_nommees`),
+      quel que soit l'ordre (avis vigie-securite du 25/11/2026, A3)."""
+    controle = controle or {}
+    empreintes = set(controle.get("ei_ecartees") or [])
+    nommees = set(controle.get("ei_nommees") or [])
+    mots = set(controle.get("mots_ei") or [])
+    mots_nommees = set(controle.get("mots_ei_nommees") or [])
+    suites = set(controle.get("suites_ei") or [])
+    suites_nommees = set(controle.get("suites_ei_nommees") or [])
+    if not (empreintes or nommees or mots or mots_nommees or suites or suites_nommees):
+        return
+    try:
+        fiches = json.loads((base / "entities.json").read_text()).get("entities") or []
+    except (OSError, json.JSONDecodeError, AttributeError):
+        fiches = []
+    publies = {e.get("id") for e in fiches}
+    # Les noms publiés : une suite de mots qui tient dans l'un d'eux n'est pas
+    # une fuite (le builder ne la masque pas, `argent.masquer_noms`).
+    # Sauf les noms des exploitants d'une EI sans fiche (`exploitants_ecartes`) :
+    # l'élu « Jean DUPONT » n'épargne pas le nom de son EI écartée (avis
+    # vigie-dpo du 25/11/2026), même règle que `fiches.mots_des_fiches_publiees`.
+    exploitants = set(controle.get("exploitants_ecartes") or [])
+    # Sur SA ligne, une extrémité publiée épargne son nom, exploitant compris
+    # (`argent.avec_extremites`, tour 6 de la relecture).
+    mots_par_id = {e.get("id"): tuple(
+        m for c in ("name", "short_name")
+        for m in [frozenset(x[2] for x in jetons_lies(e.get(c)) if not x[3])] if len(m) >= 2)
+        for e in fiches}
+    EXTREMITES = ("from_id", "to_id", "titulaire_id", "acheteur_id", "acteur_id")
+    noms_publies = tuple({m for e in fiches for c in ("name", "short_name")
+                          for m in [frozenset(x[2] for x in jetons_lies(e.get(c)) if not x[3])]
+                          if len(m) >= 2 and _sha(" ".join(sorted(m))) not in exploitants})
+
+    def est_argent(objet):
+        # Flux, marché, leurs entrées d'actualité, et l'acte `marché_public`
+        # (avis de marché, dont le titre est l'objet : avis vigie-dpo).
+        return ("amount" in objet or "titulaire_nom" in objet
+                or objet.get("genre") in ("marché", "argent")
+                or objet.get("type") == "marché_public")
+
+    def admis(objet, nom):
+        return ((nom == "titulaire_nom" and objet.get("portee") == "commune")
+                or (nom == "to_name" and objet.get("sens") == "sortant"))
+
+    def parcourir(objet, fichier):
+        if isinstance(objet, dict):
+            for nom, renvoi in NOMS_ET_RENVOIS:
+                valeur = objet.get(nom)
+                if not isinstance(valeur, str) or objet.get(renvoi) in publies:
+                    continue
+                cle = cle_de_nom(valeur)
+                if cle in empreintes or (cle in nommees and not admis(objet, nom)):
+                    rep.error("nom d'une entreprise individuelle non publiée",
+                              f"{fichier} · {nom}")
+            for champ in TEXTES_LIBRES_ECARTEES if est_argent(objet) else ():
+                valeur = objet.get(champ)
+                if not isinstance(valeur, str):
+                    continue
+                # L'entrée d'actualité d'un FLUX : son titre et sa note sont la
+                # description et la note du flux, déjà contrôlées dans flows.json
+                # avec ses DEUX extrémités. L'entrée n'en porte qu'une
+                # (`acteur_id`) : les relire ici refuserait à tort « Don de Marc
+                # Duprat », épargné sur sa ligne par `from_id` (avis vigie-securite,
+                # tour 6).
+                if objet.get("genre") == "argent" and champ in ("titre", "note_revue"):
+                    continue
+                # `acteur_nom` d'une fiche publiée la désigne, elle (avis
+                # vigie-securite du 25/11/2026, a).
+                if champ == "acteur_nom" and objet.get("acteur_id") in publies:
+                    continue
+                epargnes = noms_publies + tuple(
+                    m for c in EXTREMITES if objet.get(c) in publies
+                    for m in mots_par_id.get(objet.get(c), ()))
+                groupes = groupes_de_mots(valeur, epargnes)
+                suites_t = suites_de_mots(valeur, epargnes)
+                if (groupes & mots or suites_t & suites
+                        or (champ in TEXTES_LIBRES
+                            and (groupes & mots_nommees or suites_t & suites_nommees))):
+                    rep.error("nom d'une entreprise individuelle non publiée dans un texte libre",
+                              f"{fichier} · {champ}")
+            for v in objet.values():
+                parcourir(v, fichier)
+        elif isinstance(objet, list):
+            for v in objet:
+                parcourir(v, fichier)
+
+    for fp in sorted(base.rglob("*.json")):
+        try:
+            donnees = json.loads(fp.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        parcourir(donnees, str(fp.relative_to(base)))
+
+
+def check_ei_sans_fait(base, rep, controle=None):
+    """Une entreprise individuelle publiée doit être désignée par un fait publié
+    que `SECURITY.md` nomme : un marché, un paiement ou une subvention publics
+    VERS elle, ou un acte de la collectivité qui la cite par son nom. Ni une
+    relation, ni une annonce BODACC, ni un registre (`sitadel`, `gpu`…), ni le
+    rôle `demandeur`, ni un acte dont le titre publié désigne quelqu'un par son
+    rôle ne comptent. Décision du 24/11/2026.
+
+    Lu dans ce qui est SERVI : le paquet `entite/<id>.json` de chaque fiche
+    (`flows`, `marches`, `liens`). Filet indépendant de la requête
+    `ids_retenus_par_un_fait`, qui lit la base et non ce qui sort. Il vérifie
+    aussi qu'aucun paquet d'EI ne liste un acte au titre masqué ou au rôle
+    `demandeur`, qui ré-identifierait la personne.
+
+    Un flux ne compte que s'il vient d'une PARTIE PUBLIQUE : la liste est dans
+    le relevé du builder (`controle`, cf. `lire_controle_ei`), le snapshot ne
+    portant pas la forme juridique. Sans relevé (mode dégradé, averti), tout
+    flux dont l'EI est destinataire compte. Un flux demandé ou annulé (`etat`) ne
+    compte pas. Il lit `nature == individuelle` :
+    forme 1000 quelle que soit l'activité, ou forme inconnue présumée EI
+    (`nature_entreprise`)."""
+    publiques = (set((controle or {}).get("parties_publiques") or [])
+                 if controle is not None else None)
+    fp = base / "entities.json"
+    dossier = base / "entite"
+    if not fp.is_file() or not dossier.is_dir():
+        return
+    try:
+        entities = json.loads(fp.read_text()).get("entities") or []
+    except json.JSONDecodeError:
+        return  # déjà signalé par check_file
+    try:
+        evenements = json.loads((base / "events.json").read_text()).get("events") or []
+    except (OSError, json.JSONDecodeError):
+        evenements = []
+    titres = {ev.get("id"): ev.get("title") or "" for ev in evenements}
+    for e in entities:
+        if e.get("nature") != "individuelle":
+            continue
+        paquet = dossier / f"{e.get('id')}.json"
+        try:
+            donnees = json.loads(paquet.read_text())
+        except (OSError, json.JSONDecodeError):
+            donnees = {}
+        liens = donnees.get("liens") or []
+        for a in liens:
+            if (a.get("role") in ROLES_SANS_FAIT
+                    or DESIGNE_UNE_PERSONNE.search(a.get("title") or "")):
+                rep.error("fiche d'entreprise individuelle liée à un acte au titre masqué "
+                          "ou à son rôle de demandeur ou de bénéficiaire", f"entite/{e.get('id')}.json")
+                break
+        for f in donnees.get("flows") or []:
+            if (DESIGNE_UNE_PERSONNE.search(f.get("description") or "")
+                    or DESIGNE_UNE_PERSONNE.search(titres.get(f.get("acte_id"), ""))):
+                rep.error("fiche d'entreprise individuelle portant un flux à la description "
+                          "ou à l'acte masqué", f"entite/{e.get('id')}.json")
+                break
+        # Une subvention demandée ou annulée n'est pas un versement : elle ne
+        # désigne pas l'EI (audit du 25/11/2026, H3). Un flux sans état ne compte
+        # pas non plus : le builder en pose toujours un.
+        faits = (sum(1 for f in donnees.get("flows") or [] if f.get("to_id") == e.get("id")
+                     and f.get("etat") not in (*ETATS_SANS_VERSEMENT, None)
+                     and (publiques is None or f.get("from_id") in publiques))
+                 + sum(1 for m in donnees.get("marches") or []
+                       if m.get("titulaire_id") == e.get("id"))
+                 + sum(1 for a in liens
+                       if a.get("type") in TYPES_ACTES_COLLECTIVITE
+                       and a.get("role") not in ROLES_SANS_FAIT
+                       and not DESIGNE_UNE_PERSONNE.search(a.get("title") or "")))
+        if not faits:
+            rep.error("entreprise individuelle publiée sans marché, flux ni acte qui la désigne",
+                      f"entite/{e.get('id')}.json")
+
+
 # Champs dont la valeur est un identifiant d'entité, et qui PROMETTENT donc une
 # fiche `/entite/<id>`. La liste est explicite plutôt que déduite d'un suffixe :
 # `id`, `from_id` ou `event_id` désignent autre chose, et un contrôle qui se
@@ -1161,6 +1523,9 @@ def check_dir(base, rep):
     check_perimetre(base, rep)
     check_statut(base, rep)
     check_fiches_orphelines(base, rep)
+    controle_ei = lire_controle_ei(base, rep)
+    check_ei_sans_fait(base, rep, controle_ei)
+    check_noms_d_ei_ecartees(base, rep, controle_ei)
     check_renvois_sortants(base, rep)
     check_sens_flux(base, rep)
     check_renvoi_des_flux(base, rep)

@@ -1,5 +1,5 @@
 <script>
-  import { estAttribue } from '#lib/marches.js'
+  import { estAttribue, nomTitulaire } from '#lib/marches.js'
   import { COMMUNE_DE, EPCI, EPCI_COURT, SITE_NOM } from '#lib/instance.js'
   import { euros } from '#lib/data.js'
   import { enumerer, pluriel } from '#lib/couverture.js'
@@ -260,7 +260,7 @@
             </div>
             <div class="mbar"><span class="mfill" style="width:{100 * (m.montant || 0) / attribMax}%"></span></div>
             <div class="mmeta">
-              <span class="mtit">{#if m.titulaire_id}<a href="/entite/{m.titulaire_id}">{m.titulaire_nom}</a>{:else}{m.titulaire_nom}{/if}</span>
+              <span class="mtit">{#if m.titulaire_id}<a href="/entite/{m.titulaire_id}">{m.titulaire_nom}</a>{:else}{nomTitulaire(m)}{/if}</span>
               {#if m.nature}<span class="chip">{m.nature}</span>{/if}
               {#if m.procedure}<span class="chip light">{m.procedure}</span>{/if}
               <span class="macheteur">{m.acheteur_nom}</span>

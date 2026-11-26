@@ -11,7 +11,7 @@ from __future__ import annotations
 from scripts.snapshot.actes import (etape_actes, etape_cles_actes, etape_extraits,
                                     etape_liens_actes)
 from scripts.snapshot.actualite import etape_actualite
-from scripts.snapshot.argent import etape_finances, etape_flux
+from scripts.snapshot.argent import etape_avis_de_marche, etape_finances, etape_flux
 from scripts.snapshot.compteurs import (etape_bilan_revue, etape_compteurs, etape_revue_interne,
                                         etape_stats)
 from scripts.snapshot.conflits import etape_conflits
@@ -24,8 +24,8 @@ from scripts.snapshot.ecritures import (COUCHES, etape_ecrire_actes, etape_ecrir
                                         etape_ecrire_couches, etape_ecrire_finances,
                                         etape_ecrire_flux)
 from scripts.snapshot.en_clair import etape_graphe
-from scripts.snapshot.fiches import (etape_citations, etape_couches, etape_fiches,
-                                     etape_fiches_acteurs)
+from scripts.snapshot.fiches import (etape_citations, etape_controle_ei, etape_couches,
+                                     etape_fiches, etape_fiches_acteurs)
 from scripts.snapshot.manifeste import NOM as MANIFESTE
 from scripts.snapshot.manifeste import etape_manifeste, etape_retirer_manifeste
 from scripts.snapshot.perimetre import etape_perimetre
@@ -55,27 +55,35 @@ ETAPES: list[Etape] = [
           lit=("conn", "relations_ecartees"),
           produit=("civic_person_ids", "beneficiaires", "public_person_ids",
                    "redige", "redactions", "noms_publics", "ids_conseil_communautaire")),
-    Etape("fiches", etape_fiches,
-          lit=("conn", "revue", "public_person_ids", "ids_conseil_communautaire"),
-          complete=("exclusions",),
-          produit=("entity_rows", "ei_ids", "public_entities", "entity_exclusions",
-                   "ecartees_du_perimetre", "location_quality", "public_ids")),
-    Etape("relations", etape_relations,
-          lit=("conn", "revue", "public_ids", "civic_person_ids", "beneficiaires", "ei_ids",
-               "noms_publics"),
-          complete=("exclusions",),
-          produit=("relation_rows", "public_relations", "relation_exclusions")),
+    # AVANT les fiches : une EI n'est nommée que si un fait PUBLIÉ la désigne,
+    # donc les actes qui sortent doivent être connus (`ids_retenus_par_un_fait`).
     Etape("actes", etape_actes,
           lit=("conn", "revue", "noms_publics", "redige"),
           complete=("exclusions",),
           produit=("event_rows", "public_events", "event_exclusions",
                    "textes_extraits", "masquages", "pieces_des_fragments",
                    "actes_de_rubrique")),
+    Etape("fiches", etape_fiches,
+          lit=("conn", "revue", "public_person_ids", "ids_conseil_communautaire",
+               "public_events", "actes_de_rubrique", "redige"),
+          complete=("exclusions",),
+          produit=("entity_rows", "ei_ids", "ei_nommees", "public_entities", "entity_exclusions",
+                   "ecartees_du_perimetre", "location_quality", "public_ids")),
+    # Juste après les fiches : le titre d'un avis de marché perd le nom d'une EI
+    # non publiée avant que liens, clés, actualité ou recherche ne le lisent.
+    Etape("avis_de_marche", etape_avis_de_marche,
+          lit=("conn", "revue", "entity_rows", "ei_ids", "ei_nommees", "public_ids"),
+          complete=("public_events",)),
+    Etape("relations", etape_relations,
+          lit=("conn", "revue", "public_ids", "civic_person_ids", "beneficiaires", "ei_ids",
+               "noms_publics"),
+          complete=("exclusions",),
+          produit=("relation_rows", "public_relations", "relation_exclusions")),
     # Après les liens, la portée : un acte sans type d'assemblée connu a besoin
     # de ses acteurs pour dire de qui il parle. L'étape l'écrit dans chaque
     # acte publié.
     Etape("liens_actes", etape_liens_actes,
-          lit=("conn", "public_ids", "public_entities"),
+          lit=("conn", "public_ids", "public_entities", "ei_ids"),
           complete=("public_events", "exclusions"),
           produit=("public_links", "perimetre_par_entite")),
     # La clé datée de chaque acte publié, son ancre, et l'index que le graphe
@@ -86,7 +94,7 @@ ETAPES: list[Etape] = [
     Etape("flux", etape_flux,
           lit=("conn", "revue", "entity_rows", "public_person_ids", "public_ids",
                "ecartees_du_perimetre", "redige", "public_events",
-               "pieces_des_fragments", "actes_de_rubrique"),
+               "pieces_des_fragments", "actes_de_rubrique", "ei_ids", "ei_nommees"),
           complete=("exclusions",),
           produit=("flow_rows", "public_flows", "flows_par_etat")),
     # AVANT `citations` : les couches copient les fiches telles qu'elles sont.
@@ -94,7 +102,7 @@ ETAPES: list[Etape] = [
           lit=("public_entities",), produit=("public_layers",)),
     Etape("finances", etape_finances,
           lit=("conn", "revue", "public_ids", "public_entities", "perimetre_par_entite",
-               "noms_publics"),
+               "noms_publics", "ei_ids", "ei_nommees"),
           complete=("exclusions",),
           produit=("avant_fusion_data", "budget_annuel", "budget_annexe", "ofgl_data",
                    "budget_vote", "dvf_data", "marches_data", "approbations_data")),
@@ -154,7 +162,7 @@ ETAPES: list[Etape] = [
           lit=("conn", "out", "public_ids", "revue"), produit=("elus",),
           ecrit=("elus_rne.json",)),
     Etape("urbanisme", etape_urbanisme,
-          lit=("conn", "out", "public_ids"),
+          lit=("conn", "out", "public_ids", "ei_ids"),
           produit=("urbanisme_public", "adresses_retirees"), ecrit=("urbanisme.json",)),
     Etape("actualite", etape_actualite,
           lit=("out", "stats", "marches_data", "public_events", "public_flows",
@@ -189,7 +197,7 @@ ETAPES: list[Etape] = [
           lit=("conn", "out"), ecrit=("transparence.json",)),
     Etape("conflits", etape_conflits,
           lit=("conn", "out", "public_ids", "public_relations", "public_flows",
-               "public_events", "redige"),
+               "public_events", "redige", "ei_ids"),
           produit=("conflits",), ecrit=("conflits.json",)),
     Etape("fiches_acteurs", etape_fiches_acteurs,
           lit=("conn", "out", "public_entities", "public_relations", "public_events",
@@ -217,6 +225,13 @@ ETAPES: list[Etape] = [
     Etape("revue_interne", etape_revue_interne,
           lit=("graphe", "stats", "entity_exclusions", "relation_exclusions",
                "event_exclusions")),
+    # Hors du snapshot aussi : `audits/controle_ei.json`, que `verify_snapshot`
+    # lit pour contrôler les entreprises individuelles (parties publiques, et
+    # empreintes SHA-256 des noms d'EI écartées : pseudonymisées, donc encore
+    # des données personnelles, mais aucun nom en clair).
+    Etape("controle_ei", etape_controle_ei,
+          lit=("conn", "out", "revue", "stats", "entity_rows", "ei_ids", "public_ids",
+               "ei_nommees")),
     Etape("dictionnaire", etape_dictionnaire,
           lit=("out", "stats", "location_quality", "conn", "public_ids"),
           ecrit=("README.md",)),

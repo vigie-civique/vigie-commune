@@ -3,6 +3,7 @@
   import { onMount } from 'svelte'
   import { TYPE_LABELS, euros } from '#lib/data.js'
   import { enumerer } from '#lib/couverture.js'
+  import { nomTitulaire } from '#lib/marches.js'
   import { poserFond } from '#lib/carte/fond.js'
 
   // Fiche acteur. Jusqu'au 26/07/2026 elle n'affichait que nom, type, fiabilité
@@ -500,7 +501,7 @@
               {#each marches as m}
                 <tr>
                   <td>{m.date_notif || '-'}</td>
-                  <td>{m.objet}<span class="fsens">{m.titulaire_id === id ? `pour ${m.acheteur_nom}` : `titulaire : ${m.titulaire_nom || '-'}`}</span></td>
+                  <td>{m.objet}<span class="fsens">{m.titulaire_id === id ? `pour ${m.acheteur_nom}` : `titulaire : ${nomTitulaire(m) || '-'}`}</span></td>
                   <td class="r">{m.montant ? euros(m.montant) : '-'}</td>
                 </tr>
               {/each}

@@ -79,6 +79,81 @@ def pieges() -> list[str]:
     return out
 
 
+#: Les cinq entreprises individuelles de la base, et ce que la règle de
+#: publication doit en faire (brief `ei-flux-marches`, 24/11/2026).
+EI_FICTIVES = ("retenue_par_un_marche", "retenue_par_une_subvention", "sans_fait",
+               "hors_perimetre", "sans_forme_juridique")
+
+
+def ajouter_entreprises_individuelles(conn, r, mairie, asso, exploitant, noms_pris,
+                                      sirens_pris) -> dict:
+    """Cinq EI, une par cas de la règle (`EI_FICTIVES`), et la mairie en partie
+    publique (forme 7210, commune) pour que ses versements comptent comme fait.
+    Tirées APRÈS tout le reste : le tirage d'avant reste le même.
+
+    - une retenue par un marché de la mairie ;
+    - une retenue par une subvention de la mairie ;
+    - une sans fait : elle paie un loyer à la mairie (flux délié, gardé), une
+      association lui verse une aide (flux écarté) ;
+    - une d'une commune voisine (C2), titulaire d'un marché et subventionnée ;
+    - une SANS forme juridique, au nom d'une personne déjà tirée (`exploitant`),
+      reliée à elle par un lien `dirigeant`, sans autre fait qu'un loyer à la
+      mairie. Aucune personne ajoutée : `--taille` reste le nombre de personnes.
+    Rend {cas: id}."""
+    # Celui qu'écrivent les marchés de la mairie, au gabarit fictif `999…` ; pas de
+    # ligne SIREN pour elle.
+    siren_mairie = f"999{1:06d}"
+    conn.execute("INSERT INTO businesses (entity_id, legal_form_code) VALUES (?, '7210')",
+                 (mairie,))
+    ids = {}
+    for cas in EI_FICTIVES:
+        if cas == "sans_forme_juridique":
+            nom_ei = conn.execute("SELECT name FROM entities WHERE id=?",
+                                  (exploitant,)).fetchone()[0]
+        else:
+            nom, prenom = tirer_unique(lambda: (nom_famille(r), r.choice(PRENOMS)), noms_pris)
+            nom_ei = f"{prenom} {nom.upper()}"
+        commune, perimetre = (VOISINES[0], "C2") if cas == "hors_perimetre" else (COMMUNE, "C1")
+        eid = conn.execute(
+            "INSERT INTO entities (type,name,commune,perimetre,confidence,origine,created_at,"
+            "updated_at) VALUES ('business',?,?,?,'verified','institutionnel','2026-01-01',"
+            "'2026-01-01')", (nom_ei, commune, perimetre)).lastrowid
+        siren = tirer_unique(lambda: f"999{r.randint(0, 999999):06d}", sirens_pris)
+        forme = None if cas == "sans_forme_juridique" else "1000"
+        conn.execute("INSERT INTO businesses (entity_id, siren, legal_form_code, status)"
+                     " VALUES (?,?,?,'A')", (eid, siren, forme))
+        ids[cas] = eid
+        if cas == "sans_forme_juridique":
+            conn.execute("INSERT INTO relations (from_id,to_id,relation_type,source,confidence)"
+                         " VALUES (?,?,'dirigeant','sirene','verified')", (exploitant, eid))
+
+    def flux(de, vers, type_, montant):
+        conn.execute("INSERT INTO financial_flows (type,year,amount,from_id,to_id,description,"
+                     "source,origine) VALUES (?,2025,?,?,?,?,'CM','verbatim')",
+                     (type_, montant, de, vers, f"Flux d'épreuve EI {type_}"))
+
+    def marche(titulaire, montant):
+        nom = conn.execute("SELECT name FROM entities WHERE id=?", (titulaire,)).fetchone()[0]
+        siren = conn.execute("SELECT siren FROM businesses WHERE entity_id=?",
+                             (titulaire,)).fetchone()[0]
+        conn.execute(
+            "INSERT INTO marches_publics (acheteur_id,acheteur_siren,acheteur_nom,titulaire_id,"
+            "titulaire_siren,titulaire_nom,objet,montant,montant_base,date_notif,source,raw_id,"
+            "origine) VALUES (?,?,?,?,?,?,?,?,'HT','2025-06-01','synthetique',?,"
+            "'institutionnel')",
+            (mairie, siren_mairie, f"Mairie de {COMMUNE}", titulaire, siren, nom,
+             f"Prestation d'épreuve EI {titulaire}", montant, f"synth-ei-{titulaire}"))
+
+    marche(ids["retenue_par_un_marche"], 12_000)
+    flux(mairie, ids["retenue_par_une_subvention"], "subvention", 1_500)
+    flux(ids["sans_fait"], mairie, "bail", 600)
+    flux(asso, ids["sans_fait"], "subvention", 300)
+    marche(ids["hors_perimetre"], 8_000)
+    flux(mairie, ids["hors_perimetre"], "subvention", 900)
+    flux(ids["sans_forme_juridique"], mairie, "bail", 450)
+    return ids
+
+
 def generer(db: Path, graine: int, taille: int) -> dict[str, int]:
     r = random.Random(graine)
     conn = sqlite3.connect(str(db))
@@ -172,6 +247,9 @@ def generer(db: Path, graine: int, taille: int) -> dict[str, int]:
             (mairie, f"Mairie de {COMMUNE}", eid, siren, nom,
              f"Travaux d'épreuve n° {i + 1}", r.randint(2000, 150000),
              (debut + timedelta(days=r.randint(0, 2000))).isoformat(), f"synth-{graine}-{i}"))
+
+    ajouter_entreprises_individuelles(conn, r, mairie, assos[0], personnes[-1], noms_pris,
+                                      sirens_pris)
 
     conn.commit()
     bilan = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]

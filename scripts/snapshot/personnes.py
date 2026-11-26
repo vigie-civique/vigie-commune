@@ -81,6 +81,12 @@ def etape_personnes_publiques(conn, relations_ecartees) -> dict:
     # personne ; à l'inverse, le gérant d'une société sans lien avec la
     # commune reste privé.
     beneficiaires = beneficiaires_argent_public(conn)
+    # Une entreprise individuelle ne rend pas son exploitant publiable : forme
+    # 1000 (requête ci-dessous) ou forme inconnue présumée EI (`ei_presumees`,
+    # même nom aux deux bouts d'un lien), retirée des bénéficiaires.
+    from scripts.snapshot.fiches import ei_presumees
+    import json
+    beneficiaires = set(beneficiaires) - ei_presumees(conn, json.loads(relations_ecartees))
     eco_types = sorted(RULES["relations"].get("relevance_allowlist", []))
     pertinent_person_ids: set[int] = set()
     if eco_types and beneficiaires:
@@ -97,9 +103,9 @@ def etape_personnes_publiques(conn, relations_ecartees) -> dict:
                   AND r.relation_type IN ({marks})
                   AND (r.from_id IN ({benes}) OR r.to_id IN ({benes}))
                   AND r.from_id NOT IN (SELECT entity_id FROM businesses
-                                         WHERE legal_form_code = '1000')
+                                         WHERE TRIM(legal_form_code) GLOB '1[0-9][0-9][0-9]')
                   AND r.to_id   NOT IN (SELECT entity_id FROM businesses
-                                         WHERE legal_form_code = '1000')
+                                         WHERE TRIM(legal_form_code) GLOB '1[0-9][0-9][0-9]')
                   {pas_ecartee}
             """, [
                 *sorted(RULES["confidence"]["public"]),

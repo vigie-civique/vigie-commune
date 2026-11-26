@@ -156,7 +156,7 @@ def test_les_personnes_morales_par_acte_et_jamais_une_personne(base):
     societe = base.execute("INSERT INTO entities(type, name) VALUES('business', 'Régie SA')").lastrowid
     personne = base.execute("INSERT INTO entities(type, name) VALUES('person', 'Une élue')").lastrowid
     sans_siren = base.execute("INSERT INTO entities(type, name) VALUES('association', 'Club')").lastrowid
-    base.execute("INSERT INTO businesses(entity_id, siren) VALUES(?, '999000001')", (societe,))
+    base.execute("INSERT INTO businesses(entity_id, siren, legal_form_code) VALUES(?, '999000001', '5710')", (societe,))
     evts = [{"id": 1, "cle": "c-2021-41", "ancre": "c-2021-41"},
             {"id": 2, "cle": "c-2021-03-04-tabc", "ancre": "a2", "cle_faible": True}]
     liens = [{"event_id": 1, "entity_id": societe}, {"event_id": 1, "entity_id": personne},

@@ -40,7 +40,8 @@ def _decor(base, entite, confiance_du_lien):
 
 
 def _exporter(base, ids, relations, flux, actes=()):
-    return export_conflits(base, set(ids), relations, flux, list(actes), lambda t: t)
+    return export_conflits(base, set(ids), relations, flux, list(actes), lambda t: t,
+                           ei_ids=set())
 
 
 def test_une_piste_ne_fait_pas_une_situation(base, entite):

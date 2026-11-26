@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from '#lib/donnees.server.js'
 import { etatSource, extraitsMarches } from '#lib/couverture.js'
+import { cleTitulaire, estAttribue } from '#lib/marches.js'
 
 export const prerender = true
 
@@ -24,12 +25,12 @@ export function load() {
   // laissé au lecteur. Un observatoire qui aligne 78 lignes sans jamais dire
   // ce qu'on y voit reste un portail ; c'est la différence entre une base
   // consultable et quelque chose qu'on cite en conseil municipal.
-  const attribues = marches.filter((m) => m.titulaire_nom && m.montant)
+  const attribues = marches.filter(estAttribue)
   const total = attribues.reduce((s, m) => s + m.montant, 0)
 
   const parTitulaire = new Map()
   for (const m of attribues) {
-    parTitulaire.set(m.titulaire_nom, (parTitulaire.get(m.titulaire_nom) || 0) + m.montant)
+    parTitulaire.set(cleTitulaire(m), (parTitulaire.get(cleTitulaire(m)) || 0) + m.montant)
   }
   const classement = [...parTitulaire.values()].sort((a, b) => b - a)
 
@@ -42,7 +43,7 @@ export function load() {
 
   const recurrents = [...new Map(
     attribues.reduce((acc, m) => {
-      acc.set(m.titulaire_nom, (acc.get(m.titulaire_nom) || 0) + 1)
+      acc.set(cleTitulaire(m), (acc.get(cleTitulaire(m)) || 0) + 1)
       return acc
     }, new Map())
   ).values()].filter((n) => n > 1).length

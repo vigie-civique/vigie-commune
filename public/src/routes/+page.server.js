@@ -158,10 +158,11 @@ export function load() {
       } else cesseesCommune++
     }
   }
-  // Ce qui produit, distingué de ce qui détient. 505 des « entreprises » de
-  // Lasalle sont individuelles et 112 ont pour activité déclarée la gestion
-  // immobilière : le chiffre unique décrivait un tissu économique qui n'existe
-  // pas. Cf. `nature_entreprise` dans le constructeur de snapshot.
+  // Ce qui produit, distingué de ce qui détient : les entreprises de patrimoine
+  // (activité immobilière déclarée) ne font pas le tissu économique,
+  // et le chiffre unique le faisait croire. Les entreprises individuelles ne sont
+  // publiées que si un fait public les désigne : elles ne comptent pas toutes les
+  // EI de la commune. Cf. `nature_entreprise` dans le constructeur de snapshot.
   const entreprisesVivantes = (index.entities || [])
     .filter((e) => e.t === 'business' && (!e.p || e.p === 'commune') && vivant(e))
   const parNature = {}

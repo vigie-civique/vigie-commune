@@ -114,16 +114,23 @@ def _ecrire(chemin: Path, donnees) -> None:
     chemin.write_text(json.dumps(donnees, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def _forme_connue(forme) -> bool:
+    forme = str(forme or "").strip()
+    return len(forme) == 4 and forme.isdigit()
+
+
 def personnes_morales_par_acte(conn, public_events: list[dict], public_links: list[dict],
                                public_entities: list[dict]) -> dict[str, list[dict]]:
     """Clé d'acte → les personnes MORALES publiées qu'il concerne, par SIREN.
 
     Le SIREN vit dans `businesses` et `associations` ; une entité sans SIREN
-    n'y entre pas (rien à rapprocher d'une autre vigie). Une personne physique
+    n'y entre pas (rien à rapprocher d'une autre vigie), ni une entreprise
+    individuelle (forme 1000 ou inconnue). Une personne physique
     n'y entre JAMAIS, même publiée au titre de son mandat : la fédération
     rapproche des structures, pas des gens. Seules les clés stables comptent —
     une clé faible ou ambiguë ne se rapproche de rien ailleurs.
     """
+    from scripts.snapshot.fiches import forme_personne_physique  # `fiches` importe le graphe
     entites = {e["id"]: e for e in public_entities if e.get("type") != "person"}
     if not entites:
         return {}
@@ -131,8 +138,17 @@ def personnes_morales_par_acte(conn, public_events: list[dict], public_links: li
     for table in ("businesses", "associations"):
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                         (table,)).fetchone():
-            for eid, siren in conn.execute(
-                    f"SELECT entity_id, siren FROM {table} WHERE siren IS NOT NULL AND siren <> ''"):
+            # Une entreprise n'entre que si sa forme juridique est RENSEIGNÉE
+            # (quatre chiffres) et n'est pas une personne physique (1xxx, 1000
+            # comprise) : l'EI n'est pas une structure, publiée ou non
+            # (docs/federation.md : « jamais indexé » ; avis vigie-dpo du
+            # 24/11/2026). Forme inconnue = écartée. Son SIREN reste sur sa fiche.
+            for eid, siren, forme in conn.execute(
+                    f"SELECT entity_id, siren, {'legal_form_code' if table == 'businesses' else 'NULL'}"
+                    f" FROM {table} WHERE siren IS NOT NULL AND siren <> ''"):
+                if table == "businesses" and (
+                        not _forme_connue(forme) or forme_personne_physique(forme)):
+                    continue
                 if eid in entites:
                     sirens.setdefault(eid, siren)
     cles = {e["id"]: e["cle"] for e in public_events

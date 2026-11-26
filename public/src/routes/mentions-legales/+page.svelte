@@ -102,13 +102,59 @@
       la désigne pour représenter la collectivité ;</li>
     <li>elle dirige une entreprise, un registre public l'inscrit comme telle, et l'acte la cite
       à ce titre ;</li>
-    <li>elle est titulaire d'un marché public en entreprise individuelle, et seulement comme
-      titulaire de ce marché.</li>
+    <li>elle exerce en entreprise individuelle (une forme juridique de personne physique, ou, pour
+      une fiche d'entreprise sans forme juridique, un lien qui la rattache à une personne de même
+      nom), en activité ou non, et un fait public la désigne : un marché public dont elle est
+      titulaire, un paiement ou une subvention qu'une personne publique lui verse, ou un acte de
+      la collectivité qui la cite, hors comme demandeur ou bénéficiaire (le bénéficiaire ne compte
+      que par le versement publié) et hors un acte dont le titre publié désigne quelqu'un par son
+      rôle. Sa fiche d'entreprise ne se publie qu'à ce titre : nom, SIREN, activité, dates,
+      commune de rattachement, site confirmé et faits publiés qui la désignent (une fiche de lieu
+      ou de service publie à la place catégorie, opérateur et horaires, sans SIREN), sans adresse
+      ni position (sauf un local placé à la main à l'atelier). Sans un tel fait, sa fiche
+      d'entreprise n'est pas publiée ; elle reste dans la base de l'instance, rien n'y est
+      supprimé.</li>
   </ul>
   <p>
-    Hors de ces cas, une personne citée dans le titre d'un acte est désignée par son rôle
-    (« un particulier », « un agent » et sa fonction, « le président de l'association »). La
-    nature de la décision, son montant et le lien vers l'acte publié par la collectivité sont
+    Pour une entreprise individuelle sans fiche publiée (aucun fait public, classée hors de la
+    commune, ou écartée à l'atelier), le nom est retiré d'un flux d'argent (identifiant, nom,
+    description et note effacés ; restent le montant, l'année, le type, la partie publique, la
+    source et le lien vers l'acte ou la pièce ; un flux dont l'autre partie n'est pas publique
+    n'est pas publié) et d'un marché (identifiant et nom effacés ; restent l'objet, masqué de ce
+    nom, le montant, l'acheteur et la source). L'entreprise est reconnue par son identifiant, son
+    SIREN, ou le nom exact de sa fiche ou de ses marchés : une autre graphie n'est pas retirée, ni
+    un nom qui est aussi, en tout ou partie, celui d'une fiche publiée (structure de même nom, élu
+    homonyme). Le demandeur d'un permis d'urbanisme n'est pas publié quand c'est une entreprise
+    individuelle, publiée ou non, ou quand sa forme juridique est inconnue : restent le numéro de
+    l'autorisation, les dates, le lieu-dit, la parcelle, les surfaces et la nature du projet, sans
+    adresse. Une entreprise individuelle n'entre pas dans le rapprochement entre sites par SIREN.
+    Un contrôle lit les flux, les marchés, les fiches, le fil d'actualité et les avis de marché,
+    et refuse la mise en ligne si un nom d'au moins deux mots d'une telle entreprise y reste, hors
+    les réserves ci-dessus ; ce contrôle ne lit rien d'autre : ni la recherche, ni les titres
+    d'actes, ni les dossiers et séances, ni les permis. Trois exceptions restent, et elles sont
+    dites ici :
+  </p>
+  <ul>
+    <li>une entreprise individuelle classée hors de la commune (intercommunalité) que la commune
+      désigne garde son nom, sans fiche ni lien, sur un marché de la commune qui la désigne par sa
+      fiche et sur un versement de la commune ;</li>
+    <li>une entreprise individuelle dont la forme juridique est inconnue, que ne rattache aucune
+      personne de même nom (ou qui n'est pas une fiche d'entreprise), est traitée comme une
+      société : fiche et position comprises si son périmètre le permet, et, sans fiche, son nom
+      reste sur ses flux et ses marchés ;</li>
+    <li>le texte cité d'une délibération est reproduit tel que publié, hors domicile et naissance
+      ; les dossiers et les séances, rédigés par le projet puis relus, sortent tels que relus ; le
+      titre d'un acte (annonce BODACC comprise, sauf celle d'une personne physique reconnue, qui
+      n'est pas publiée) masque les noms précédés d'une civilité et ceux de personnes connues de
+      la base, l'ordre du jour ceux de personnes connues de la base, aucun des deux un autre nom.
+      Tous peuvent nommer une entreprise individuelle sans fiche, et un avis de marché garde le
+      nom sous les mêmes réserves que le reste.</li>
+  </ul>
+  <p>
+    Hors de ces cas et de l'exception sur les noms sans civilité, une personne citée dans le titre
+    d'un acte est désignée par son rôle (« un particulier », « un agent » et sa fonction, « le
+    président de l'association »). La nature de la décision, son montant et le lien vers l'acte
+    publié par la collectivité sont
     conservés. Un titre réduit à un nom, sans décision, n'est pas publié.
     Le texte d'une délibération, quand il est reproduit sous son titre, est cité tel que la
     collectivité l'a publié. Quand la recherche du site lit ce texte, elle n'en retient que

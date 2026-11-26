@@ -63,9 +63,12 @@
     : dansPortee.filter(vivant)
 
   // ── Ce qui produit, ce qui détient ──────────────────────────────────────
-  // 505 des 744 « entreprises » sont des entreprises individuelles et 112 ont
-  // pour activité déclarée la gestion immobilière. Ce n'est pas un jugement :
-  // c'est le code NAF et la forme juridique, tels que l'INSEE les publie.
+  // Les sociétés de patrimoine ont déclaré une activité immobilière
+  // (NAF 68). Ce n'est pas un jugement : c'est le code NAF et la
+  // forme juridique, tels que l'INSEE les publie. Les entreprises individuelles
+  // ne sont listées que si un fait public les désigne (décision du 24/11/2026,
+  // `SECURITY.md`) : leur compte, parfois nul, n'est pas celui des EI de la
+  // commune.
   const NATURES = {
     societe: 'Sociétés',
     individuelle: 'Entreprises individuelles',
@@ -160,6 +163,24 @@
   {/if}
 
   {#if natureVisible}
+    {#if !comptesNature.individuelle}
+      <p class="scope-hint">
+        Cette sélection ne compte aucune entreprise classée «&nbsp;individuelle&nbsp;».
+        Une entreprise individuelle (exercée en nom propre, donc liée à une personne)
+        n'est classée ici comme telle que si un fait public la désigne&nbsp;: un
+        marché public dont elle est titulaire, un paiement ou une subvention
+        qu'une personne publique lui verse, ou un acte de la collectivité qui la
+        cite. Ce zéro ne dit donc pas combien il en existe.
+      </p>
+    {:else}
+      <p class="scope-hint">
+        Une entreprise classée «&nbsp;individuelle&nbsp;» n'apparaît ici que si un fait
+        public la désigne&nbsp;: un marché public dont elle est titulaire, un
+        paiement ou une subvention qu'une personne publique lui verse, ou un acte
+        de la collectivité qui la cite. Ce nombre ne dit donc pas combien il en
+        existe.
+      </p>
+    {/if}
     <div class="chips natures">
       <button class:on={nature === 'all'} aria-pressed={nature === 'all'} on:click={() => nature = 'all'}>Toutes natures <b>{dansActivite.filter(e => e.type === 'business').length}</b></button>
       {#each Object.entries(NATURES) as [cle, label]}
@@ -167,10 +188,11 @@
       {/each}
     </div>
     <p class="scope-hint">
-      Une <b>société de patrimoine</b> a pour activité déclarée la gestion
-      immobilière (code NAF 68)&nbsp;: elle détient ou loue, elle ne produit
-      pas. Une <b>entreprise individuelle</b> est exercée en nom propre.
-      La distinction vient de l'INSEE, pas de nous.
+      Une <b>société de patrimoine</b> a déclaré à l'INSEE une activité
+      immobilière (code NAF 68)&nbsp;: achat, location ou gestion de biens
+      immobiliers. Une <b>entreprise individuelle</b> est exercée en nom propre,
+      quelle que soit son activité. Chaque entreprise est classée d'après sa
+      forme juridique, puis son code NAF, tels que l'INSEE les publie.
     </p>
   {/if}
 
