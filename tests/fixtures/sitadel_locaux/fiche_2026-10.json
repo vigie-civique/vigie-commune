@@ -1,0 +1,570 @@
+{
+ "millesime": "2026-10",
+ "published": "2026-11-27T07:45:00.000Z",
+ "columns": [
+  {
+   "name": "REG_CODE",
+   "type": "string"
+  },
+  {
+   "name": "REG_LIBELLE",
+   "type": "string"
+  },
+  {
+   "name": "DEP_CODE",
+   "type": "string"
+  },
+  {
+   "name": "DEP_LIBELLE",
+   "type": "string"
+  },
+  {
+   "name": "COMM",
+   "type": "string"
+  },
+  {
+   "name": "TYPE_DAU",
+   "type": "string"
+  },
+  {
+   "name": "NUM_DAU",
+   "type": "string"
+  },
+  {
+   "name": "ETAT_DAU",
+   "type": "integer"
+  },
+  {
+   "name": "DATE_REELLE_AUTORISATION",
+   "type": "date"
+  },
+  {
+   "name": "DATE_REELLE_DOC",
+   "type": "date"
+  },
+  {
+   "name": "DATE_REELLE_DAACT",
+   "type": "date"
+  },
+  {
+   "name": "AN_DEPOT",
+   "type": "integer"
+  },
+  {
+   "name": "DR_DEPOT",
+   "type": "date"
+  },
+  {
+   "name": "DPC_AUT",
+   "type": "string"
+  },
+  {
+   "name": "DPC_DOC",
+   "type": "string"
+  },
+  {
+   "name": "DPC_DERN",
+   "type": "string"
+  },
+  {
+   "name": "APE_DEM",
+   "type": "string"
+  },
+  {
+   "name": "CJ_DEM",
+   "type": "integer"
+  },
+  {
+   "name": "DENOM_DEM",
+   "type": "string"
+  },
+  {
+   "name": "SIREN_DEM",
+   "type": "string"
+  },
+  {
+   "name": "SIRET_DEM",
+   "type": "string"
+  },
+  {
+   "name": "CODPOST_DEM",
+   "type": "string"
+  },
+  {
+   "name": "LOCALITE_DEM",
+   "type": "string"
+  },
+  {
+   "name": "REC_ARCHI",
+   "type": "boolean"
+  },
+  {
+   "name": "ADR_NUM_TER",
+   "type": "string"
+  },
+  {
+   "name": "ADR_LIBVOIE_TER",
+   "type": "string"
+  },
+  {
+   "name": "ADR_LIEUDIT_TER",
+   "type": "string"
+  },
+  {
+   "name": "ADR_LOCALITE_TER",
+   "type": "string"
+  },
+  {
+   "name": "ADR_CODPOST_TER",
+   "type": "string"
+  },
+  {
+   "name": "SEC_CADASTRE1",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE1",
+   "type": "string"
+  },
+  {
+   "name": "SEC_CADASTRE2",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE2",
+   "type": "string"
+  },
+  {
+   "name": "SEC_CADASTRE3",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE3",
+   "type": "string"
+  },
+  {
+   "name": "SEC_CADASTRE4",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE4",
+   "type": "string"
+  },
+  {
+   "name": "SEC_CADASTRE5",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE5",
+   "type": "string"
+  },
+  {
+   "name": "SEC_CADASTRE6",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE6",
+   "type": "string"
+  },
+  {
+   "name": "SEC_CADASTRE7",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE7",
+   "type": "string"
+  },
+  {
+   "name": "SEC_CADASTRE8",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE8",
+   "type": "string"
+  },
+  {
+   "name": "SEC_CADASTRE9",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE9",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE10",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE10",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE11",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE11",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE12",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE12",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE13",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE13",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE14",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE14",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE15",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE15",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE16",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE16",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE17",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE17",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE18",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE18",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE19",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE19",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE20",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE20",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE21",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE21",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE22",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE22",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE23",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE23",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE24",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE24",
+   "type": "integer"
+  },
+  {
+   "name": "SEC_CADASTRE25",
+   "type": "string"
+  },
+  {
+   "name": "NUM_CADASTRE25",
+   "type": "integer"
+  },
+  {
+   "name": "AGRIVOLTAIQUE",
+   "type": "integer"
+  },
+  {
+   "name": "EMPRISE_SOL_AVANT",
+   "type": "number"
+  },
+  {
+   "name": "EMPRISE_SOL_CREEE",
+   "type": "number"
+  },
+  {
+   "name": "EMPRISE_SOL_SUPPRIMEE",
+   "type": "number"
+  },
+  {
+   "name": "SUPERFICIE_TERRAIN",
+   "type": "number"
+  },
+  {
+   "name": "ZONE_OP",
+   "type": "integer"
+  },
+  {
+   "name": "NATURE_PROJET_DECLAREE",
+   "type": "integer"
+  },
+  {
+   "name": "NATURE_PROJET_COMPLETEE",
+   "type": "integer"
+  },
+  {
+   "name": "DESTINATION_PRINCIPALE",
+   "type": "integer"
+  },
+  {
+   "name": "TYPE_TRANSFO_PRINCIPAL",
+   "type": "integer"
+  },
+  {
+   "name": "TYPE_PRINCIP_LOCAUX_TRANSFORMES",
+   "type": "integer"
+  },
+  {
+   "name": "I_EXTENSION",
+   "type": "boolean"
+  },
+  {
+   "name": "I_SURELEVATION",
+   "type": "boolean"
+  },
+  {
+   "name": "I_NIVSUPP",
+   "type": "boolean"
+  },
+  {
+   "name": "NB_NIV_MAX",
+   "type": "integer"
+  },
+  {
+   "name": "NB_CHAMBRES",
+   "type": "integer"
+  },
+  {
+   "name": "SURF_AGR_AVANT",
+   "type": "number"
+  },
+  {
+   "name": "SURF_AGR_CREEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_AGR_ISSUE_TRANSFO",
+   "type": "number"
+  },
+  {
+   "name": "SURF_AGR_DEMOLIE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_AGR_TRANSFORMEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_HAB_AVANT",
+   "type": "number"
+  },
+  {
+   "name": "SURF_HAB_CREEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_HAB_ISSUE_TRANSFO",
+   "type": "number"
+  },
+  {
+   "name": "SURF_HAB_DEMOLIE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_HAB_TRANSFORMEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_COM_AVANT",
+   "type": "number"
+  },
+  {
+   "name": "SURF_COM_CREEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_COM_ISSUE_TRANSFO",
+   "type": "number"
+  },
+  {
+   "name": "SURF_COM_DEMOLIE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_COM_TRANSFORMEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_PUB_AVANT",
+   "type": "number"
+  },
+  {
+   "name": "SURF_PUB_CREEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_PUB_ISSUE_TRANSFO",
+   "type": "number"
+  },
+  {
+   "name": "SURF_PUB_DEMOLIE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_PUB_TRANSFORMEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_LOC_AVANT",
+   "type": "number"
+  },
+  {
+   "name": "SURF_LOC_CREEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_LOC_ISSUE_TRANSFO",
+   "type": "number"
+  },
+  {
+   "name": "SURF_LOC_DEMOLIE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_LOC_TRANSFORMEE",
+   "type": "number"
+  },
+  {
+   "name": "TYPE_SERVICE_PUBLIC",
+   "type": "integer"
+  },
+  {
+   "name": "SURF_HEB_AVANT",
+   "type": "number"
+  },
+  {
+   "name": "SURF_HEB_CREEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_HEB_ISSUE_TRANSFO",
+   "type": "number"
+  },
+  {
+   "name": "SURF_HEB_DEMOLIE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_HEB_TRANSFORMEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_BUR_AVANT",
+   "type": "number"
+  },
+  {
+   "name": "SURF_BUR_CREEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_BUR_ISSUE_TRANSFO",
+   "type": "number"
+  },
+  {
+   "name": "SURF_BUR_DEMOLIE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_BUR_TRANSFORMEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_IND_AVANT",
+   "type": "number"
+  },
+  {
+   "name": "SURF_IND_CREEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_IND_ISSUE_TRANSFO",
+   "type": "number"
+  },
+  {
+   "name": "SURF_IND_DEMOLIE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_IND_TRANSFORMEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_ENT_AVANT",
+   "type": "number"
+  },
+  {
+   "name": "SURF_ENT_CREEE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_ENT_ISSUE_TRANSFO",
+   "type": "number"
+  },
+  {
+   "name": "SURF_ENT_DEMOLIE",
+   "type": "number"
+  },
+  {
+   "name": "SURF_ENT_TRANSFORMEE",
+   "type": "number"
+  }
+ ]
+}

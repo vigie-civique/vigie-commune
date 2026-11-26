@@ -400,7 +400,7 @@ def test_le_snapshot_ecarte_fragments_et_rubrique_avec_un_motif(base):
     from scripts.snapshot.argent import etape_flux
     flux = etape_flux(base, {}, [], set(), set(), set(), lambda t: t, exclusions,
                       sortie["public_events"], sortie["pieces_des_fragments"],
-                      sortie["actes_de_rubrique"])
+                      sortie["actes_de_rubrique"], ei_ids=frozenset(), ei_nommees=frozenset())
     sortis = {f["id"]: f for f in flux["flow_rows"]}
     assert flux_rubrique not in sortis
     assert exclusions["flows"]["lu_dans_une_rubrique_de_decisions"] == 1
@@ -843,7 +843,7 @@ def test_le_snapshot_compte_les_nouveaux_motifs_et_garde_le_renvoi_a_la_piece(ba
     # Un flux lu dans un acte écarté pour son titre reste attesté par la pièce.
     sortis = etape_flux(base, {}, [], set(), set(), set(), lambda t: t, exclusions,
                         sortie["public_events"], sortie["pieces_des_fragments"],
-                        sortie["actes_de_rubrique"])
+                        sortie["actes_de_rubrique"], ei_ids=frozenset(), ei_nommees=frozenset())
     assert set(flux.values()) <= {f["id"] for f in sortis["flow_rows"]}
 
 
@@ -871,7 +871,7 @@ def test_le_snapshot_retire_la_rubrique_a_queue_collee_et_ses_flux(base):
     assert exclusions["events"]["titre_mots_colles"] == 0
     sortis = etape_flux(base, {}, [], set(), set(), set(), lambda t: t, exclusions,
                         sortie["public_events"], sortie["pieces_des_fragments"],
-                        sortie["actes_de_rubrique"])
+                        sortie["actes_de_rubrique"], ei_ids=frozenset(), ei_nommees=frozenset())
     assert flux not in {f["id"] for f in sortis["flow_rows"]}
     assert exclusions["flows"]["lu_dans_une_rubrique_de_decisions"] == 1
 

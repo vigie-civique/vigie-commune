@@ -273,7 +273,10 @@ export function tableauDeBord({ lire, insee, aujourdhui, chiffres, interco,
     tuiles.push({
       cle: 'acteurs', href: '/acteurs-publics', libelle: 'Acteurs recensés',
       valeur: nombre(chiffres.acteurs),
-      note: chiffres.associations ? `dont ${nombre(chiffres.associations)} associations` : null,
+      // Les entreprises individuelles ne sont publiées que si un fait public les
+      // désigne : la mention accompagne le total (avis vigie-ux du 24/11/2026).
+      note: (chiffres.associations ? `dont ${nombre(chiffres.associations)} associations ; ` : '')
+        + 'entreprises individuelles : seulement si un fait public les désigne',
       graphe: parts.length > 1 ? { type: 'parts', parts } : null,
     })
   }

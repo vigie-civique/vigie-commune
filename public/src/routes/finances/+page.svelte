@@ -2,6 +2,7 @@
   import { COMMUNE, COMMUNE_A, SITE_NOM } from '#lib/instance.js'
   import Niveau from '#lib/components/Niveau.svelte'
   import { euros } from '#lib/data.js'
+  import { unknownName, phraseNonNommes } from './constat.js'
 
   // L'état d'un montant est calculé au snapshot (`collectors/etat_flux`) : il
   // dit ce que la pièce atteste — demandé, voté, engagé, payé. Cette page le
@@ -23,7 +24,8 @@
   // ligne ne traverse pas une base ; un champ calculé, si.
   const isInflow  = (f) => f.sens === 'entrant' && !isCession(f)
   const isOutflow = (f) => f.sens === 'sortant' && !isCession(f)
-  const unknownName = (n) => !n || n === '?' || n === '∅'
+  const LIB_NON_NOMMES = 'Bénéficiaires non nommés (nom non publié sur ce site, ou absent de la source)'
+  const LIB_NON_NOMMEES_RECETTES = 'Financeurs non nommés (absents de la source)'
 
   const TYPE_LABELS = {
     subvention: 'Subvention', subvention_region: 'Subvention Région',
@@ -111,8 +113,8 @@
   // La commune reçoit-elle une dotation pour l'année choisie ? (sinon, couverture partielle)
   $: dotationCovered = inflows.some(f => ['DGF', 'concours_etat', 'dotations_subventions'].includes(f.type))
 
-  function group(rows, keyFn, idFn) {
-    const named = new Map(), unknownTotal = { key: 'Bénéficiaire non précisé', total: 0, count: 0, id: null, unknown: true }
+  function group(rows, keyFn, idFn, libInconnu = LIB_NON_NOMMES) {
+    const named = new Map(), unknownTotal = { key: libInconnu, total: 0, count: 0, id: null, unknown: true }
     for (const r of rows) {
       const name = keyFn(r)
       if (unknownName(name)) { unknownTotal.total += r.amount || 0; unknownTotal.count++; continue }
@@ -128,7 +130,7 @@
   $: outByBenef = group(outflows, f => f.to_name, f => f.to_id)
   $: epciByBenef = group(epciFlows, f => f.to_name, f => f.to_id)
   $: epciMax = Math.max(...epciByBenef.map(g => g.total), 1)
-  $: inBySource = group(inflows, f => f.from_name)
+  $: inBySource = group(inflows, f => f.from_name, null, LIB_NON_NOMMEES_RECETTES)
   $: outMax = Math.max(...outByBenef.map(g => g.total), 1)
   $: inMax = Math.max(...inBySource.map(g => g.total), 1)
 
@@ -186,9 +188,11 @@
     <Niveau type="calcul" base="les flux financiers recensés dans les délibérations et les données ouvertes">
       {#if data.constat}{' '}
         Sur {data.constat.periode ? `${data.constat.periode[0]}–${data.constat.periode[1]}` : 'la période'},
-        <b>{eurosC(data.constat.total)}</b> de sorties de la commune sont recensées,
-        répartis entre <b>{data.constat.beneficiaires}</b> bénéficiaires.
-        <b>{data.constat.pour80}</b> d'entre eux réunissent 80&nbsp;% des montants.
+        <b>{eurosC(data.constat.total)}</b> de sorties de la commune sont recensées.
+        {#if data.constat.beneficiaires}{' '}
+          <b>{eurosC(data.constat.totalNommes)}</b> vont à <b>{data.constat.beneficiaires}</b> {data.constat.beneficiaires > 1 ? 'bénéficiaires nommés' : 'bénéficiaire nommé'}{#if data.constat.beneficiaires > 1}, dont <b>{data.constat.pour80}</b> réunissent 80&nbsp;% de cette somme{/if}.
+        {' '}{/if}
+        {phraseNonNommes(data.constat, eurosC)}
       {' '}{:else}{' '}
         Les montants ci-dessous sont la somme des flux que la collecte a trouvés.
       {' '}{/if}
@@ -384,7 +388,7 @@
             {#each [...others].sort((a, b) => (b.amount || 0) - (a.amount || 0)) as f (f.id)}
               <tr>
                 <td>{f.year || '-'}</td><td>{typeLabel(f.type)}</td>
-                <td class="who">{f.from_name || '-'} → {#if f.to_id}<a href="/entite/{f.to_id}">{f.to_name || '?'}</a>{:else}{f.to_name || '-'}{/if}</td>
+                <td class="who">{f.from_name || '-'} → {#if f.to_id && !unknownName(f.to_name)}<a href="/entite/{f.to_id}">{f.to_name}</a>{:else if unknownName(f.to_name)}<i>Bénéficiaire non nommé</i>{:else}{f.to_name}{/if}</td>
                 <td class="r">{euros(f.amount)}</td>
               </tr>
             {/each}
@@ -406,7 +410,7 @@
               <td>{#if isInflow(f)}<span class="tag in">reçu</span>{:else}<span class="tag out">sortant</span>{/if}</td>
               <td><span class="etat e-{etatDe(f)}" title={ETAT_DEF[etatDe(f)]}>{ETAT_LIB[etatDe(f)]}</span></td>
               <td>{typeLabel(f.type)}</td>
-              <td class="who">{f.from_name || '-'} → {#if f.to_id}<a href="/entite/{f.to_id}">{f.to_name || '?'}</a>{:else}{f.to_name || '-'}{/if}</td>
+              <td class="who">{f.from_name || '-'} → {#if f.to_id && !unknownName(f.to_name)}<a href="/entite/{f.to_id}">{f.to_name}</a>{:else if unknownName(f.to_name)}<i>Bénéficiaire non nommé</i>{:else}{f.to_name}{/if}</td>
               <td class="desc">{f.description || ''}</td>
               <td class="r">{euros(f.amount)}</td>
             </tr>

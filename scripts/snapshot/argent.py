@@ -13,7 +13,7 @@ from statistics import median
 
 from collectors.etat_flux import etat_du_flux
 from scripts.snapshot.revue import appliquer_revue
-from scripts.snapshot.socle import RULES, rows, table_exists
+from scripts.snapshot.socle import CONFIANCE_MARCHES, RULES, rows, table_exists
 from scripts.snapshot.textes import champ_publiable
 
 
@@ -225,21 +225,28 @@ def beneficiaire_inconnu(flow: dict) -> bool:
     return str(flow.get("to_name") or "").strip() in ("", "?", "∅")
 
 
-def dedupliquer_flux(flows: list[dict]) -> list[dict]:
+def dedupliquer_flux(flows: list[dict], masque=None) -> list[dict]:
     """Les doublons exacts, puis les « jumeaux » sans bénéficiaire nommé.
 
     Deux passes distinctes : la même décision écrite deux fois par deux
     collecteurs, et la ligne anonyme qu'un collecteur laisse à côté d'une ligne
     nommée du même montant.
+
+    `masque(flux)` dit qu'un flux sera délié ou masqué (« un particulier »,
+    cf. `etape_flux`) : entre deux doublons, c'est CELUI-LÀ qui reste, jamais le
+    neutre qui porterait le nom à côté d'un acte masqué (décision de Julien du
+    24/11/2026). Sans lui, le premier reste, comme avant.
     """
-    vus, dedup = set(), []
+    garde: dict = {}
+    dedup = []
     for f in flows:
         cle = (f.get("year"), f.get("amount"), f.get("type"), f.get("from_id"),
                _cle_beneficiaire(f))
-        if cle in vus:
-            continue
-        vus.add(cle)
-        dedup.append(f)
+        if cle not in garde:
+            garde[cle] = len(dedup)
+            dedup.append(f)
+        elif masque and masque(f) and not masque(dedup[garde[cle]]):
+            dedup[garde[cle]] = f
     jumeau = lambda f: (f.get("year"), f.get("amount"), f.get("type"), f.get("from_id"))
     nommes = {jumeau(f) for f in dedup if not beneficiaire_inconnu(f)}
     return [f for f in dedup
@@ -296,6 +303,14 @@ def nommer_acheteurs(marches: list[dict], noms: dict[int, str]) -> int:
             m["acheteur_nom"] = nom
             renommes += 1
     return renommes
+
+
+def confiance_marche_publique(m: dict) -> bool:
+    """Un marché sort si sa confiance, APRÈS la revue de l'atelier, est dans
+    `CONFIANCE_MARCHES`. Une base sans colonne `confidence` ne filtre rien, sauf
+    la confiance qu'un verdict aurait posée. Lue par `etape_finances` et
+    `ids_retenus_par_un_fait` : la sortie et la retenue d'une EI ne divergent pas."""
+    return "confidence" not in m or m["confidence"] in CONFIANCE_MARCHES
 
 
 def acheteurs_par_siren(conn) -> dict[str, int]:
@@ -358,7 +373,12 @@ def rattacher_acheteurs(marches: list[dict], par_siren: dict[str, int]) -> int:
     return rattaches
 
 
-def delier_renvois_morts(marches: list[dict], public_ids: set[int]) -> int:
+def delier_renvois_morts(marches: list[dict], public_ids: set[int], *,
+                         ei_ids: set[int] | frozenset,
+                         sirens_ei_ecartees: set[str] | frozenset,
+                         noms_ei_ecartees: set[str] | frozenset,
+                         ei_nommees: set[int] | frozenset,
+                         commune_id: int | None) -> int:
     """Coupe les renvois d'un marché vers une fiche que le snapshot n'écrit pas.
 
     Un flux financier est ÉCARTÉ dans ce cas (cf. `flux_extremites_publiees`) :
@@ -377,14 +397,271 @@ def delier_renvois_morts(marches: list[dict], public_ids: set[int]) -> int:
     titulaires d'un marché de la communauté de communes, écartés des fiches par
     `hors_fiche_perimetre_C2`, et l'invariant « renvoi vers une fiche non
     publiée » refusait le snapshot entier — trois fichiers, quatre renvois.
+
+    Exception : le titulaire est une ENTREPRISE INDIVIDUELLE non publiée
+    (`ei_ids`, hors des `public_ids` : C2, rejetée à l'atelier, sans fait
+    public), désignée par son identifiant, par le SIREN du marché
+    (`sirens_ei_ecartees`) ou, sans l'un ni l'autre, par son nom
+    (`noms_ei_ecartees`, empreintes `cle_de_nom`, celles que le contrôleur
+    compare). Son nom est celui d'une personne : il tombe avec le lien, la note
+    de revue aussi, et `titulaire_masque` dit que le marché reste ATTRIBUÉ
+    (`estAttribue` du site). Restent l'objet, le montant, l'acheteur (brief
+    `ei-flux-marches`, 24/11/2026). `titulaire_siren` est lu ici et ne sort pas.
+
+    Sauf une EI classée C2 que la commune désigne (`ei_nommees`) : sur un marché
+    dont la COMMUNE est l'acheteur, son nom reste, sans lien (décision de Julien
+    du 25/11/2026). Sur un autre marché, il tombe.
     """
     morts = 0
     for marche in marches:
+        siren = siren_titulaire(marche.pop("titulaire_siren", None))
+        tid = marche.get("titulaire_id")
+        ei_ecartee = titulaire_a_taire(
+            marche, siren, public_ids, ei_ids=ei_ids, sirens_ei_ecartees=sirens_ei_ecartees,
+            noms_ei_ecartees=noms_ei_ecartees, ei_nommees=ei_nommees, commune_id=commune_id)
         for cle in ("acheteur_id", "titulaire_id"):
             if marche.get(cle) is not None and marche[cle] not in public_ids:
                 marche[cle] = None
                 morts += 1
+        if ei_ecartee:
+            # Les mots du nom effacé, pour le masque de l'objet de CE marché.
+            from scripts.snapshot.fiches import mots_du_nom
+            marche["_mots_retires"] = set(mots_du_nom(marche.get("titulaire_nom")))
+            marche["_titulaire_ei"] = tid
+            marche["titulaire_nom"] = None
+            marche["titulaire_masque"] = True
+            marche.pop("note_revue", None)
     return morts
+
+
+def titulaire_a_taire(marche, siren, public_ids, *, ei_ids, sirens_ei_ecartees,
+                      noms_ei_ecartees, ei_nommees, commune_id) -> bool:
+    """Le titulaire d'un marché est-il une EI dont le nom ne sort pas ? Lu AVANT
+    le déliement (`titulaire_id`, `acheteur_id` encore là), par
+    `delier_renvois_morts` et par `etape_avis_de_marche` : une seule règle.
+    Cf. `delier_renvois_morts` pour les trois façons de désigner l'EI et
+    l'exception de l'EI C2 que la commune désigne."""
+    from scripts.snapshot.fiches import cle_de_nom
+    tid = marche.get("titulaire_id")
+    if (tid in ei_nommees and commune_id is not None
+            and marche.get("acheteur_id") == commune_id):
+        return False
+    return bool((tid in ei_ids and tid not in public_ids)
+                or (tid is None and siren and siren in sirens_ei_ecartees)
+                or (tid not in public_ids and marche.get("titulaire_nom")
+                    and cle_de_nom(marche["titulaire_nom"]) in noms_ei_ecartees))
+
+
+# Entre crochets, comme « [nom retiré] » : un caviardage se voit, il ne se lit
+# pas comme le texte de la source (avis vigie-dpo du 25/11/2026).
+MENTION_EI = "[entreprise individuelle]"
+MOT_RETIRE = "[nom retiré]"
+
+
+#: Ce qui fait d'un mot du territoire un LIEU : le mot qui le précède.
+PREPOSITIONS_DE_LIEU = frozenset({"A", "DE", "SUR", "EN"})
+
+
+def mots_du_territoire() -> frozenset:
+    """Les mots du nom de la commune et de l'intercommunalité de l'instance :
+    pas retirés comme mots isolés quand ils désignent le LIEU (« Travaux à
+    Lasalle » face à une EI « Jean LASALLE », tour 7 de la relecture). Hors d'un
+    contexte de lieu (« Ets Lasalle »), ils restent retirés : c'est aussi un nom
+    de famille (avis vigie-securite, tour 7)."""
+    from collectors.config import COMMUNE_NAME, EPCI_NOM
+    from scripts.snapshot.fiches import mots_du_nom
+    return frozenset(mots_du_nom(COMMUNE_NAME) | mots_du_nom(EPCI_NOM))
+
+
+def masquer_noms(texte, motif, mots_isoles=frozenset()):
+    """Remplace dans un texte libre les noms d'EI non publiées (`motif`, cf.
+    `motif_des_noms`) par « une entreprise individuelle ». Avis vigie-securite et
+    vigie-dpo du 25/11/2026 : l'objet d'un marché, la description d'un flux
+    peuvent nommer l'EI dont on vient d'effacer le titulaire. La mention est
+    écrite entre crochets (`MENTION_EI`).
+
+    Les mots du texte sont lus par `fiches.jetons_lies` : accents, casse,
+    apostrophe typographique ignorés ; mots vides (« de », « la ») transparents ;
+    deux mots ne se suivent que séparés par des blancs ou des tirets.
+    - nom de FICHE : une suite d'au moins deux mots du texte qui sont TOUS des
+      mots de ce nom (ou l'initiale d'un de ses mots), dont un mot plein, dans
+      n'importe quel ordre, prénom omis ou non (« DUPONT JEAN », « J. Dupont ») ;
+    - VARIANTE (titulaire DECP, souvent une enseigne) : sa suite exacte de mots ;
+    - une suite dont tous les mots tiennent dans le nom d'une fiche PUBLIÉE
+      n'est pas masquée : elle désigne peut-être celle-ci ;
+    - deux zones qui se chevauchent sont fusionnées.
+    Un nom d'un seul mot n'est pas cherché : il masquerait des mots courants.
+
+    `mots_isoles` : sur un marché dont le titulaire est effacé, chaque mot plein
+    de son nom (trois lettres au moins, hors mots vides et hors mots du nom de
+    la commune ou de l'intercommunalité, `mots_du_territoire`) qui reste
+    devient « [nom retiré] »."""
+    from scripts.snapshot.fiches import jetons_lies, mots_normalises
+    if not texte or (not motif and not mots_isoles):
+        return texte
+    texte = str(texte)
+    jetons = jetons_lies(texte)
+    groupes, suites, publies = motif or ((), (), ())
+    territoire = mots_du_territoire()
+    tous = mots_normalises(texte)
+
+    def lieu(debut):
+        """Le mot qui précède ce jeton est-il « à », « de », « sur », « en » ?"""
+        avant = [m for d, f, m, _ in tous if f <= debut]
+        return bool(avant) and avant[-1] in PREPOSITIONS_DE_LIEU
+
+    def publie(mots):
+        return any(mots <= p for p in publies)
+
+    zones = []
+    for nom in groupes:
+        initiales = {w[0] for w in nom}
+        i = 0
+        while i < len(jetons):
+            j, mots = i, set()
+            while j < len(jetons):
+                _, _, mot, initiale, lie = jetons[j]
+                if (j > i and not lie) or not (mot in initiales if initiale else mot in nom):
+                    break
+                if not initiale:
+                    mots.add(mot)
+                j += 1
+            # « Publiée » demande deux mots pleins : « J. Dupont » ne tient pas
+            # dans « DUPONT TP » (avis vigie-securite, b1).
+            if j - i >= 2 and mots and not (len(mots) >= 2 and publie(mots)):
+                zones.append([jetons[i][0], jetons[j - 1][1]])
+                i = j
+            else:
+                i += 1
+    for suite in suites:
+        n = len(suite)
+        for i in range(len(jetons) - n + 1):
+            fenetre = jetons[i:i + n]
+            if (all(not j[3] for j in fenetre) and all(j[4] for j in fenetre[1:])
+                    and tuple(j[2] for j in fenetre) == suite and not publie(set(suite))):
+                zones.append([fenetre[0][0], fenetre[-1][1]])
+    # Zones qui se chevauchent : fusionnées (avis vigie-securite, c).
+    fusion = []
+    for d, f in sorted(zones):
+        if fusion and d <= fusion[-1][1]:
+            fusion[-1][1] = max(fusion[-1][1], f)
+        else:
+            fusion.append([d, f])
+    remplacements = [(d, f, MENTION_EI) for d, f in fusion]
+    remplacements += [(d, f, MOT_RETIRE) for d, f, mot, initiale, _ in jetons
+                      if not initiale and len(mot) >= 3 and mot in mots_isoles
+                      and not (mot in territoire and lieu(d))
+                      and not any(zd < f and d < zf for zd, zf in fusion)]
+    for d, f, r in sorted(remplacements, reverse=True):
+        texte = texte[:d] + r + texte[f:]
+    return texte
+
+
+def avec_extremites(motif, ligne, cles, noms_par_id, public_ids):
+    """Le motif, en épargnant aussi les noms des extrémités PUBLIÉES de cette
+    ligne (`cles` : `from_id`/`to_id` d'un flux, `titulaire_id`/`acheteur_id`
+    d'un marché). L'élu « Marc DUPRAT », exploitant d'une EI écartée, n'épargne
+    pas le nom de son EI ailleurs (`mots_des_exploitants`), mais sur SA ligne
+    (« Indemnité de fonction de Marc Duprat ») son nom le désigne, lui (tour 6 de
+    la relecture). Même règle dans le contrôleur."""
+    if motif is None:
+        return None
+    from scripts.snapshot.fiches import mots_du_nom
+    extra = tuple(m for c in cles for i in [ligne.get(c)]
+                  if i is not None and i in public_ids
+                  for n in noms_par_id.get(i, ()) if n
+                  for m in [mots_du_nom(n)] if len(m) >= 2)
+    if not extra:
+        return motif
+    groupes, suites, publies = motif
+    return groupes, suites, tuple(publies) + extra
+
+
+def motif_des_noms(noms, publies=()):
+    """Ce que `masquer_noms` cherche : `noms` = (noms de fiche, variantes), cf.
+    `fiches.noms_des_ei_ecartees` ; `publies` = `fiches.mots_des_fiches_publiees`.
+    None s'il n'y a rien à chercher."""
+    from scripts.snapshot.fiches import mots_du_nom, suite_du_nom
+    fiches, variantes = noms
+    groupes = tuple(sorted({m for m in map(mots_du_nom, fiches) if len(m) >= 2}, key=sorted))
+    suites = tuple(sorted({s for s in map(suite_du_nom, variantes) if len(s) >= 2}))
+    if not groupes and not suites:
+        return None
+    return groupes, suites, tuple(publies)
+
+
+def etape_avis_de_marche(conn, revue, entity_rows, ei_ids, ei_nommees, public_ids,
+                         public_events) -> None:
+    """Le titre d'un acte `marché_public` (avis BOAMP, DECP) est l'objet du
+    marché (`collectors/marches_publics.py`) : il passe par le même masque que
+    l'objet dans `marches.json`, sinon le nom retiré là ressortait dans
+    `events.json`, `actualite.json` (à côté de la version masquée) et
+    `recherche_index.json` (avis vigie-dpo du 25/11/2026). Juste après les
+    fiches, avant tout ce qui lit les titres.
+
+    Comme sur le marché : si un marché relié à l'acte (`marches_publics.event_id`)
+    a pour titulaire une EI dont le nom ne sort pas (`titulaire_a_taire`, même
+    règle que `delier_renvois_morts`), chaque mot de ce nom qui reste devient
+    « [nom retiré] » (avis vigie-securite sur 2825b8a). La `note_revue` passe par
+    le même masque ; aujourd'hui un acte `marché_public` n'en porte pas (la revue
+    ne vise que les délibérations, `TYPES_REVUS`), c'est une défense."""
+    from scripts.snapshot.fiches import (cle_de_nom, mots_des_exploitants,
+                                         mots_des_fiches_publiees, mots_du_nom,
+                                         noms_des_ei_ecartees)
+    from scripts.snapshot.revue import ecartes
+    avis = [e for e in public_events if e.get("type") == "marché_public"]
+    if not avis:
+        return
+    sans_fiche = set(ei_ids) - set(public_ids)
+    fiches_ei, variantes = noms_des_ei_ecartees(conn, entity_rows, sans_fiche, public_ids)
+    motif = motif_des_noms((fiches_ei, variantes), mots_des_fiches_publiees(
+        conn, public_ids, mots_exclus=mots_des_exploitants(
+            conn, ecartes(revue, "relation"), set(ei_ids) - set(public_ids), public_ids)))
+    regle = dict(
+        ei_ids=ei_ids, ei_nommees=ei_nommees, commune_id=_commune_entity_id(conn),
+        sirens_ei_ecartees={siren_titulaire(r.get("siren")) for r in entity_rows
+                            if r["id"] in sans_fiche} - {""},
+        noms_ei_ecartees={cle_de_nom(n) for n in fiches_ei | variantes} - {""})
+    noms_par_ei = {r["id"]: (r["name"], r.get("short_name")) for r in entity_rows}
+    colonnes = {r["name"] for r in rows(conn, "PRAGMA table_info(marches_publics)")}
+    if "event_id" not in colonnes:
+        par_acte = {}
+    else:
+        siren_tit = ("titulaire_siren" if "titulaire_siren" in colonnes
+                     else "NULL AS titulaire_siren")
+        ids_avis = {e["id"] for e in avis}
+        par_siren = acheteurs_par_siren(conn)
+        revue_marches = (revue or {}).get("marche", {})
+        par_acte: dict = {}
+        for m in rows(conn, f"""
+                SELECT id, event_id, titulaire_id, {siren_tit}, titulaire_nom,
+                       acheteur_id, acheteur_siren
+                FROM marches_publics WHERE event_id IS NOT NULL"""):
+            if m["event_id"] not in ids_avis:
+                continue
+            # Comme `etape_finances` : acheteur rattaché par SIREN, puis la revue.
+            if m["acheteur_id"] is None:
+                m["acheteur_id"] = par_siren.get(siren_titulaire(m["acheteur_siren"]))
+            m = appliquer_revue(m, revue_marches.get(m["id"])) or m
+            if titulaire_a_taire(m, siren_titulaire(m.get("titulaire_siren")), public_ids,
+                                 **regle):
+                mots = set(mots_du_nom(m.get("titulaire_nom")))
+                for nom in noms_par_ei.get(m.get("titulaire_id"), ()):
+                    mots |= mots_du_nom(nom)
+                par_acte.setdefault(m["event_id"], set()).update(mots)
+    if motif is None and not par_acte:
+        return
+    for e in avis:
+        isoles = frozenset(par_acte.get(e["id"], ()))
+        for champ in ("title", "note_revue"):
+            if isinstance(e.get(champ), str):
+                e[champ] = masquer_noms(e[champ], motif, isoles)
+
+
+def siren_titulaire(valeur) -> str:
+    """`siren_de` (neuf chiffres, ou "") sans charger le collecteur à l'import."""
+    from collectors.marches_publics import siren_de
+    return siren_de(valeur)
 
 
 def renvoyer_aux_pieces(flows: list[dict], public_event_ids: set,
@@ -416,9 +693,37 @@ def renvoyer_aux_pieces(flows: list[dict], public_event_ids: set,
     return sans
 
 
+def motif_hors_deduplication(f: dict, actes_de_rubrique, commune_id) -> str | None:
+    """Pourquoi un flux revu par l'atelier n'atteint pas `dedupliquer_flux`, en
+    ne regardant que LUI (pas ses extrémités, que deux jumeaux partagent) ; None
+    s'il l'atteint. Dans l'ordre d'`etape_flux`, qui en tire ses compteurs :
+    - `lu_dans_une_rubrique_de_decisions` : flux lu dans la rubrique d'un
+      procès-verbal où l'exécutif rend compte de ses décisions par délégation.
+      C'est une décision du maire ou du président, qui n'est pas publiée depuis
+      un PV (Julien, 14 et 15/11/2026), ni par son titre ni par son montant
+      (relecture vigie-securite du 15/11) ;
+    - `private_confidence` : confiance hors `RULES["confidence"]["public"]` ;
+    - `private_cession` : cession strictement privée (aucune des parties n'est
+      la commune), mutation commerciale (fonds de commerce), hors périmètre.
+      La commune est résolue par le nom (`_commune_entity_id`) : `63` était le
+      numéro de ligne de la commune dans la base de Lasalle ; sur une autre base
+      il désignait une entité quelconque.
+    Lue aussi par `ids_retenus_par_un_fait` : seul un jumeau qui atteint la
+    déduplication peut y être gardé à la place d'un autre (relecture de #323)."""
+    if actes_de_rubrique and f.get("event_id") in actes_de_rubrique:
+        return "lu_dans_une_rubrique_de_decisions"
+    if f.get("confidence") not in set(RULES["confidence"]["public"]):
+        return "private_confidence"
+    if (str(f.get("type", "")).startswith("cession")
+            and commune_id not in (f.get("from_id"), f.get("to_id"))):
+        return "private_cession"
+    return None
+
+
 def etape_flux(conn, revue, entity_rows, public_person_ids, public_ids,
                ecartees_du_perimetre, redige, exclusions, public_events,
-               pieces_des_fragments=None, actes_de_rubrique=frozenset()) -> dict:
+               pieces_des_fragments=None, actes_de_rubrique=frozenset(),
+               *, ei_ids, ei_nommees) -> dict:
     flow_rows = rows(conn, """
         SELECT ff.id, ff.type, ff.year, ff.amount, ff.description,
                ff.source, ff.confidence, ff.origine,
@@ -447,41 +752,30 @@ def etape_flux(conn, revue, entity_rows, public_person_ids, public_ids,
         revus.append(flow)
     flow_rows = revus
 
-    # Un flux lu dans la rubrique d'un procès-verbal où l'exécutif rend compte
-    # de ses décisions par délégation : c'est une décision du maire ou du
-    # président, qui n'est pas publiée depuis un PV (Julien, 14 et 15/11/2026),
-    # ni par son titre ni par son montant (relecture vigie-securite du 15/11).
-    if actes_de_rubrique:
-        avant = len(flow_rows)
-        flow_rows = [f for f in flow_rows if f.get("event_id") not in actes_de_rubrique]
-        exclusions["flows"]["lu_dans_une_rubrique_de_decisions"] = avant - len(flow_rows)
-
-    public_flows = [
-        flow for flow in flow_rows
-        if flow.get("confidence") in set(RULES["confidence"]["public"])
-    ]
-    exclusions["flows"]["private_confidence"] = len(flow_rows) - len(public_flows)
-
-    # Cessions strictement privées (aucune des parties n'est la commune) :
-    # ce sont des mutations commerciales (fonds de commerce), pas des flux
-    # de finances publiques → hors périmètre de cette page.
-    # Identifiant résolu par le nom : `63` était le numéro de ligne de la
-    # commune dans la base de Lasalle. Sur une autre base il désigne une
-    # entité quelconque, et le filtre des cessions privées laisse alors
-    # passer ce qu'il devait écarter — silencieusement.
+    # Rubrique de décisions, confiance, cession privée : `motif_hors_deduplication`,
+    # lue aussi par `ids_retenus_par_un_fait`. Mêmes compteurs qu'avant.
     COMMUNE_ID = _commune_entity_id(conn)
+    motifs = Counter()
+    public_flows = []
+    for f in flow_rows:
+        motif = motif_hors_deduplication(f, actes_de_rubrique, COMMUNE_ID)
+        if motif:
+            motifs[motif] += 1
+        else:
+            public_flows.append(f)
+    if actes_de_rubrique:
+        exclusions["flows"]["lu_dans_une_rubrique_de_decisions"] = \
+            motifs["lu_dans_une_rubrique_de_decisions"]
+        # `flow_rows` sort de l'étape (`flows_total_private`) SANS la rubrique,
+        # comme avant : elle n'est publiée ni par son titre ni par son montant.
+        flow_rows = [f for f in flow_rows if f.get("event_id") not in actes_de_rubrique]
+    exclusions["flows"]["private_confidence"] = motifs["private_confidence"]
     if COMMUNE_ID is None and flow_rows:
         # Sans elle, aucun flux n'a de sens et toute cession passe pour
         # privée : le dire, plutôt que publier des zéros.
         print("⚠ entité « Commune de … » introuvable : sens des flux non "
               "déterminé, cessions communales écartées", file=sys.stderr)
-    before = len(public_flows)
-    public_flows = [
-        f for f in public_flows
-        if not (str(f.get("type", "")).startswith("cession")
-                and COMMUNE_ID not in (f.get("from_id"), f.get("to_id")))
-    ]
-    exclusions["flows"]["private_cession"] = before - len(public_flows)
+    exclusions["flows"]["private_cession"] = motifs["private_cession"]
 
     # Un flux dont une extrémité est une personne physique non publiable
     # publiait son nom en clair (`to_name`) alors que l'entité elle-même est
@@ -501,12 +795,60 @@ def etape_flux(conn, revue, entity_rows, public_person_ids, public_ids,
     # que les personnes physiques, et laissait passer les flux dont
     # l'extrémité est une entité morale non publiée — cf.
     # `flux_extremites_publiees`, qui porte la règle et son histoire.
+    from scripts.snapshot.fiches import parties_publiques
+    publiques = parties_publiques(conn)
+    ei_sans_fiche = (set(ei_ids) - set(public_ids)) & set(ecartees_du_perimetre)
+    # Les empreintes des noms d'EI sans fiche, nommées comprises : un bout NON
+    # PUBLIÉ qui en porte une (un doublon `business` « Jeanne Doublon », classé
+    # C2, sans forme ni lien) perd son nom, comme `titulaire_a_taire` le fait
+    # pour les marchés ; sinon le contrôleur refusait l'instance (tour 7).
+    from scripts.snapshot.fiches import cle_de_nom, noms_des_ei_ecartees
+    _fiches, _variantes = noms_des_ei_ecartees(conn, entity_rows,
+                                               set(ei_ids) - set(public_ids), public_ids)
+    cles_a_taire = {cle_de_nom(n) for n in _fiches | _variantes} - {""}
     before = len(public_flows)
     gardes, delies = [], 0
     for f in public_flows:
         etat = statut_extremites(f, public_ids, ecartees_du_perimetre)
+        # Une EI sans fiche et une partie publique elle-même déliée (écartée pour
+        # le périmètre, rejetée à l'atelier) : aucune extrémité n'est publiée,
+        # mais c'est de l'argent public ; il sort délié des deux côtés, montant
+        # compté. Depuis l'avis vigie-securite du 25/11/2026 (point 1), une telle
+        # partie publique ne retient plus l'EI (`extremites_du_flux_ok`).
+        bouts = (f.get("from_id"), f.get("to_id"))
+        if (etat == "ecarte" and any(b in ei_sans_fiche for b in bouts)
+                and all(b in ei_sans_fiche
+                        or (b in publiques and b in ecartees_du_perimetre) for b in bouts)
+                and not all(b in ei_sans_fiche for b in bouts)):
+            etat = "delie"
         if etat == "ecarte":
             continue
+        # Le côté EI se relève AVANT le déliement : `delier_extremites` met l'id à
+        # `None` en gardant le nom, et le masque d'une EI hors périmètre ou
+        # rejetée à l'atelier ne retrouverait plus son côté (avis vigie-securite).
+        f["_cote_ei"] = [c for c in ("from", "to") if f.get(f"{c}_id") in ei_ids]
+        # Le côté EI qui n'a pas de fiche publiée : son nom ne sort pas non plus,
+        # sauf une EI C2 à qui la COMMUNE verse (`ei_nommees`, décision de Julien
+        # du 25/11/2026) : sur ce flux, son nom reste, sans lien.
+        nommee_ici = lambda c: (c == "to" and f.get("to_id") in ei_nommees
+                                and COMMUNE_ID is not None and f.get("from_id") == COMMUNE_ID)
+        f["_ei_sans_fiche"] = [
+            c for c in f["_cote_ei"] if f.get(f"{c}_id") not in public_ids
+            and not nommee_ici(c)]
+        f["_nom_a_taire"] = [
+            c for c in ("from", "to")
+            if f.get(f"{c}_id") is not None and f.get(f"{c}_id") not in public_ids
+            and c not in f["_cote_ei"] and not nommee_ici(c)
+            and cle_de_nom(f.get(f"{c}_name")) in cles_a_taire]
+        # Un flux vers ou depuis une EI sans fiche ne sort (délié) que si l'autre
+        # extrémité est une PARTIE PUBLIQUE (`parties_publiques`) : c'est de
+        # l'argent public, il reste compté. Entre une association ou une société
+        # et une EI écartée, ce n'est pas un fait de la commune : écarté (brief
+        # `ei-flux-marches`, 24/11/2026). Compté dans `endpoint_not_public`.
+        if f["_ei_sans_fiche"]:
+            autres = [f.get(f"{c}_id") for c in ("from", "to") if c not in f["_ei_sans_fiche"]]
+            if not autres or not all(a in publiques for a in autres):
+                continue
         if etat == "delie":
             delier_extremites(f, public_ids)
             delies += 1
@@ -518,7 +860,22 @@ def etape_flux(conn, revue, entity_rows, public_person_ids, public_ids,
     # et « jumeaux » non résolus (montant identique, bénéficiaire vide) laissés par
     # les collecteurs. On garde les bénéficiaires DISTINCTS de même montant.
     before = len(public_flows)
-    public_flows = dedupliquer_flux(public_flows)
+    from scripts.snapshot.actes import _DESIGNE_UNE_PERSONNE
+    titres = {e.get("id"): e.get("title") or "" for e in public_events}
+
+    def _sera_masque(f) -> bool:
+        # Comme le masque final : la description passe par `redige` (« Jeanne
+        # EXEMPLE » devient « un particulier »), la note par
+        # `redige(champ_publiable(…))`, l'expression de la sortie plus bas (audit
+        # du filtre du 24/11/2026, P1 ; même lecture dans `ids_retenus_par_un_fait`).
+        note = (redige(champ_publiable(f["note_revue"], None, set()))
+                if f.get("note_revue") else None)
+        return bool(f.get("_cote_ei")) and any(
+            _DESIGNE_UNE_PERSONNE.search(t or "")
+            for t in (redige(f.get("description")), note,
+                      titres.get(f.get("event_id"), "")))
+
+    public_flows = dedupliquer_flux(public_flows, _sera_masque)
     exclusions["flows"]["duplicates"] = before - len(public_flows)
 
     # `sens` : la DGF encaissée par la commune (489 690 €) et la subvention
@@ -526,10 +883,23 @@ def etape_flux(conn, revue, entity_rows, public_person_ids, public_ids,
     # forme. Sans le sens du flux, la page se lit à contresens.
     # Un flux délié a perdu son identifiant (`None`) : tant que COMMUNE_ID
     # valait `None` lui aussi, il sortait « entrant ».
+    # Le nom d'une EI non publiée ne sort pas non plus d'un texte libre : une
+    # description peut nommer l'EI d'un autre flux (avis du 25/11/2026).
+    # Toutes les EI sans fiche, nommées comprises (avis vigie-securite A2).
+    from scripts.snapshot.fiches import (mots_des_exploitants, mots_des_fiches_publiees,
+                                         noms_des_ei_ecartees)
+    from scripts.snapshot.revue import ecartes
+    motif = motif_des_noms(
+        noms_des_ei_ecartees(conn, entity_rows, set(ei_ids) - set(public_ids), public_ids),
+        mots_des_fiches_publiees(conn, public_ids, mots_exclus=mots_des_exploitants(
+            conn, ecartes(revue, "relation"), set(ei_ids) - set(public_ids), public_ids)))
+    noms_par_id = {r["id"]: (r["name"], r.get("short_name")) for r in entity_rows}
     for f in public_flows:
-        f["description"] = redige(f.get("description"))
+        motif_f = avec_extremites(motif, f, ("from_id", "to_id"), noms_par_id, public_ids)
+        f["description"] = masquer_noms(redige(f.get("description")), motif_f)
         if f.get("note_revue"):
-            f["note_revue"] = redige(champ_publiable(f["note_revue"], None, set()))
+            f["note_revue"] = masquer_noms(
+                redige(champ_publiable(f["note_revue"], None, set())), motif_f)
         if COMMUNE_ID is None:
             f["sens"] = "tiers"
         elif f.get("to_id") == COMMUNE_ID and f.get("from_id") != COMMUNE_ID:
@@ -561,6 +931,31 @@ def etape_flux(conn, revue, entity_rows, public_person_ids, public_ids,
     # `verify_snapshot` refuse un flux `verbatim` sans renvoi.
     renvoyer_aux_pieces(public_flows, {e.get("id") for e in public_events},
                         pieces_des_fragments)
+
+    # Un flux qui touche une EI est DÉLIÉ de l'EI dans deux cas, sans disparaître
+    # des totaux : (1) l'EI n'a pas de fiche publiée (écartée faute de fait public,
+    # hors périmètre, rejetée à l'atelier) ; (2) la description, la note ou l'acte
+    # publié dit « un particulier » (le nom, avec le montant, l'année et la pièce,
+    # ré-identifierait le particulier que le titre masque). Restent publiés : le
+    # montant, l'année, le type, la partie publique, et l'acte s'il est publié.
+    # Sont effacés : l'identifiant et le nom du côté EI, la description et la note
+    # de revue (avis vigie-securite du 24/11).
+    for f in public_flows:
+        cote_ei = f.pop("_cote_ei", [])
+        sans_fiche = f.pop("_ei_sans_fiche", [])
+        for c in f.pop("_nom_a_taire", []):
+            f[f"{c}_name"] = None
+        masque = bool(cote_ei) and (
+            _DESIGNE_UNE_PERSONNE.search(f.get("description") or "")
+            or _DESIGNE_UNE_PERSONNE.search(f.get("note_revue") or "")
+            or _DESIGNE_UNE_PERSONNE.search(titres.get(f.get("acte_id"), "")))
+        cotes = cote_ei if masque else sans_fiche
+        if cotes:
+            for c in cotes:
+                f[f"{c}_id"] = None
+                f[f"{c}_name"] = None
+            f["description"] = None
+            f.pop("note_revue", None)
 
     # Également calculés, jamais publiés : `flux_delies_hors_perimetre`,
     # `flows_par_sens`, `flows_par_statut`. Seul l'état sort, dans `stats.json`.
@@ -642,7 +1037,7 @@ def avant_fusion(conn) -> dict:
 
 
 def etape_finances(conn, revue, public_ids, public_entities, perimetre_par_entite,
-                   noms_publics, exclusions) -> dict:
+                   noms_publics, exclusions, *, ei_ids, ei_nommees) -> dict:
     from collectors.config import SIRENS_AVANT_FUSION
     # ── Données financières & foncières officielles (open data) ───────────
     # DGFiP, OFGL, DECP : faits publics par nature → export complet. DVF : agrégats
@@ -704,25 +1099,22 @@ def etape_finances(conn, revue, public_ids, public_entities, perimetre_par_entit
     dvf_data = agreger_dvf(rows(conn, """
         SELECT * FROM dvf_transactions
     """))
-    # Le filtre de confiance manquait ici, alors qu'il s'applique partout
-    # ailleurs : la table publiait TOUT. Un marché dont l'acheteur n'a pas
-    # pu être établi affirmait donc qu'une collectivité avait acheté ce
-    # qu'elle n'avait pas acheté. `probable` reste en base et attend
-    # l'atelier ; il ne sort pas.
     colonnes_mp = {r["name"] for r in rows(conn, "PRAGMA table_info(marches_publics)")}
-    filtre_mp = ("WHERE confidence IN ('verified', 'confirmed')"
-                 if "confidence" in colonnes_mp else "")
     # `montant_base` (HT ou TTC) depuis le 04/10/2026 : un marché lu dans un
     # procès-verbal porte l'un ou l'autre. Absente d'une base plus ancienne.
     base_mp = "montant_base" if "montant_base" in colonnes_mp else "NULL AS montant_base"
     # La confiance sort avec la ligne : le contrôleur la vérifie quand il la
-    # voit, et il ne la voyait pas — le filtre ci-dessus n'avait aucun témoin.
+    # voit, et il ne la voyait pas — le filtre (après la revue, plus bas) n'avait
+    # aucun témoin.
     confiance_mp = ", confidence" if "confidence" in colonnes_mp else ""
+    siren_tit = ("titulaire_siren" if "titulaire_siren" in colonnes_mp
+                 else "NULL AS titulaire_siren")
     marches_data = rows(conn, f"""
         SELECT id, acheteur_id, acheteur_siren, acheteur_nom, titulaire_id, titulaire_nom,
+               {siren_tit},
                objet, nature, procedure, montant, {base_mp}, cpv_label, date_notif,
                lieu_exec, source, source_url{confiance_mp}
-        FROM marches_publics {filtre_mp} ORDER BY date_notif DESC, montant DESC
+        FROM marches_publics ORDER BY date_notif DESC, montant DESC
     """)
     # AVANT `rattacher_acheteurs`, qui retire `acheteur_siren` : marqué après,
     # aucun marché ne l'était (constaté le 02/11/2026 sur Saillans en ligne).
@@ -732,10 +1124,30 @@ def etape_finances(conn, revue, public_ids, public_entities, perimetre_par_entit
         if m.get("montant_base") is None:
             m.pop("montant_base", None)
     revue_marches = revue.get("marche", {})
-    avant_revue = len(marches_data)
-    marches_data = [m for m in (appliquer_revue(m, revue_marches.get(m["id"]))
-                                for m in marches_data) if m is not None]
-    exclusions["marches"]["rejete_en_atelier"] = avant_revue - len(marches_data)
+    # `rejete_en_atelier` garde son sens d'avant : les marchés écartés à
+    # l'atelier parmi ceux que leur confiance EN BASE aurait publiés. Un
+    # marché `probable` écarté n'y est pas compté (relecture de #323).
+    revus = []
+    rejetes = 0
+    for m in marches_data:
+        corrige = appliquer_revue(m, revue_marches.get(m["id"]))
+        if corrige is None:
+            rejetes += confiance_marche_publique(m)
+        else:
+            revus.append(corrige)
+    marches_data = revus
+    exclusions["marches"]["rejete_en_atelier"] = rejetes
+    # Le filtre de confiance manquait ici, alors qu'il s'applique partout
+    # ailleurs : la table publiait TOUT. Un marché dont l'acheteur n'a pas
+    # pu être établi affirmait donc qu'une collectivité avait acheté ce
+    # qu'elle n'avait pas acheté. `probable` reste en base et attend
+    # l'atelier ; il ne sort pas.
+    # APRÈS la revue (`collectors/verdict.py` : verdict, corrections, puis
+    # confiance) : un marché `probable` validé à l'atelier sort, un marché
+    # rétrogradé ne sort pas (audit du 25/11/2026, H1 et H2). En SQL, le filtre
+    # passait avant : le premier restait dehors, le second sortait `probable` et
+    # faisait refuser toute l'instance. Même règle dans `ids_retenus_par_un_fait`.
+    marches_data = [m for m in marches_data if confiance_marche_publique(m)]
     # Ce qui est écrit par un acheteur, lu dans un procès-verbal ou saisi à
     # l'atelier passe par le masque, comme le titre d'un acte.
     for m in marches_data:
@@ -744,9 +1156,43 @@ def etape_finances(conn, revue, public_ids, public_entities, perimetre_par_entit
         if m.get("note_revue"):
             m["note_revue"] = champ_publiable(m["note_revue"], None, noms_publics)
 
-    # Le marché reste, le lien vers une fiche non publiée tombe.
-    exclusions["marches"]["renvoi_vers_fiche_non_publiee"] = \
-        delier_renvois_morts(marches_data, public_ids)
+    # Le marché reste, le lien vers une fiche non publiée tombe ; le nom d'une
+    # EI non publiée aussi, dans le titulaire comme dans le texte libre.
+    from scripts.snapshot.fiches import (cle_de_nom, mots_des_exploitants,
+                                         mots_des_fiches_publiees, mots_du_nom,
+                                         noms_des_ei_ecartees)
+    from scripts.snapshot.revue import ecartes
+    # TOUTES les EI sans fiche, celles que la commune désigne (`ei_nommees`)
+    # comprises : leur nom ne reste que sur le marché dont la commune est
+    # l'acheteur et qui les désigne par identifiant (`delier_renvois_morts`) ;
+    # sur un autre marché, par SIREN ou par nom, il tombe (avis vigie-securite
+    # du 25/11/2026, A1).
+    ei_ecartees = set(ei_ids) - set(public_ids)
+    lignes_ei = rows(conn, """
+        SELECT e.id, e.name, e.short_name, b.siren FROM entities e
+        LEFT JOIN businesses b ON b.entity_id = e.id""")
+    lignes_ei = [r for r in lignes_ei if r["id"] in ei_ecartees]
+    sirens_ei_ecartees = {siren_titulaire(r["siren"]) for r in lignes_ei} - {""}
+    fiches_ei, variantes = noms_des_ei_ecartees(conn, lignes_ei, ei_ecartees, public_ids)
+    noms = fiches_ei | variantes
+    exclusions["marches"]["renvoi_vers_fiche_non_publiee"] = delier_renvois_morts(
+        marches_data, public_ids, ei_ids=ei_ids, sirens_ei_ecartees=sirens_ei_ecartees,
+        noms_ei_ecartees={cle_de_nom(n) for n in noms} - {""},
+        ei_nommees=ei_nommees, commune_id=_commune_entity_id(conn))
+    motif = motif_des_noms((fiches_ei, variantes), mots_des_fiches_publiees(
+        conn, public_ids, mots_exclus=mots_des_exploitants(
+            conn, ecartes(revue, "relation"), set(ei_ids) - set(public_ids), public_ids)))
+    noms_par_ei = {r["id"]: (r["name"], r["short_name"]) for r in lignes_ei}
+    noms_publies = {e["id"]: (e.get("name"), e.get("short_name")) for e in public_entities}
+    for m in marches_data:
+        isoles = m.pop("_mots_retires", set())
+        for nom in noms_par_ei.get(m.pop("_titulaire_ei", None), ()):
+            isoles |= mots_du_nom(nom)
+        motif_m = avec_extremites(motif, m, ("titulaire_id", "acheteur_id"), noms_publies,
+                                  public_ids)
+        for champ in ("objet", "lieu_exec", "note_revue"):
+            if m.get(champ):
+                m[champ] = masquer_noms(m[champ], motif_m, frozenset(isoles))
     nommer_acheteurs(marches_data, {e["id"]: e["name"] for e in public_entities})
 
     # La portée d'un marché est celle de son ACHETEUR. Un marché de la

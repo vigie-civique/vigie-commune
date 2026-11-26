@@ -73,12 +73,14 @@ def main() -> int:
 
     # Une autorisation dont le demandeur n'a pas de fiche : le builder doit
     # retirer le renvoi plutôt que de le laisser désigner un 404.
+    conn.execute("INSERT OR IGNORE INTO businesses (entity_id, siren, legal_form_code)"
+                 " VALUES (?, '999000002', '5710')", (voisin,))
     sitadel_ensure_table(conn)
     conn.execute(
         "INSERT INTO urbanisme_autorisations (num_dau, insee, commune, categorie,"
-        " type_dau, type_label, date_depot, demandeur_nom, demandeur_entity_id)"
+        " type_dau, type_label, date_depot, demandeur_nom, demandeur_siren, demandeur_entity_id)"
         " VALUES ('99001260001','99001','Testonville','logements','PC',"
-        "'Permis de construire','2026-01-01','Commerce de Voisinbourg',?)",
+        "'Permis de construire','2026-01-01','Commerce de Voisinbourg','999000002',?)",
         (voisin,))
 
     # La source doit figurer dans l'allowlist des règles d'EXEMPLE, qui ne
@@ -195,8 +197,8 @@ def amorcer_deliberations(conn, entite_concernee: int) -> int:
             # (`personnes_morales.json`) doit avoir une ligne à publier.
             conn.execute("INSERT INTO event_entities (event_id, entity_id, role) "
                          "VALUES (?,?,'beneficiaire')", (eid, entite_concernee))
-    conn.execute("INSERT OR IGNORE INTO businesses (entity_id, siren) VALUES (?, '999000001')",
-                 (entite_concernee,))
+    conn.execute("INSERT OR IGNORE INTO businesses (entity_id, siren, legal_form_code)"
+                 " VALUES (?, '999000001', '5710')", (entite_concernee,))
     conn.commit()
     return len(ACTES)
 

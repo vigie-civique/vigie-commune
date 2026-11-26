@@ -56,7 +56,8 @@ def deports_par_deliberation(conn, public_events: list[dict], redige) -> list[di
 
 
 def export_conflits(conn, public_ids: set[int], public_relations: list[dict],
-                    public_flows: list[dict], public_events: list[dict], redige) -> dict:
+                    public_flows: list[dict], public_events: list[dict], redige, *,
+                    ei_ids) -> dict:
     """Situations à vérifier : un élu lié à une structure qui reçoit de l'argent.
 
     Trois précautions structurent cet export :
@@ -109,8 +110,9 @@ def export_conflits(conn, public_ids: set[int], public_relations: list[dict],
         GROUP BY r.from_id
     """):
         mandats[m["pid"]] = m
-    ei_ids = {r["entity_id"] for r in rows(
-        conn, "SELECT entity_id FROM businesses WHERE legal_form_code = '1000'")}
+    # `ei_ids` d'`etape_fiches` : forme de personne physique OU EI présumée
+    # (`fiches.est_ei`), la même lecture que partout (tour 3 de la relecture).
+    ei_ids = set(ei_ids)
 
     groupes: dict[tuple, dict] = {}
     for r in brut:
@@ -239,8 +241,8 @@ def export_conflits(conn, public_ids: set[int], public_relations: list[dict],
 
 
 def etape_conflits(conn, out, public_ids, public_relations, public_flows,
-                   public_events, redige) -> dict:
+                   public_events, redige, ei_ids) -> dict:
     conflits = export_conflits(conn, public_ids, public_relations, public_flows,
-                               public_events, redige)
+                               public_events, redige, ei_ids=ei_ids)
     write_json(out / "conflits.json", conflits)
     return {"conflits": conflits}

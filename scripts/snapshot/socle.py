@@ -131,6 +131,11 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
+# La confiance d'un marché publié, définie ICI et lue des deux côtés : le filtre
+# de `etape_finances` (`argent.py`) et la retenue d'une EI (`fiches.py`).
+CONFIANCE_MARCHES = ("verified", "confirmed")
+
+
 def rows(conn: sqlite3.Connection, sql: str, params=()) -> list[dict]:
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 

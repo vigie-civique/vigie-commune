@@ -46,30 +46,134 @@ def test_confidence_publique_acceptee(bps, niveau):
     assert publiee is not None
 
 
-# ── Entrepreneur individuel : en activité, ou désigné par un fait public ─────
+# ── Entrepreneur individuel : nommé seulement si un fait public le désigne ───
 
 def _ei(**kw):
     return fiche(id=7, name="Jeanne Exemple", legal_form_code="1000", **kw)
 
 
-def test_un_entrepreneur_individuel_en_activite_reste_publie(bps):
-    publiee, _ = bps.public_entity(_ei(biz_status="A"), [], set())
-    assert publiee is not None and publiee["actif"] is True
+@pytest.mark.parametrize("statut", ["A", "C", None])
+def test_un_entrepreneur_individuel_sans_fait_public_est_ecarte(bps, statut):
+    """En activité, cessé ou registre muet : sans fait, pas de nom en ligne."""
+    publiee, motifs = bps.public_entity(_ei(biz_status=statut), [], set())
+    assert publiee is None and motifs == ["ei_sans_fait_public"]
 
 
-def test_un_entrepreneur_individuel_qui_a_cesse_n_est_plus_publie(bps):
-    publiee, motifs = bps.public_entity(_ei(biz_status="C"), [], set())
-    assert publiee is None and motifs == ["ei_activite_cessee"]
+@pytest.mark.parametrize("statut", ["A", "C"])
+def test_un_entrepreneur_individuel_designe_par_un_fait_public_est_publie(bps, statut):
+    publiee, _ = bps.public_entity(_ei(biz_status=statut), [], set(), ids_retenus={7})
+    assert publiee is not None
 
 
-def test_sauf_si_un_fait_public_le_designe(bps):
-    publiee, _ = bps.public_entity(_ei(biz_status="C"), [], set(), ids_retenus={7})
-    assert publiee is not None and publiee["actif"] is False
+def test_un_fait_sur_une_autre_fiche_ne_retient_pas_l_entrepreneur(bps):
+    assert bps.public_entity(_ei(biz_status="A"), [], set(), ids_retenus={8})[0] is None
 
 
-def test_une_societe_qui_a_cesse_reste_publiee_et_un_registre_muet_n_est_pas_une_cessation(bps):
-    assert bps.public_entity(fiche(legal_form_code="5499", biz_status="C"), [], set())[0] is not None
-    assert bps.public_entity(_ei(), [], set())[0] is not None
+def test_une_societe_reste_publiee_sans_fait(bps):
+    for statut in ("A", "C", None):
+        assert bps.public_entity(
+            fiche(legal_form_code="5499", biz_status=statut), [], set())[0] is not None
+
+
+def _source_publique():
+    from scripts.snapshot.socle import RULES
+    return [s for s in sorted(RULES["events"]["public_sources"]) if s != "bodacc"][0]
+
+
+def _publique(base, entite, nom, forme="7345", **kw):
+    """Une partie publique : forme juridique INSEE 7xxx (syndicat de droit public)."""
+    eid = entite(nom, **kw)
+    base.execute("INSERT INTO businesses (entity_id, legal_form_code) VALUES (?, ?)",
+                 (eid, forme))
+    return eid
+
+
+def _retenus(base, **kw):
+    """`ids_retenus_par_un_fait` sans filtre en amont, sauf ce que l'essai passe :
+    tous les actes de la base pour publiés, toutes les entités pour extrémités
+    publiables, aucun masque. Les paramètres sont obligatoires dans le builder."""
+    from scripts.snapshot.fiches import ids_retenus_par_un_fait
+    kw.setdefault("ids_actes_publics", {r[0] for r in base.execute("SELECT id FROM events")})
+    kw.setdefault("extremites_ok", {r[0] for r in base.execute("SELECT id FROM entities")})
+    kw.setdefault("redige", lambda t: t)
+    return ids_retenus_par_un_fait(base, **kw)
+
+
+def _acte(base, source, role, entity_id, type_="deliberation"):
+    eid = base.execute("INSERT INTO events (type, source) VALUES (?,?)",
+                       (type_, source)).lastrowid
+    base.execute("INSERT INTO event_entities (event_id, entity_id, role) VALUES (?,?,?)",
+                 (eid, entity_id, role))
+    return eid
+
+
+def _commune(base):
+    from collectors.config import COMMUNE_NAME
+    from collectors.nom_normalise import normaliser
+    nom = f"Commune de {COMMUNE_NAME}"
+    return base.execute(
+        "INSERT INTO entities (type, name, name_norm, commune, confidence) "
+        "VALUES ('service', ?, ?, ?, 'verified')", (nom, normaliser(nom), COMMUNE_NAME)).lastrowid
+
+
+def test_les_faits_qui_retiennent_une_fiche(bps, base, entite):
+    a = _publique(base, entite, "Syndicat des eaux")
+    b, c, d, e = (entite(f"Fiche {i}") for i in range(4))
+    base.execute("INSERT INTO financial_flows (type, from_id, to_id, confidence)"
+                 " VALUES ('subvention', ?, ?, 'verified')", (a, b))
+    base.execute("INSERT INTO marches_publics (acheteur_id, acheteur_siren, acheteur_nom,"
+                 " titulaire_id, objet, source, confidence)"
+                 " VALUES (?, '1', 'x', ?, 'o', 's', 'confirmed')", (d, c))
+    _acte(base, _source_publique(), "cite", e)
+    # `a` (la partie publique) n'est pas retenue : l'autre partie, `b`, ne l'est pas.
+    # Marché : le titulaire (`c`) seul retient, pas l'acheteur (`d`).
+    assert _retenus(base) == {b, c, e}
+
+
+def test_une_cession_dont_la_commune_est_partie_retient(bps, base, entite):
+    commune = _commune(base)
+    ei = entite("Fonds vendu à la commune")
+    base.execute("INSERT INTO financial_flows (type, from_id, to_id, confidence)"
+                 " VALUES ('cession_fonds', ?, ?, 'verified')", (commune, ei))
+    assert ei in _retenus(base)
+
+
+def test_une_annonce_bodacc_ou_un_acte_non_public_ne_retient_pas(bps, base, entite):
+    _acte(base, "bodacc", "cite", entite("A"), "annonce")
+    _acte(base, "source_inconnue", "cite", entite("B"))
+    assert _retenus(base) == set()
+
+
+def test_seuls_les_actes_publies_retiennent(bps, base, entite):
+    e1, e2 = entite("Acte publié"), entite("Acte écarté")
+    src = _source_publique()
+    publie, ecarte = _acte(base, src, "cite", e1), _acte(base, src, "cite", e2)
+    assert _retenus(base, ids_actes_publics={publie}) == {e1}
+    assert _retenus(base) == {e1, e2}
+
+
+def test_un_flux_lu_dans_une_rubrique_de_delegation_ne_retient_pas(bps, base, entite):
+    ei = entite("Bénéficiaire d'une décision du maire")
+    commune = _commune(base)
+    rubrique = base.execute("INSERT INTO events (type, source) VALUES ('deliberation','x')").lastrowid
+    base.execute("INSERT INTO financial_flows (type, from_id, to_id, event_id, confidence)"
+                 " VALUES ('subvention', ?, ?, ?, 'verified')", (commune, ei, rubrique))
+    assert _retenus(base, ids_actes_publics=set(), actes_de_rubrique={rubrique}) == set()
+    assert _retenus(base, ids_actes_publics=set()) == {ei}
+
+
+def test_un_fait_qui_ne_sort_pas_ne_retient_pas(bps, base, entite):
+    """Confiance privée, cession entre particuliers, permis (demandeur)."""
+    e = [entite(f"E{i}") for i in range(7)]
+    base.execute("INSERT INTO financial_flows (type, from_id, to_id, confidence)"
+                 " VALUES ('subvention', ?, ?, 'probable')", (e[0], e[1]))
+    base.execute("INSERT INTO financial_flows (type, from_id, to_id, confidence)"
+                 " VALUES ('cession_fonds', ?, ?, 'verified')", (e[2], e[3]))
+    base.execute("INSERT INTO marches_publics (acheteur_id, acheteur_siren, acheteur_nom,"
+                 " titulaire_id, objet, source, confidence)"
+                 " VALUES (?, '1', 'x', ?, 'o', 's', 'probable')", (e[4], e[5]))
+    _acte(base, _source_publique(), "demandeur", e[6])
+    assert _retenus(base) == set()
 
 
 # ── Personnes : jamais sans rôle civique ─────────────────────────────────────
@@ -216,10 +320,14 @@ def test_flux_sans_beneficiaire_identifie_reste(bps):
 # seul le renvoi vers une fiche absente est coupé. Saillans, 23/08/2026 : deux
 # titulaires C2 d'un marché intercommunal refusaient le snapshot entier.
 
+SANS_EI = {"ei_ids": frozenset(), "sirens_ei_ecartees": frozenset(),
+           "noms_ei_ecartees": frozenset(), "ei_nommees": frozenset(), "commune_id": None}
+
+
 def test_titulaire_sans_fiche_perd_son_lien_pas_son_nom(bps):
     marches = [{"id": 1, "acheteur_id": 5, "titulaire_id": 19017,
                 "titulaire_nom": "SOCIÉTÉ CALAUDIN"}]
-    assert bps.delier_renvois_morts(marches, {5}) == 1
+    assert bps.delier_renvois_morts(marches, {5}, **SANS_EI) == 1
     assert marches[0]["titulaire_id"] is None
     assert marches[0]["acheteur_id"] == 5
     assert marches[0]["titulaire_nom"] == "SOCIÉTÉ CALAUDIN"
@@ -227,13 +335,13 @@ def test_titulaire_sans_fiche_perd_son_lien_pas_son_nom(bps):
 
 def test_acheteur_sans_fiche_perd_son_lien_aussi(bps):
     marches = [{"id": 1, "acheteur_id": 8405, "titulaire_id": 2}]
-    assert bps.delier_renvois_morts(marches, {2}) == 1
+    assert bps.delier_renvois_morts(marches, {2}, **SANS_EI) == 1
     assert marches[0]["acheteur_id"] is None
 
 
 def test_marche_entierement_publie_est_laisse_intact(bps):
     marches = [{"id": 1, "acheteur_id": 5, "titulaire_id": 2}]
-    assert bps.delier_renvois_morts(marches, {2, 5}) == 0
+    assert bps.delier_renvois_morts(marches, {2, 5}, **SANS_EI) == 0
     assert (marches[0]["acheteur_id"], marches[0]["titulaire_id"]) == (5, 2)
 
 
@@ -242,7 +350,7 @@ def test_un_renvoi_absent_nest_pas_un_renvoi_mort(bps):
     sinon le décompte des exclusions gonflerait de marchés que personne n'a
     déliés."""
     marches = [{"id": 1, "acheteur_id": 5, "titulaire_id": None}]
-    assert bps.delier_renvois_morts(marches, {5}) == 0
+    assert bps.delier_renvois_morts(marches, {5}, **SANS_EI) == 0
 
 
 # ── L'ordre des règles est lui-même une garantie ─────────────────────────────
@@ -960,3 +1068,583 @@ def test_l_agenda_ne_passe_pas_par_le_filtre_des_titres_d_actes():
     acte, refus = titre_de_l_evenement("deliberation", "Vente d'un terrain à Monsieur Castor",
                                        "2026-06-01", set(), Counter())
     assert refus is None and "Castor" not in acte
+
+
+def _faire_ei(base, entite, nom):
+    eid = entite(nom, perimetre="C1")
+    base.execute("INSERT INTO businesses (entity_id, legal_form_code, status)"
+                 " VALUES (?, '1000', 'A')", (eid,))
+    return eid
+
+
+def test_flux_et_marche_de_bout_en_bout(bps, base, entite, monkeypatch):
+    """`etape_fiches` puis `etape_flux` / `etape_finances`, sur le vrai schéma.
+
+    L'EI n'est retenue que si le flux se publie LIÉ à une partie publique
+    publiée. L'autre extrémité :
+    - personne physique, personne C2 hors conseil, confiance privée, ou autre
+      partie qui n'est pas publique (une association) : l'EI n'est pas retenue ;
+    - partie publique rejetée à l'atelier ou d'une commune voisine (flux DÉLIÉ) :
+      l'EI n'est pas retenue (le contrôleur refusait le snapshot, avis
+      vigie-securite du 25/11/2026) ; le flux sort délié des deux côtés.
+    Marché : confiance publique retient, `probable` non, et `marches.json`
+    dit la même chose que la fiche."""
+    from collections import Counter, defaultdict
+    from scripts.snapshot import fiches
+    from scripts.snapshot.actes import etape_actes
+    from scripts.snapshot.argent import etape_finances, etape_flux
+    monkeypatch.setattr(fiches, "load_confirmed_urls", lambda: {})
+    particulier = entite("Un particulier", "person", perimetre="C1")
+    probable = _publique(base, entite, "Syndicat douteux", perimetre="C1", confidence="probable")
+    elue_c2 = entite("Une élue voisine", "person", perimetre="C2")
+    rejetee = _publique(base, entite, "Syndicat rejeté", perimetre="C1")
+    voisine = _publique(base, entite, "Syndicat voisin", perimetre="C2")
+    association = entite("Une association", "association", perimetre="C1")
+    autres = [particulier, probable, elue_c2, rejetee, voisine, association]
+    eis = [_faire_ei(base, entite, f"EI {i}") for i in range(len(autres))]
+    for autre, ei in zip(autres, eis):
+        base.execute("INSERT INTO financial_flows (type, from_id, to_id, confidence)"
+                     " VALUES ('subvention', ?, ?, 'verified')", (autre, ei))
+    marche_ok, marche_prive = _faire_ei(base, entite, "EI marché"), _faire_ei(base, entite, "EI marché probable")
+    for ei, conf in ((marche_ok, "verified"), (marche_prive, "probable")):
+        base.execute("INSERT INTO marches_publics (acheteur_siren, acheteur_nom, titulaire_id,"
+                     " objet, source, confidence) VALUES ('1', 'x', ?, 'o', 's', ?)", (ei, conf))
+    base.commit()
+
+    revue = {"entity": {rejetee: {"statut": "ecarte"}}}
+    civiques = {elue_c2}
+    exclusions = defaultdict(Counter)
+    actes = etape_actes(base, revue, set(), lambda t: t, exclusions)
+    f = fiches.etape_fiches(base, revue, civiques, set(), exclusions,
+                            actes["public_events"], actes["actes_de_rubrique"],
+                            redige=lambda t: t)
+    publies = {e["id"] for e in f["public_entities"]}
+    attendu = {marche_ok}
+    assert publies & (set(eis) | {marche_ok, marche_prive}) == attendu
+
+    flux = etape_flux(base, revue, f["entity_rows"], civiques, f["public_ids"],
+                      f["ecartees_du_perimetre"], lambda t: t, exclusions,
+                      actes["public_events"], ei_ids=f["ei_ids"], ei_nommees=f["ei_nommees"])["public_flows"]
+    # Les flux des deux parties publiques déliées sortent, déliés des deux côtés,
+    # sans nom d'EI ; l'EI de l'association est écartée faute de fait public, et
+    # l'association n'est pas une partie publique : son flux est ÉCARTÉ (brief
+    # `ei-flux-marches`, il sortait délié avant).
+    assert len(flux) == 2
+    assert {fl["to_name"] for fl in flux} == {None}
+    assert {fl["from_name"] for fl in flux} == {"Syndicat rejeté", "Syndicat voisin"}
+    assert all(fl["from_id"] is None and fl["to_id"] is None for fl in flux)
+
+    finances = etape_finances(base, revue, f["public_ids"], f["public_entities"],
+                              {e["id"]: e.get("perimetre") for e in f["public_entities"]},
+                              set(), exclusions, ei_ids=f["ei_ids"], ei_nommees=f["ei_nommees"])
+    assert {m["titulaire_id"] for m in finances["marches_data"]} == {marche_ok}
+
+
+def test_une_ei_citee_seulement_dans_un_acte_ecarte_n_est_pas_publiee(bps, base, entite, monkeypatch):
+    """De bout en bout, avec le vrai branchement : `etape_actes` puis
+    `etape_fiches(public_events=...)`. Un acte de type exclu n'est pas publié ;
+    l'EI qu'il cite ressort avec `ei_sans_fait_public`. Témoin : citée dans un
+    acte publié, elle est publiée."""
+    from collections import Counter, defaultdict
+    from scripts.snapshot import fiches
+    from scripts.snapshot.actes import etape_actes
+    from scripts.snapshot.socle import RULES
+    monkeypatch.setattr(fiches, "load_confirmed_urls", lambda: {})
+    ecartee, temoin = entite("EI écartée", perimetre="C1"), entite("EI témoin", perimetre="C1")
+    for eid in (ecartee, temoin):
+        base.execute("INSERT INTO businesses (entity_id, legal_form_code, status)"
+                     " VALUES (?, '1000', 'A')", (eid,))
+    source = _source_publique()
+    type_exclu = sorted(RULES["events"]["exclude_types"])[0]
+    _acte(base, source, "cite", ecartee, type_exclu)
+    _acte(base, source, "cite", temoin, "deliberation")
+    base.commit()
+    exclusions = defaultdict(Counter)
+    actes = etape_actes(base, {}, set(), lambda t: t, exclusions)
+    sortie = fiches.etape_fiches(base, {}, set(), set(), exclusions,
+                                 actes["public_events"], actes["actes_de_rubrique"],
+                            redige=lambda t: t)
+    publies = {e["id"] for e in sortie["public_entities"]}
+    assert temoin in publies and ecartee not in publies
+    motifs = {x["id"]: x["reasons"] for x in sortie["entity_exclusions"]}
+    assert motifs[ecartee] == ["ei_sans_fait_public"]
+
+
+def test_un_flux_n_est_retenant_que_de_la_part_d_une_partie_publique(bps, base, entite, monkeypatch):
+    """Retiennent : la commune, l'intercommunalité, un syndicat en forme 7xxx, un EPIC en forme 4110.
+    Ne retiennent pas : une association, une société, une pharmacie FINESS (une
+    fiche `type = 'service'` sans forme publique)."""
+    from collectors import config
+    from collectors.nom_normalise import normaliser
+    monkeypatch.setattr(config, "EPCI_NOM", "Communauté de communes de Test")
+    ei = {n: entite(f"EI {n}") for n in
+          ("asso", "societe", "pharmacie", "commune", "interco", "syndicat", "epic")}
+    asso = entite("Une association", "association")
+    societe = entite("Une société")
+    base.execute("INSERT INTO businesses (entity_id, legal_form_code) VALUES (?, '5499')", (societe,))
+    pharmacie = entite("Pharmacie FINESS", "service")
+    commune = _commune(base)
+    interco = base.execute(
+        "INSERT INTO entities (type, name, name_norm, confidence)"
+        " VALUES ('service', 'Communauté de communes de Test', ?, 'verified')",
+        (normaliser("Communauté de communes de Test"),)).lastrowid
+    syndicat = _publique(base, entite, "Syndicat de droit public")
+    epic = _publique(base, entite, "Agence publique (EPIC)", forme="4110")
+    for de, cle in ((asso, "asso"), (societe, "societe"), (pharmacie, "pharmacie"),
+                    (commune, "commune"), (interco, "interco"), (syndicat, "syndicat"), (epic, "epic")):
+        base.execute("INSERT INTO financial_flows (type, from_id, to_id, confidence)"
+                     " VALUES ('subvention', ?, ?, 'verified')", (de, ei[cle]))
+    assert _retenus(base) == {ei["commune"], ei["interco"], ei["syndicat"],
+                                             ei["epic"]}
+
+
+@pytest.mark.parametrize("source,type_", [
+    ("ccomptes", "rapport_ccomptes"), ("sitadel", "permis"), ("gpu", "document_urbanisme"),
+    ("interieur", "resultat_electoral"), ("BOAMP", "marche_public"),
+    ("DECP data.gouv.fr", "marche_public")])
+def test_seul_un_acte_de_la_collectivite_retient(bps, base, entite, source, type_):
+    """Les registres et publications d'autres autorités ne sont pas des actes de la
+    collectivité. BOAMP et DECP comptent comme marchés (table `marches_publics`)."""
+    ei = entite("EI citée par un registre")
+    _acte(base, source, "cite", ei, type_)
+    assert _retenus(base) == set()
+    _acte(base, _source_publique(), "cite", ei, "deliberation")
+    assert _retenus(base) == {ei}
+
+
+def _verdict(statut, confidence=None):
+    return {"statut": statut, "corrections": {}, "confidence": confidence, "note": None}
+
+
+def test_le_verdict_d_atelier_passe_avant_la_confiance(bps, base, entite):
+    """Flux ou marché rejeté à l'atelier : ne retient pas. Flux `probable` validé
+    à l'atelier (confiance relevée) : retient. Même ordre qu'`etape_flux`."""
+    commune = _commune(base)
+    ei_rejete, ei_valide, ei_marche_rejete, ei_marche = (entite(f"EI {i}") for i in range(4))
+    flux_rejete = base.execute(
+        "INSERT INTO financial_flows (type, from_id, to_id, confidence)"
+        " VALUES ('subvention', ?, ?, 'verified')", (commune, ei_rejete)).lastrowid
+    flux_valide = base.execute(
+        "INSERT INTO financial_flows (type, from_id, to_id, confidence)"
+        " VALUES ('subvention', ?, ?, 'probable')", (commune, ei_valide)).lastrowid
+    marche_rejete, marche = (base.execute(
+        "INSERT INTO marches_publics (acheteur_siren, acheteur_nom, titulaire_id, objet,"
+        " source, confidence) VALUES ('1', 'x', ?, 'o', 's', 'verified')", (ei,)).lastrowid
+        for ei in (ei_marche_rejete, ei_marche))
+    revue = {"flow": {flux_rejete: _verdict("ecarte"),
+                      flux_valide: _verdict("retenu", "verified")},
+             "marche": {marche_rejete: _verdict("ecarte")}}
+    assert _retenus(base, revue=revue) == {ei_valide, ei_marche}
+    # Sans revue : le flux `probable` ne retient pas, le rejeté retient.
+    assert _retenus(base) == {ei_rejete, ei_marche_rejete, ei_marche}
+
+
+def test_un_flux_d_agregat_ne_retient_pas(bps, base, entite):
+    """`write_entity_bundles` retire les agrégats de la fiche : ils ne désignent
+    personne."""
+    commune, ei, ei_detail = _commune(base), entite("EI agrégat"), entite("EI détail")
+    for cible, perimetre in ((ei, "agregat"), (ei_detail, "detail")):
+        base.execute("INSERT INTO financial_flows (type, from_id, to_id, confidence, perimetre)"
+                     " VALUES ('subvention', ?, ?, 'verified', ?)", (commune, cible, perimetre))
+    assert _retenus(base) == {ei_detail}
+
+
+def test_un_flux_que_l_ei_verse_a_la_commune_ne_retient_pas(bps, base, entite):
+    """Loyer, redevance, prix d'achat : dans le sens EI → partie publique, pas de
+    retenue (avis vigie-dpo du 24/11/2026). Dans l'autre sens, oui."""
+    commune = _commune(base)
+    locataire, beneficiaire = entite("EI locataire"), entite("EI bénéficiaire")
+    base.execute("INSERT INTO financial_flows (type, from_id, to_id, confidence)"
+                 " VALUES ('bail', ?, ?, 'verified')", (locataire, commune))
+    base.execute("INSERT INTO financial_flows (type, from_id, to_id, confidence)"
+                 " VALUES ('subvention', ?, ?, 'verified')", (commune, beneficiaire))
+    assert _retenus(base) == {beneficiaire}
+
+
+def test_un_acte_au_titre_masque_ne_retient_pas_et_n_est_pas_lie(bps, base, entite, monkeypatch):
+    """De bout en bout : une délibération dont le titre publié dit « un
+    particulier » ne retient pas l'EI qu'elle lie ; et si l'EI est retenue par un
+    marché, sa fiche ne liste ni cet acte ni un acte où elle est `demandeur`."""
+    from collections import Counter, defaultdict
+    from scripts.snapshot import fiches
+    from scripts.snapshot.actes import etape_actes, etape_liens_actes
+    monkeypatch.setattr(fiches, "load_confirmed_urls", lambda: {})
+    masquee, marche = (_faire_ei(base, entite, n) for n in ("EI masquée", "EI marché"))
+    src = _source_publique()
+    titre = base.execute("INSERT INTO events (type, source, title, date) VALUES"
+                         " ('deliberation', ?, 'Vente d''un terrain à un particulier', '2026-06-01')",
+                         (src,)).lastrowid
+    neutre = base.execute("INSERT INTO events (type, source, title, date) VALUES"
+                          " ('deliberation', ?, 'Subvention annuelle', '2026-06-02')",
+                          (src,)).lastrowid
+    for eid, ei, role in ((titre, masquee, "cite"), (titre, marche, "cite"),
+                          (neutre, marche, "demandeur")):
+        base.execute("INSERT INTO event_entities (event_id, entity_id, role) VALUES (?,?,?)",
+                     (eid, ei, role))
+    base.execute("INSERT INTO marches_publics (acheteur_siren, acheteur_nom, titulaire_id,"
+                 " objet, source, confidence) VALUES ('1', 'x', ?, 'o', 's', 'verified')", (marche,))
+    base.commit()
+    exclusions = defaultdict(Counter)
+    actes = etape_actes(base, {}, set(), lambda t: t, exclusions)
+    f = fiches.etape_fiches(base, {}, set(), set(), exclusions,
+                            actes["public_events"], actes["actes_de_rubrique"],
+                            redige=lambda t: t)
+    publies = {e["id"] for e in f["public_entities"]}
+    assert marche in publies and masquee not in publies
+    liens = etape_liens_actes(base, f["public_ids"], f["public_entities"],
+                              actes["public_events"], exclusions, f["ei_ids"])["public_links"]
+    assert [l for l in liens if l["entity_id"] == marche] == []
+
+
+def test_une_ei_en_naf_68_est_traitee_comme_une_ei(bps, base, entite, monkeypatch):
+    """Une EI en NAF 68 est `individuelle` (la forme 1000 l'emporte) ; le repérage
+    des liens se fait par la forme juridique 1000 (`ei_ids`)."""
+    from collections import Counter, defaultdict
+    from scripts.snapshot import fiches
+    from scripts.snapshot.actes import etape_actes, etape_liens_actes
+    monkeypatch.setattr(fiches, "load_confirmed_urls", lambda: {})
+    ei = _faire_ei(base, entite, "EI loueuse")
+    base.execute("UPDATE businesses SET naf_code = '6820A' WHERE entity_id = ?", (ei,))
+    base.execute("INSERT INTO marches_publics (acheteur_siren, acheteur_nom, titulaire_id,"
+                 " objet, source, confidence) VALUES ('1', 'x', ?, 'o', 's', 'verified')", (ei,))
+    acte = base.execute("INSERT INTO events (type, source, title, date) VALUES"
+                        " ('deliberation', ?, 'Vente à un particulier', '2026-06-01')",
+                        (_source_publique(),)).lastrowid
+    base.execute("INSERT INTO event_entities (event_id, entity_id, role) VALUES (?,?,'cite')",
+                 (acte, ei))
+    base.commit()
+    exclusions = defaultdict(Counter)
+    actes = etape_actes(base, {}, set(), lambda t: t, exclusions)
+    f = fiches.etape_fiches(base, {}, set(), set(), exclusions,
+                            actes["public_events"], actes["actes_de_rubrique"],
+                            redige=lambda t: t)
+    fiche = next(e for e in f["public_entities"] if e["id"] == ei)
+    assert fiche["nature"] == "individuelle"
+    liens = etape_liens_actes(base, f["public_ids"], f["public_entities"],
+                              actes["public_events"], exclusions, f["ei_ids"])["public_links"]
+    assert [l for l in liens if l["entity_id"] == ei] == []
+
+
+def test_du_builder_au_controle_trois_ei_retenues_sans_erreur(bps, base, entite, monkeypatch, tmp_path):
+    """Le builder et le contrôleur tiennent la même règle : trois EI retenues (flux
+    de la commune, marché, délibération), les étapes jusqu'à `write_entity_bundles`,
+    puis `check_ei_sans_fait` : aucune erreur."""
+    import importlib.util
+    import json
+    from collections import Counter, defaultdict
+    from scripts.snapshot import fiches
+    from scripts.snapshot.actes import etape_actes, etape_liens_actes
+    from scripts.snapshot.argent import etape_finances, etape_flux
+    from scripts.snapshot.socle import ROOT
+    monkeypatch.setattr(fiches, "load_confirmed_urls", lambda: {})
+    commune = _commune(base)
+    # Le payeur doit avoir sa fiche pour retenir (avis vigie-securite du 25/11).
+    base.execute("UPDATE entities SET perimetre = 'C1' WHERE id = ?", (commune,))
+    par_flux, par_marche, par_acte = (_faire_ei(base, entite, n)
+                                      for n in ("EI flux", "EI marché", "EI acte"))
+    base.execute("INSERT INTO financial_flows (type, from_id, to_id, confidence)"
+                 " VALUES ('subvention', ?, ?, 'verified')", (commune, par_flux))
+    base.execute("INSERT INTO marches_publics (acheteur_siren, acheteur_nom, titulaire_id,"
+                 " objet, source, confidence) VALUES ('1', 'x', ?, 'o', 's', 'verified')", (par_marche,))
+    acte = base.execute("INSERT INTO events (type, source, title, date) VALUES"
+                        " ('deliberation', ?, 'Subvention annuelle', '2026-06-01')",
+                        (_source_publique(),)).lastrowid
+    base.execute("INSERT INTO event_entities (event_id, entity_id, role) VALUES (?,?,'cite')",
+                 (acte, par_acte))
+    base.commit()
+
+    exclusions = defaultdict(Counter)
+    actes = etape_actes(base, {}, set(), lambda t: t, exclusions)
+    f = fiches.etape_fiches(base, {}, set(), set(), exclusions,
+                            actes["public_events"], actes["actes_de_rubrique"],
+                            redige=lambda t: t)
+    assert {par_flux, par_marche, par_acte} <= f["public_ids"]
+    liens = etape_liens_actes(base, f["public_ids"], f["public_entities"],
+                              actes["public_events"], exclusions, f["ei_ids"])["public_links"]
+    flux = etape_flux(base, {}, f["entity_rows"], set(), f["public_ids"],
+                      f["ecartees_du_perimetre"], lambda t: t, exclusions,
+                      actes["public_events"], ei_ids=f["ei_ids"], ei_nommees=f["ei_nommees"])["public_flows"]
+    marches = etape_finances(base, {}, f["public_ids"], f["public_entities"], {}, set(),
+                             exclusions, ei_ids=f["ei_ids"], ei_nommees=f["ei_nommees"])["marches_data"]
+    fiches.write_entity_bundles(tmp_path, f["public_entities"], [], actes["public_events"],
+                                liens, flux, marches)
+    (tmp_path / "entities.json").write_text(json.dumps({"entities": f["public_entities"]}))
+
+    spec = importlib.util.spec_from_file_location(
+        "verify_snapshot", ROOT / "scripts" / "verify_snapshot.py")
+    vs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vs)
+    rep = vs.Report()
+    vs.check_ei_sans_fait(tmp_path, rep)
+    assert rep.errors == {}
+    assert sum(1 for e in f["public_entities"] if e.get("nature") == "individuelle") == 3
+
+
+def test_le_lien_beneficiaire_d_un_flux_non_publiable_ne_retient_pas(bps, base, entite):
+    """Les collecteurs posent un lien `bénéficiaire` pour tout flux lu dans un acte,
+    même `probable` : il ne doit pas rouvrir ce que le filtre des flux ferme."""
+    ei = entite("EI bénéficiaire d'un flux probable")
+    _acte(base, _source_publique(), "bénéficiaire", ei)
+    base.execute("INSERT INTO financial_flows (type, to_id, confidence)"
+                 " VALUES ('subvention', ?, 'probable')", (ei,))
+    assert _retenus(base) == set()
+
+
+def test_un_flux_vers_une_ei_au_titre_masque_est_delie(bps, base, entite, monkeypatch):
+    """La fiche d'une EI ne ré-identifie pas « un particulier » par ses flux."""
+    from collections import Counter, defaultdict
+    from scripts.snapshot import fiches
+    from scripts.snapshot.actes import etape_actes
+    from scripts.snapshot.argent import etape_flux
+    monkeypatch.setattr(fiches, "load_confirmed_urls", lambda: {})
+    commune = _commune(base)
+    ei = _faire_ei(base, entite, "EI aidée")
+    acte = base.execute("INSERT INTO events (type, source, title, date) VALUES"
+                        " ('deliberation', ?, 'Aide à un particulier', '2026-06-01')",
+                        (_source_publique(),)).lastrowid
+    base.execute("INSERT INTO financial_flows (type, from_id, to_id, event_id, confidence,"
+                 " description) VALUES ('subvention', ?, ?, ?, 'verified', 'Aide à un particulier')",
+                 (commune, ei, acte))
+    base.execute("INSERT INTO marches_publics (acheteur_siren, acheteur_nom, titulaire_id,"
+                 " objet, source, confidence) VALUES ('1', 'x', ?, 'o', 's', 'verified')", (ei,))
+    base.commit()
+    exclusions = defaultdict(Counter)
+    actes = etape_actes(base, {}, set(), lambda t: t, exclusions)
+    f = fiches.etape_fiches(base, {}, set(), set(), exclusions, actes["public_events"], redige=lambda t: t)
+    flux = etape_flux(base, {}, f["entity_rows"], set(), f["public_ids"],
+                      f["ecartees_du_perimetre"], lambda t: t, exclusions,
+                      actes["public_events"], ei_ids=f["ei_ids"], ei_nommees=f["ei_nommees"])["public_flows"]
+    # Délié : ni l'EI (id, nom) ni la description ; le montant reste attaché à l'acte.
+    assert len(flux) == 1
+    assert flux[0]["to_id"] is None and flux[0]["to_name"] is None
+    assert flux[0]["description"] is None and flux[0]["acte_id"] == acte
+
+
+def test_un_flux_lu_dans_un_acte_masque_ne_retient_pas(bps, base, entite):
+    commune = _commune(base)
+    masque, decrit, neutre = (entite(n) for n in ("EI acte masqué", "EI description", "EI neutre"))
+    acte = base.execute("INSERT INTO events (type, source) VALUES ('deliberation', 'x')").lastrowid
+    for ei, event, desc in ((masque, acte, None), (decrit, None, "Aide à un particulier"),
+                            (neutre, None, "Subvention")):
+        base.execute("INSERT INTO financial_flows (type, from_id, to_id, event_id, confidence,"
+                     " description) VALUES ('subvention', ?, ?, ?, 'verified', ?)",
+                     (commune, ei, event, desc))
+    assert _retenus(base, ids_actes_publics=set(), actes_masques={acte}) == {neutre}
+
+
+def test_la_description_est_redigee_avant_de_retenir(bps, base, entite, monkeypatch):
+    """Une subvention à « Jeanne EXEMPLE », EI dont la dirigeante non publique
+    porte le même nom : avec le VRAI `redige`, la description devient « un
+    particulier », le flux est délié et ne retient pas l'EI (sinon le snapshot
+    serait refusé par `check_ei_sans_fait`)."""
+    from collections import Counter, defaultdict
+    from scripts.snapshot import fiches
+    from scripts.snapshot.actes import etape_actes
+    from scripts.snapshot.argent import etape_flux
+    from scripts.snapshot.personnes import etape_personnes_publiques
+    monkeypatch.setattr(fiches, "load_confirmed_urls", lambda: {})
+    commune = _commune(base)
+    dirigeante = entite("Jeanne Exemple", type_="person")
+    base.execute("UPDATE entities SET name = 'Jeanne EXEMPLE' WHERE id = ?", (dirigeante,))
+    base.execute("INSERT INTO persons (entity_id, firstname, lastname) VALUES (?, 'Jeanne', 'EXEMPLE')",
+                 (dirigeante,))
+    ei = _faire_ei(base, entite, "Jeanne EXEMPLE")
+    base.execute("INSERT INTO financial_flows (type, from_id, to_id, confidence, description)"
+                 " VALUES ('subvention', ?, ?, 'verified', 'Subvention à Jeanne EXEMPLE')",
+                 (commune, ei))
+    base.commit()
+    pers = etape_personnes_publiques(base, "[]")
+    redige = pers["redige"]
+    assert "Jeanne EXEMPLE" not in (redige("Subvention à Jeanne EXEMPLE") or "")
+    exclusions = defaultdict(Counter)
+    actes = etape_actes(base, {}, pers["noms_publics"], redige, exclusions)
+    f = fiches.etape_fiches(base, {}, pers["public_person_ids"], set(), exclusions,
+                            actes["public_events"], redige=redige)
+    assert ei not in f["public_ids"]
+    flux = etape_flux(base, {}, f["entity_rows"], pers["public_person_ids"], f["public_ids"],
+                      f["ecartees_du_perimetre"], redige, exclusions, actes["public_events"],
+                      ei_ids=f["ei_ids"], ei_nommees=f["ei_nommees"])["public_flows"]
+    assert all(fl.get("to_name") != "Jeanne EXEMPLE" for fl in flux)
+
+
+def test_une_ei_hors_perimetre_perd_son_nom_avec_un_titre_masque(bps, base, entite, monkeypatch):
+    """EI d'une commune voisine (C2) : écartée pour le périmètre, son flux est
+    déjà délié (nom gardé) avant le masque ; il perd quand même nom et description
+    si la description dit « un particulier » (avis vigie-securite, tour 9)."""
+    from collections import Counter, defaultdict
+    from scripts.snapshot import fiches
+    from scripts.snapshot.actes import etape_actes
+    from scripts.snapshot.argent import etape_flux
+    monkeypatch.setattr(fiches, "load_confirmed_urls", lambda: {})
+    commune = _commune(base)
+    base.execute("UPDATE entities SET perimetre = 'C1' WHERE id = ?", (commune,))
+    ei = entite("Jeanne Exemple", perimetre="C2")
+    base.execute("INSERT INTO businesses (entity_id, legal_form_code, status)"
+                 " VALUES (?, '1000', 'A')", (ei,))
+    base.execute("INSERT INTO financial_flows (type, from_id, to_id, confidence, description)"
+                 " VALUES ('subvention', ?, ?, 'verified', 'Subvention à un particulier')",
+                 (commune, ei))
+    base.commit()
+    exclusions = defaultdict(Counter)
+    actes = etape_actes(base, {}, set(), lambda t: t, exclusions)
+    f = fiches.etape_fiches(base, {}, set(), set(), exclusions, actes["public_events"],
+                            redige=lambda t: t)
+    flux = etape_flux(base, {}, f["entity_rows"], set(), f["public_ids"],
+                      f["ecartees_du_perimetre"], lambda t: t, exclusions,
+                      actes["public_events"], ei_ids=f["ei_ids"], ei_nommees=f["ei_nommees"])["public_flows"]
+    assert len(flux) == 1
+    assert flux[0]["to_id"] is None and flux[0]["to_name"] is None
+    assert flux[0]["description"] is None
+
+
+def test_les_copies_du_controleur_sont_celles_du_builder(bps):
+    """`verify_snapshot.py` n'importe pas le builder (filet indépendant) et recopie
+    ses listes : cet essai les garde identiques."""
+    import importlib.util
+    from scripts.snapshot.actes import _DESIGNE_UNE_PERSONNE
+    from scripts.snapshot.fiches import (ETATS_SANS_VERSEMENT, ROLES_QUI_NE_RETIENNENT_PAS,
+                                         TYPES_ACTES_DE_LA_COLLECTIVITE)
+    from scripts.snapshot.socle import ROOT
+    spec = importlib.util.spec_from_file_location(
+        "verify_snapshot", ROOT / "scripts" / "verify_snapshot.py")
+    vs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vs)
+    assert tuple(vs.TYPES_ACTES_COLLECTIVITE) == tuple(TYPES_ACTES_DE_LA_COLLECTIVITE)
+    assert vs.DESIGNE_UNE_PERSONNE.pattern == _DESIGNE_UNE_PERSONNE.pattern
+    assert vs.DESIGNE_UNE_PERSONNE.flags == _DESIGNE_UNE_PERSONNE.flags
+    assert tuple(vs.ROLES_SANS_FAIT) == tuple(ROLES_QUI_NE_RETIENNENT_PAS)
+    assert tuple(vs.ETATS_SANS_VERSEMENT) == tuple(ETATS_SANS_VERSEMENT)
+
+
+@pytest.mark.parametrize("masque_en_premier", [False, True])
+def test_deux_flux_jumeaux_vers_une_ei_le_masque_reste(bps, base, entite, monkeypatch, masque_en_premier):
+    """Deux flux jumeaux (même année, montant, type, émetteur, EI), l'un neutre,
+    l'autre à la description « un particulier » : il en sort UN seul, délié, sans
+    `to_name`, quel que soit l'ordre d'entrée. Jamais le neutre avec le nom."""
+    from collections import Counter, defaultdict
+    from scripts.snapshot import fiches
+    from scripts.snapshot.actes import etape_actes
+    from scripts.snapshot.argent import etape_flux
+    monkeypatch.setattr(fiches, "load_confirmed_urls", lambda: {})
+    commune = _commune(base)
+    base.execute("UPDATE entities SET perimetre = 'C1' WHERE id = ?", (commune,))
+    ei = _faire_ei(base, entite, "EI jumelle")
+    base.execute("INSERT INTO marches_publics (acheteur_siren, acheteur_nom, titulaire_id,"
+                 " objet, source, confidence) VALUES ('1', 'x', ?, 'o', 's', 'verified')", (ei,))
+    descriptions = ["Aide à un particulier", "Aide annuelle"]
+    for d in (descriptions if masque_en_premier else descriptions[::-1]):
+        base.execute("INSERT INTO financial_flows (type, year, amount, from_id, to_id, confidence,"
+                     " description) VALUES ('subvention', 2025, 500, ?, ?, 'verified', ?)",
+                     (commune, ei, d))
+    base.commit()
+    exclusions = defaultdict(Counter)
+    actes = etape_actes(base, {}, set(), lambda t: t, exclusions)
+    f = fiches.etape_fiches(base, {}, set(), set(), exclusions, actes["public_events"],
+                            redige=lambda t: t)
+    flux = etape_flux(base, {}, f["entity_rows"], set(), f["public_ids"],
+                      f["ecartees_du_perimetre"], lambda t: t, exclusions,
+                      actes["public_events"], ei_ids=f["ei_ids"], ei_nommees=f["ei_nommees"])["public_flows"]
+    assert len(flux) == 1
+    assert flux[0]["to_id"] is None and flux[0]["to_name"] is None
+    assert flux[0]["description"] is None
+
+
+def test_des_jumeaux_dont_l_un_est_masque_ne_retiennent_pas(bps, base, entite):
+    """Sans autre fait, ni le neutre ni le masqué ne retiennent l'EI : sinon sa
+    fiche sortirait sans fait (le contrôle refuserait le snapshot)."""
+    commune = _commune(base)
+    ei = entite("EI jumelle sans autre fait")
+    for d in ("Aide annuelle", "Aide à un particulier"):
+        base.execute("INSERT INTO financial_flows (type, year, amount, from_id, to_id, confidence,"
+                     " description) VALUES ('subvention', 2025, 500, ?, ?, 'verified', ?)",
+                     (commune, ei, d))
+    assert _retenus(base) == set()
+
+
+def test_dedupliquer_flux_garde_le_masque(bps):
+    neutre = {"year": 2025, "amount": 500, "type": "s", "from_id": 1, "to_id": 9,
+              "description": "Aide annuelle"}
+    masque = {**neutre, "description": "Aide à un particulier"}
+    est = lambda f: "particulier" in (f.get("description") or "")
+    assert bps.dedupliquer_flux([neutre, masque], est) == [masque]
+    assert bps.dedupliquer_flux([masque, neutre], est) == [masque]
+    assert bps.dedupliquer_flux([neutre, masque]) == [neutre]  # sans `masque` : comme avant
+
+
+@pytest.mark.parametrize("masque_en_premier", [False, True])
+def test_des_jumeaux_dont_l_un_nomme_une_personne_non_publique(bps, base, entite, monkeypatch, masque_en_premier):
+    """Le masque se lit APRÈS `redige` : « Versement à Jeanne EXEMPLE » (nom d'une
+    personne non publique) devient « un particulier ». Entre ce jumeau et un flux
+    « Travaux », c'est lui qui reste, délié, dans les deux ordres d'entrée."""
+    from collections import Counter, defaultdict
+    from scripts.snapshot import fiches
+    from scripts.snapshot.argent import etape_flux
+    from scripts.snapshot.actes import etape_actes
+    from scripts.snapshot.personnes import etape_personnes_publiques
+    monkeypatch.setattr(fiches, "load_confirmed_urls", lambda: {})
+    commune = _commune(base)
+    base.execute("UPDATE entities SET perimetre = 'C1' WHERE id = ?", (commune,))
+    dirigeante = entite("Jeanne EXEMPLE", type_="person")
+    base.execute("INSERT INTO persons (entity_id, firstname, lastname) VALUES (?, 'Jeanne', 'EXEMPLE')",
+                 (dirigeante,))
+    ei = _faire_ei(base, entite, "Jeanne EXEMPLE")
+    base.execute("INSERT INTO marches_publics (acheteur_siren, acheteur_nom, titulaire_id,"
+                 " objet, source, confidence) VALUES ('1', 'x', ?, 'o', 's', 'verified')", (ei,))
+    descriptions = ["Versement à Jeanne EXEMPLE", "Travaux"]
+    for d in (descriptions if masque_en_premier else descriptions[::-1]):
+        base.execute("INSERT INTO financial_flows (type, year, amount, from_id, to_id, confidence,"
+                     " description) VALUES ('subvention', 2025, 500, ?, ?, 'verified', ?)",
+                     (commune, ei, d))
+    base.commit()
+    pers = etape_personnes_publiques(base, "[]")
+    redige = pers["redige"]
+    exclusions = defaultdict(Counter)
+    actes = etape_actes(base, {}, pers["noms_publics"], redige, exclusions)
+    f = fiches.etape_fiches(base, {}, pers["public_person_ids"], set(), exclusions,
+                            actes["public_events"], redige=redige)
+    flux = etape_flux(base, {}, f["entity_rows"], pers["public_person_ids"], f["public_ids"],
+                      f["ecartees_du_perimetre"], redige, exclusions, actes["public_events"],
+                      ei_ids=f["ei_ids"], ei_nommees=f["ei_nommees"])["public_flows"]
+    assert len(flux) == 1
+    assert flux[0]["to_id"] is None and flux[0]["to_name"] is None
+    assert flux[0]["description"] is None
+
+
+@pytest.mark.parametrize("cas", ["subvention_a_un_particulier", "loyer_de_l_ei"])
+def test_un_flux_d_une_ei_sans_autre_fait_est_delie_et_garde_son_montant(bps, base, entite, monkeypatch, cas):
+    """EI écartée faute de fait public : son flux ne disparaît pas des totaux. Un
+    seul flux, délié, montant présent, aucun nom ni identifiant d'EI, aucune
+    description ; et l'EI n'est pas publiée. (a) subvention de la commune
+    « à un particulier » ; (b) loyer versé par l'EI à la commune."""
+    from collections import Counter, defaultdict
+    from scripts.snapshot import fiches
+    from scripts.snapshot.actes import etape_actes
+    from scripts.snapshot.argent import etape_flux
+    monkeypatch.setattr(fiches, "load_confirmed_urls", lambda: {})
+    commune = _commune(base)
+    base.execute("UPDATE entities SET perimetre = 'C1' WHERE id = ?", (commune,))
+    ei = _faire_ei(base, entite, "Jeanne Exemple")
+    if cas == "subvention_a_un_particulier":
+        base.execute("INSERT INTO financial_flows (type, year, amount, from_id, to_id, confidence,"
+                     " description) VALUES ('subvention', 2025, 840, ?, ?, 'verified',"
+                     " 'Aide à un particulier')", (commune, ei))
+    else:
+        base.execute("INSERT INTO financial_flows (type, year, amount, from_id, to_id, confidence,"
+                     " description) VALUES ('bail', 2025, 840, ?, ?, 'verified',"
+                     " 'Loyer du local')", (ei, commune))
+    base.commit()
+    exclusions = defaultdict(Counter)
+    actes = etape_actes(base, {}, set(), lambda t: t, exclusions)
+    f = fiches.etape_fiches(base, {}, set(), set(), exclusions, actes["public_events"],
+                            redige=lambda t: t)
+    assert ei not in f["public_ids"]
+    flux = etape_flux(base, {}, f["entity_rows"], set(), f["public_ids"],
+                      f["ecartees_du_perimetre"], lambda t: t, exclusions,
+                      actes["public_events"], ei_ids=f["ei_ids"], ei_nommees=f["ei_nommees"])["public_flows"]
+    assert len(flux) == 1
+    assert flux[0]["amount"] == 840
+    assert ei not in (flux[0]["from_id"], flux[0]["to_id"])
+    assert flux[0]["from_name"] != "Jeanne Exemple" and flux[0]["to_name"] != "Jeanne Exemple"
+    import json
+    assert "Jeanne Exemple" not in json.dumps(flux)
+    assert flux[0]["description"] is None

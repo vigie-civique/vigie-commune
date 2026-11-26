@@ -23,6 +23,7 @@ from collectors.pv_parsers import (NUMEROTATION_DE_TETE, rubrique_de_decisions, 
                                    titre_en_fragment, titre_en_mots_colles,
                                    titre_numero_d_acte_seul, titre_questions_diverses)
 from scripts.snapshot.revue import TYPES_REVUS, appliquer_revue
+from scripts.snapshot.urbanisme import evenements_demandeur_retire
 from scripts.snapshot.socle import (RULES, URL_COMMUNE, URL_EPCI, rows, safe_url,
                                     write_json_compact)
 from scripts.snapshot.textes import (champ_publiable, convocation_publique,
@@ -531,12 +532,6 @@ def etape_actes(conn, revue, noms_publics, redige, exclusions) -> dict:
     # 717 actes de marché — dont les avis d'un EPCI de Seine-Saint-Denis
     # attrapés par le mot « Terres ». Filtrer un côté et pas l'autre ne
     # ferme rien : les deux vues doivent dire la même chose.
-    colonnes_mp = {r["name"] for r in rows(conn, "PRAGMA table_info(marches_publics)")}
-    filtre_actes_marches = ("""
-        AND NOT EXISTS (SELECT 1 FROM marches_publics mp
-                         WHERE mp.event_id = events.id
-                           AND mp.confidence NOT IN ('verified','confirmed'))
-    """ if "confidence" in colonnes_mp else "")
     event_rows = rows(conn, f"""
         SELECT id, type, date, title, source, source_url, metadata,
                CASE WHEN type IN ({", ".join(f"'{t}'" for t in TYPES_DELIBERES)})
@@ -544,9 +539,30 @@ def etape_actes(conn, revue, noms_publics, redige, exclusions) -> dict:
                (source = 'bodacc' AND (content LIKE '%personne physique%'
                                        OR content LIKE '%radiationPP%')) AS bodacc_pp
         FROM events
-        WHERE 1=1 {filtre_actes_marches}
         ORDER BY date DESC, id DESC
     """)
+    # La règle est celle de `marches.json` (`etape_finances`) : le verdict
+    # d'atelier, ses corrections et sa confiance, PUIS `confiance_marche_publique`.
+    # Un acte relié à un marché ne sort que si TOUS ses marchés sortent. Le
+    # filtre SQL d'avant lisait la base sans la revue : un marché écarté ou
+    # rétrogradé à l'atelier laissait son avis en ligne, un marché `probable`
+    # validé gardait le sien caché, et une confiance NULL passait le
+    # `NOT IN` (suite d'É0, #323). Posé ici, avant les fragments, la dernière
+    # passe et la boucle : tout ce qui lit `event_rows` voit la même liste.
+    # Le lien acte ↔ marché est celui de la base (`event_id`) ; une correction
+    # d'atelier de ce champ n'est pas suivie.
+    colonnes_mp = {r["name"] for r in rows(conn, "PRAGMA table_info(marches_publics)")}
+    if "event_id" in colonnes_mp:
+        from scripts.snapshot.argent import confiance_marche_publique
+        conf_mp = ", confidence" if "confidence" in colonnes_mp else ""
+        revue_mp = revue.get("marche", {})
+        actes_retires = set()
+        for m in rows(conn, f"""SELECT id, event_id{conf_mp} FROM marches_publics
+                                WHERE event_id IS NOT NULL"""):
+            revu = appliquer_revue(m, revue_mp.get(m["id"]))
+            if revu is None or not confiance_marche_publique(revu):
+                actes_retires.add(m["event_id"])
+        event_rows = [e for e in event_rows if e["id"] not in actes_retires]
     public_events: list[dict] = []
     event_exclusions: list[dict] = []
     textes_extraits: dict[int, str] = {}
@@ -773,7 +789,7 @@ def etape_actes(conn, revue, noms_publics, redige, exclusions) -> dict:
 
 
 def etape_liens_actes(conn, public_ids, public_entities, public_events,
-                      exclusions) -> dict:
+                      exclusions, ei_ids) -> dict:
     # ── Croisements acteur ↔ événement ───────────────────────────────────
     # 6 154 liens existaient en base sans jamais être exportés : la fiche
     # publique d'un acteur n'affichait donc ni les délibérations qui le
@@ -791,6 +807,28 @@ def etape_liens_actes(conn, public_ids, public_entities, public_events,
         if l["event_id"] in public_event_ids and l["entity_id"] in public_ids
     ]
     exclusions["event_links"]["endpoint_not_public"] = len(link_rows) - len(public_links)
+
+    # La fiche d'une entreprise individuelle ne liste pas un acte dont le titre
+    # publié désigne quelqu'un par son rôle (« un particulier »), ni celui où
+    # elle n'est que `demandeur` ou `bénéficiaire` (le flux publié la désigne) : lue avec le titre, elle ré-identifierait la
+    # personne que le titre masque (avis vigie-dpo du 24/11/2026).
+    # `ei_ids` : les fiches de personne physique (1xxx) ou d'EI présumée, produites
+    # par `etape_fiches`.
+    ei = set(ei_ids)
+    # Même décision que `urbanisme.json` : le lien « demandeur » d'un permis dont
+    # le demandeur est retiré (EI, forme inconnue) ne revient pas par la fiche,
+    # que l'entité soit dans `ei_ids` ou non (forme vide sans homonyme).
+    permis_sans_demandeur = evenements_demandeur_retire(conn, ei)
+    titres = {e["id"]: e.get("title") or "" for e in public_events}
+    avant = len(public_links)
+    public_links = [
+        l for l in public_links
+        if not (l["entity_id"] in ei
+                and (l["role"] in ("demandeur", "bénéficiaire", "beneficiaire")
+                     or _DESIGNE_UNE_PERSONNE.search(titres.get(l["event_id"], ""))))
+        and not (l["role"] == "demandeur" and l["event_id"] in permis_sans_demandeur)]
+    if avant != len(public_links):  # pas de clé à zéro : `stats.json` de référence
+        exclusions["event_links"]["ei_acte_masque_ou_demandeur"] = avant - len(public_links)
 
     # ── Portée de chaque acte ────────────────────────────────────────────
     # Après les liens, parce que c'est un acte SANS type d'assemblée connu

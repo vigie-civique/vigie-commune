@@ -35,6 +35,8 @@ import argparse
 import csv
 import io
 import json
+from datetime import datetime, timezone
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -105,6 +107,7 @@ def ensure_table(conn):
             date_achevement TEXT,
             demandeur_nom   TEXT,
             demandeur_siren TEXT,
+            demandeur_cj    TEXT,          -- catégorie juridique (CJ_DEM) : 1000 = EI
             demandeur_entity_id INTEGER REFERENCES entities(id) ON DELETE SET NULL,
             adresse         TEXT,
             lieu_dit        TEXT,
@@ -125,6 +128,9 @@ def ensure_table(conn):
             UNIQUE(num_dau, categorie)
         )
     """)
+    colonnes = {r[1] for r in conn.execute("PRAGMA table_info(urbanisme_autorisations)")}
+    if "demandeur_cj" not in colonnes:   # base antérieure au 24/11/2026
+        conn.execute("ALTER TABLE urbanisme_autorisations ADD COLUMN demandeur_cj TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_urba_insee"
                  " ON urbanisme_autorisations(insee, date_depot)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_urba_cadastre"
@@ -162,7 +168,14 @@ def resolve_datafile(resource_title: str) -> tuple[str, str | None]:
         f"{[r.get('title') for r in meta.get('resources', []) if r.get('format') == 'csv']}")
 
 
-def datafile_columns(rid: str) -> list[str]:
+def _datafile_meta(rid: str, millesime: str | None = None) -> dict:
+    suffixe = "?" + urllib.parse.urlencode({"millesime": millesime}) if millesime else ""
+    req = urllib.request.Request(f"{DIDO}/{rid}{suffixe}", headers=HEADERS)
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.load(r)
+
+
+def datafile_columns(rid: str, millesime: str | None = None) -> list[str]:
     """Colonnes réellement présentes dans le datafile.
 
     Indispensable : les deux fichiers n'ont pas le même schéma (celui des locaux
@@ -170,20 +183,59 @@ def datafile_columns(rid: str) -> list[str]:
     et DIDO renvoie un **400 sans préciser la colonne fautive**. On demande donc
     l'intersection de ce qu'on veut et de ce qui existe.
     """
-    req = urllib.request.Request(f"{DIDO}/{rid}", headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=60) as r:
-        meta = json.load(r)
+    meta = _datafile_meta(rid, millesime)
     return [c["name"] for c in meta.get("columns", []) if c.get("name")]
 
 
-def fetch_rows(rid: str, insee_list: list[str], categorie: str) -> list[dict]:
+def resolve_millesime(rid: str, maintenant: datetime | None = None) -> str | None:
+    """Millésime à lire : None (le courant) s'il est publié, sinon le précédent.
+
+    Constaté le 25/11/2026 : DIDO annonce le millésime suivant (2026-11) avant sa
+    diffusion (27/11, 07:45). Sa fiche n'a alors plus de `columns`, porte un
+    `published` dans le futur, et son CSV répond 400 ; le millésime précédent
+    (`?millesime=2026-10`) reste lisible. On ne replie QUE sur cet embargo : une
+    fiche sans colonnes et déjà « publiée » est une dérive du schéma, que la
+    garde de `fetch_rows` doit refuser. DIDO ne garde qu'un millésime antérieur
+    (404 au-delà) : un seul mois en arrière.
+    """
+    meta = _datafile_meta(rid)
+    if meta.get("columns"):
+        return None
+    try:
+        publie = datetime.fromisoformat(meta["published"].replace("Z", "+00:00"))
+        annee, mois = (int(x) for x in meta["millesime"].split("-"))
+        if publie.tzinfo is None:   # date sans fuseau : lue en UTC
+            publie = publie.replace(tzinfo=timezone.utc)
+    except (KeyError, AttributeError, ValueError):
+        return None   # ni embargo lisible ni millésime lisible : la garde tranchera
+    if publie <= (maintenant or datetime.now(timezone.utc)):
+        return None
+    annee, mois = (annee, mois - 1) if mois > 1 else (annee - 1, 12)
+    precedent = f"{annee:04d}-{mois:02d}"
+    try:
+        colonnes = datafile_columns(rid, precedent)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(
+            f"millésime {meta['millesime']} sous embargo jusqu'au {meta['published']} "
+            f"et millésime {precedent} introuvable (HTTP {e.code}) : rien à lire") from e
+    if not colonnes:
+        raise RuntimeError(
+            f"millésime {meta['millesime']} sous embargo jusqu'au {meta['published']} "
+            f"et millésime {precedent} sans colonnes : rien à lire")
+    print(f"  [sitadel] millésime {meta['millesime']} pas encore diffusé "
+          f"({meta['published']}) : lecture du millésime {precedent}")
+    return precedent
+
+
+def fetch_rows(rid: str, insee_list: list[str], categorie: str,
+               millesime: str | None = None) -> list[dict]:
     """Lignes Sitadel du périmètre, filtrées côté serveur par DIDO.
 
     S'arrête si une colonne attendue manque hors ABSENTES_PREVUES : avant le
     06/11/2026, l'absence était seulement imprimée et la requête partait quand
     même, si bien qu'un renommage au SDES aurait vidé une colonne en silence.
     """
-    dispo = set(datafile_columns(rid))
+    dispo = set(datafile_columns(rid, millesime))
     colonnes = [c for c in COLONNES if c in dispo]
     imprevues = [c for c in COLONNES
                  if c not in dispo and c not in ABSENTES_PREVUES.get(categorie, ())]
@@ -193,7 +245,8 @@ def fetch_rows(rid: str, insee_list: list[str], categorie: str) -> list[dict]:
             f"{', '.join(imprevues)}. Le SDES a changé son schéma : relire "
             f"{DIDO}/{rid}, puis corriger COLONNES ou ABSENTES_PREVUES")
     url = f"{DIDO}/{rid}/csv?" + urllib.parse.urlencode(
-        {"COMM": "in:" + ",".join(insee_list), "columns": ",".join(colonnes)})
+        {"COMM": "in:" + ",".join(insee_list), "columns": ",".join(colonnes),
+         **({"millesime": millesime} if millesime else {})})
     req = urllib.request.Request(url, headers=HEADERS)
     with urllib.request.urlopen(req, timeout=120) as r:
         raw = r.read()
@@ -307,17 +360,18 @@ def import_rows(conn, categorie: str, rows: list[dict]) -> dict:
             INSERT OR IGNORE INTO urbanisme_autorisations
               (num_dau, insee, commune, categorie, type_dau, type_label, etat_dau,
                date_depot, date_autorisation, date_achevement,
-               demandeur_nom, demandeur_siren, demandeur_entity_id,
+               demandeur_nom, demandeur_siren, demandeur_cj, demandeur_entity_id,
                adresse, lieu_dit, cadastre_ref, superficie_terrain, nature_projet,
                nb_logements, nb_logements_demolis, surface_hab_creee, surface_loc_creee,
                residence, res_tourisme, piscine, recours_architecte, event_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (num_dau, insee, commune, categorie, type_dau,
               TYPE_DAU_LABELS.get(type_dau), (row.get("ETAT_DAU") or "").strip() or None,
               date_depot,
               (row.get("DATE_REELLE_AUTORISATION") or "").strip() or None,
               (row.get("DATE_REELLE_DAACT") or "").strip() or None,
-              (row.get("DENOM_DEM") or "").strip() or None, siren, entity_id,
+              (row.get("DENOM_DEM") or "").strip() or None, siren,
+              (row.get("CJ_DEM") or "").strip() or None, entity_id,
               adresse, (row.get("ADR_LIEUDIT_TER") or "").strip() or None,
               cad, _num(row.get("SUPERFICIE_TERRAIN")),
               (row.get("NATURE_PROJET_DECLAREE") or "").strip() or None,
@@ -326,6 +380,14 @@ def import_rows(conn, categorie: str, rows: list[dict]) -> dict:
               residence, (row.get("RES_TOURISME") or "").strip() or None,
               (row.get("I_PISCINE") or "").strip() or None,
               (row.get("REC_ARCHI") or "").strip() or None, event_id))
+        # La catégorie juridique d'une ligne déjà insérée (avant le 24/11/2026,
+        # ou corrigée depuis par le SDES) : la valeur de la source l'emporte.
+        cj = (row.get("CJ_DEM") or "").strip() or None
+        if cj:
+            conn.execute("UPDATE urbanisme_autorisations SET demandeur_cj = ?"
+                         " WHERE num_dau = ? AND categorie = ? AND demandeur_cj IS NOT ?"
+                         "   AND demandeur_siren IS ?",   # même demandeur : nom et SIREN ne bougent pas
+                         (cj, num_dau, categorie, cj, siren))
         res["inseres"] += 1
 
     conn.commit()
@@ -363,14 +425,17 @@ def run(insee_list: list[str] | None = None) -> dict:
         for titre, categorie in RESSOURCES.items():
             try:
                 rid, last_modified = resolve_datafile(titre)
-                rows = fetch_rows(rid, cibles, categorie)
+                millesime = resolve_millesime(rid)
+                rows = fetch_rows(rid, cibles, categorie, millesime)
             except Exception as e:
                 # Format lu par le service local du portail (DETAIL / RESUME).
                 print(f"  [sitadel] {categorie} : échec → {type(e).__name__}: {e}")
                 echecs.append(categorie)
                 continue
             res = import_rows(conn, categorie, rows)
-            res["publication"] = last_modified
+            # Pendant un repli, `last_modified` est celui du millésime courant,
+            # pas de celui qu'on a lu : on n'affirme rien.
+            res["publication"] = None if millesime else last_modified
             total[categorie] = res
             print(f"  [sitadel] {categorie}: {res['lignes']} autorisations, "
                   f"{res['events']} nouveaux événements, "

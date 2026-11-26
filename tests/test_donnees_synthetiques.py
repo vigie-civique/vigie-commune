@@ -36,7 +36,8 @@ def test_la_base_se_declare_fictive_et_n_a_que_des_codes_fictifs(base):
     conn = sqlite3.connect(base)
     assert conn.execute("SELECT avertissement FROM _synthetique").fetchone()[0].startswith("Base FICTIVE")
     assert conn.execute("SELECT COUNT(*) FROM entities WHERE type='person'").fetchone()[0] == 60
-    sirens = [s for (s,) in conn.execute("SELECT siren FROM businesses")]
+    # La mairie (forme 7210, partie publique) n'a pas de SIREN en `businesses`.
+    sirens = [s for (s,) in conn.execute("SELECT siren FROM businesses WHERE siren IS NOT NULL")]
     assert sirens and all(s.startswith("999") for s in sirens)
 
 
@@ -92,7 +93,8 @@ def test_le_generateur_passe_aux_grandes_tailles(tmp_path, taille, graine):
     assert r.returncode == 0, r.stderr[-500:]
     conn = sqlite3.connect(chemin)
     assert conn.execute("SELECT COUNT(*) FROM entities WHERE type='person'").fetchone()[0] == taille
-    assert conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0] == max(8, taille // 3)
+    # + les cinq EI de la règle de publication et la mairie (forme 7210).
+    assert conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0] == max(8, taille // 3) + 6
 
 
 def test_la_sonde_compte_les_fiches_atelier_attestees_par_un_registre(tmp_path):
